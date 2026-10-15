@@ -3,6 +3,7 @@ import {
   RUNTIME_GPU_KEY,
   cudaVisibleAccelerators,
   isCudaVariant,
+  planVramAdmission,
   normalizeRuntimeGpu,
   readRuntimeGpu,
   runtimeGpuChoices,
@@ -104,6 +105,41 @@ describe('runtimeGpuPanelVisible', () => {
     { saveFailed: true },
   ])('shows for %j', (patch) => {
     expect(runtimeGpuPanelVisible({ ...base, ...patch })).toBe(true);
+  });
+});
+
+describe('planVramAdmission', () => {
+  const view = (free: number) => ({ count: free > 0 ? 1 : 0, maxFreeMb: free, freeMb: free, totalMb: free || 0 });
+  const none = view(0);
+
+  it('checks CUDA against the CUDA view and others against the full inventory', () => {
+    // 4 GB visible to CUDA, 24 GB overall
+    const r = planVramAdmission([8000], [], view(4000), view(24000));
+    expect(r.okOne).toBe(false);
+    expect(planVramAdmission([], [8000], view(4000), view(24000)).okOne).toBe(true);
+  });
+
+  it('does not treat missing CUDA telemetry as zero in a mixed run', () => {
+    const r = planVramAdmission([2000], [2000], none, view(24000));
+    expect(r.unknown).toBe(true);
+    expect(r.okAll).toBe(true);
+    expect(r.okOne).toBe(true);
+  });
+
+  it('still enforces the known class when the other is unknown', () => {
+    const r = planVramAdmission([2000], [30000], none, view(24000));
+    expect(r.unknown).toBe(true);
+    expect(r.okOne).toBe(false);
+  });
+
+  it('checks the combined total only when every needed class is known', () => {
+    expect(planVramAdmission([10000], [10000], view(20000), view(15000)).okAll).toBe(false);
+    expect(planVramAdmission([10000], [10000], none, view(15000)).okAll).toBe(true);
+  });
+
+  it('is unknown, not failing, with no telemetry at all', () => {
+    const r = planVramAdmission([5000], [], none, none);
+    expect(r).toMatchObject({ okAll: true, okOne: true, unknown: true, displayView: 'cuda' });
   });
 });
 

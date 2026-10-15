@@ -81,6 +81,61 @@ export function runtimeGpuPanelVisible(state: {
   return state.choiceCount > 1 || !!state.current || !!state.appliedAtLaunch || state.saveFailed;
 }
 
+export interface VramView {
+  count: number;
+  maxFreeMb: number;
+  freeMb: number;
+  totalMb: number;
+}
+
+/** Free VRAM and headroom for one view; telemetry is `known` only when it reports free memory. */
+export function vramBudgetOf(v: VramView): { free: number; budget: number; known: boolean } {
+  const free = v.maxFreeMb > 0 ? v.maxFreeMb : v.freeMb;
+  const headroom = Math.min(512, Math.round((v.totalMb || free) * 0.08) || 256);
+  return { free, budget: Math.max(0, free - headroom), known: v.count > 0 && free > 0 };
+}
+
+/**
+ * Admission for pending GPU slots, split by provider class. CUDA slots are checked against the
+ * CUDA-visible view and other providers against the full inventory. A class without telemetry is
+ * not checked (it warns via `unknown`) instead of counting as zero capacity, and the combined
+ * check runs only when every needed class is known.
+ */
+export function planVramAdmission(
+  cudaNeedsMb: ReadonlyArray<number>,
+  otherNeedsMb: ReadonlyArray<number>,
+  cudaView: VramView,
+  allView: VramView,
+): { okAll: boolean; okOne: boolean; unknown: boolean; displayView: 'cuda' | 'all' } {
+  const sum = (l: ReadonlyArray<number>) => l.reduce((a, b) => a + b, 0);
+  const max = (l: ReadonlyArray<number>) => l.reduce((a, b) => Math.max(a, b), 0);
+  const hasCuda = cudaNeedsMb.length > 0;
+  const hasOther = otherNeedsMb.length > 0;
+  const cuda = vramBudgetOf(cudaView);
+  const all = vramBudgetOf(allView);
+  const cudaKnown = !hasCuda || cuda.known;
+  const otherKnown = !hasOther || all.known;
+  let okAll = true;
+  let okOne = true;
+  if (hasCuda && cuda.known) {
+    okAll &&= sum(cudaNeedsMb) <= cuda.budget;
+    okOne &&= max(cudaNeedsMb) <= cuda.budget;
+  }
+  if (hasOther && all.known) {
+    okAll &&= sum(otherNeedsMb) <= all.budget;
+    okOne &&= max(otherNeedsMb) <= all.budget;
+  }
+  if (hasCuda && hasOther && cudaKnown && otherKnown) {
+    okAll &&= sum(cudaNeedsMb) + sum(otherNeedsMb) <= all.budget;
+  }
+  return {
+    okAll,
+    okOne,
+    unknown: !cudaKnown || !otherKnown,
+    displayView: hasCuda && !hasOther ? 'cuda' : 'all',
+  };
+}
+
 /**
  * Whether a variant runs on the CUDA execution provider, from its provider name or variant id
  * (`…-cuda-gpu:4`). Unknown means unknown: callers should not apply a CUDA restriction to it.

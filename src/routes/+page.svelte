@@ -200,7 +200,7 @@
     startupWebToolsPatch,
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
-  import { readRuntimeGpu, writeRuntimeGpu, runtimeGpuChoices, runtimeGpuPanelVisible, cudaVisibleAccelerators, isCudaVariant } from "$lib/runtime-gpu";
+  import { readRuntimeGpu, writeRuntimeGpu, runtimeGpuChoices, runtimeGpuPanelVisible, cudaVisibleAccelerators, isCudaVariant, planVramAdmission, vramBudgetOf } from "$lib/runtime-gpu";
   import { decideChipFetchHop, detectFetchableUrls, isFetchableUrl } from "$lib/url-chips";
   import {
     conversationImagePreviewPartIndexes,
@@ -4515,10 +4515,6 @@ updateStateFromSdk();
     );
     const vramAll = getGpuVramSummary(false);
     const vramCuda = getGpuVramSummary(true);
-    const budgetOf = (v: { maxFreeMb: number; freeMb: number; totalMb: number }) => {
-      const free = v.maxFreeMb > 0 ? v.maxFreeMb : v.freeMb;
-      return { free, budget: Math.max(0, free - (Math.min(512, Math.round((v.totalMb || free) * 0.08) || 256))) };
-    };
     const perSlot = slots.map((slot) => {
       const est = estimateSlotDeviceMb(slot);
       return {
@@ -4540,29 +4536,27 @@ updateStateFromSdk();
     const needOneVramMb = gpuPending.reduce((max, s) => Math.max(max, s.deviceMb), 0);
     const cudaPending = gpuPending.filter((s) => s.cuda);
     const otherPending = gpuPending.filter((s) => !s.cuda);
-    const sumOf = (list: typeof gpuPending) => list.reduce((sum, s) => sum + s.deviceMb, 0);
-    const maxOf = (list: typeof gpuPending) => list.reduce((max, s) => Math.max(max, s.deviceMb), 0);
+    const admission = planVramAdmission(
+      cudaPending.map((s) => s.deviceMb),
+      otherPending.map((s) => s.deviceMb),
+      vramCuda,
+      vramAll,
+    );
 
-    // Report the CUDA view only when every pending GPU slot is CUDA; mixed runs keep the full inventory.
-    const vram = cudaPending.length > 0 && otherPending.length === 0 ? vramCuda : vramAll;
-    const { free: freeVramMb, budget: vramBudget } = budgetOf(vram);
-    const cudaBudget = budgetOf(vramCuda).budget;
-    const allBudget = budgetOf(vramAll).budget;
+    // Display the CUDA view only when every pending GPU slot is CUDA; mixed runs show the full inventory.
+    const vram = admission.displayView === "cuda" ? vramCuda : vramAll;
+    const { free: freeVramMb } = vramBudgetOf(vram);
 
     const ramBudget = Math.max(0, freeRamMb - headroomRamMb);
     const hasGpuSlots = perSlot.some((s) => s.target === "gpu");
     const vramAvailable = vram.count > 0 && freeVramMb > 0;
-    // If we have GPU slots but no VRAM telemetry, don't hard-fail — warn via vramUnknown.
-    const vramUnknown = hasGpuSlots && !vramAvailable;
+    // Missing telemetry for any class that needs it warns (vramUnknown) rather than failing.
+    const vramUnknown = hasGpuSlots && (!vramAvailable || admission.unknown);
 
     const ramOkAll = needAllRamMb <= ramBudget;
     const ramOkOne = needOneRamMb <= ramBudget;
-    // Each provider class is checked against its own view; the combined total must also fit the
-    // unrestricted inventory so a mixed run cannot double-book the same card.
-    const vramOkAll =
-      !hasGpuSlots || vramUnknown || (sumOf(cudaPending) <= cudaBudget && sumOf(otherPending) <= allBudget && needAllVramMb <= allBudget);
-    const vramOkOne =
-      !hasGpuSlots || vramUnknown || (maxOf(cudaPending) <= cudaBudget && maxOf(otherPending) <= allBudget);
+    const vramOkAll = !hasGpuSlots || admission.okAll;
+    const vramOkOne = !hasGpuSlots || admission.okOne;
 
     return {
       freeRamMb,
