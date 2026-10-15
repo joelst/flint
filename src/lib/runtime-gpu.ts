@@ -54,7 +54,14 @@ export function runtimeGpuChoices(
   const choices: GpuChoice[] = [];
   for (const a of accelerators ?? []) {
     if (a.kind !== 'gpu' || !a.deviceId || !normalizeRuntimeGpu(a.deviceId).startsWith('GPU-')) continue;
-    choices.push({ deviceId: a.deviceId, label: a.name });
+    const repeatedName = (accelerators ?? []).some((other) =>
+      other.deviceId !== a.deviceId && other.kind === 'gpu' && other.name === a.name &&
+      normalizeRuntimeGpu(other.deviceId).startsWith('GPU-'),
+    );
+    choices.push({
+      deviceId: a.deviceId,
+      label: repeatedName ? `${a.name} (${a.deviceId})` : a.name,
+    });
   }
   return choices;
 }
