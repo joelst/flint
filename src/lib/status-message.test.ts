@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { errorText, failureLogLine, summarizeFailure } from "./status-message";
+import { errorText, failureLogLine, failureNotice, summarizeFailure } from "./status-message";
 
 const NATIVE_LOAD_ERROR = new Error(
   [
@@ -11,7 +11,7 @@ const NATIVE_LOAD_ERROR = new Error(
 );
 
 describe("summarizeFailure", () => {
-  it("puts CUDA recovery advice ahead of generic operation-outcome text and native frames", () => {
+  it("keeps the CUDA status line short and moves the advice into a notice", () => {
     const detail = "genai_model_instance.cc:204 failed to load model smollm3-3b-cuda-gpu:1: " +
       "Failed to create allocator for CUDA: No requested allocator available";
     const error = new Error(
@@ -19,10 +19,21 @@ describe("summarizeFailure", () => {
     );
     const summary = summarizeFailure("Load failed", error);
     expect(summary).toMatch(/^Load failed: CUDA could not initialize a GPU allocator/);
-    expect(summary).toContain("CUDA_VISIBLE_DEVICES=0");
+    expect(summary.length).toBeLessThan(100);
     expect(summary).not.toContain("genai_model_instance");
     expect(summary).not.toContain("Any part");
     expect(failureLogLine("Load failed", error)).toContain(detail);
+
+    const notice = failureNotice("Load failed", error);
+    expect(notice?.title).toBe("Load failed: CUDA allocator unavailable");
+    expect(notice?.advice).toContain("Runtime GPU");
+    expect(notice?.advice).toContain("Recheck Providers");
+    expect(notice?.advice).not.toContain("genai_model_instance");
+  });
+
+  it("offers no notice for failures the status line already covers", () => {
+    expect(failureNotice("Load failed", NATIVE_LOAD_ERROR)).toBeNull();
+    expect(failureNotice("Load failed", null)).toBeNull();
   });
 
   it("keeps the whole sentence rather than truncating to the visible width", () => {

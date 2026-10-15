@@ -77,7 +77,7 @@
     type CacheInventory,
   } from "$lib/sdk";
   import { evaluateStartupPreload, publishedAccelerationKind, publishedAccelerationLabels } from "$lib/accelerator-readiness";
-  import { failureLogLine, summarizeFailure } from "$lib/status-message";
+  import { failureLogLine, failureNotice, summarizeFailure, type FailureNotice } from "$lib/status-message";
   import {
     evaluate as evaluateWatch,
     emptyWatchState,
@@ -979,8 +979,12 @@
       if (tracked) loggedFailures.add(error as object);
     }
     statusMessage = summarizeFailure(prefix, error);
+    const notice = failureNotice(prefix, error);
+    if (notice) loadFailureNotice = notice;
     return statusMessage;
   }
+
+  let loadFailureNotice = $state<FailureNotice | null>(null);
 
   // Mirror of SDK store for easy template access
   let state = $state({
@@ -9117,6 +9121,18 @@ Output only the summary text, no preamble.`;
     </div>
   {/if}
 
+  {#if loadFailureNotice}
+    <!-- Long recovery advice does not fit the one-line status bar, which would clip it. -->
+    <div class="memory-alert failure-notice" role="alert">
+      <Icon name="monitor" size={16} />
+      <div class="memory-alert-text">
+        <strong>{loadFailureNotice.title}</strong>
+        <span>{loadFailureNotice.advice}</span>
+      </div>
+      <button class="small secondary" onclick={() => (loadFailureNotice = null)}>Dismiss</button>
+    </div>
+  {/if}
+
   <div class="body">
     <nav class="sidebar" class:collapsed={sidebarCollapsed}>
       <button
@@ -16886,6 +16902,8 @@ Output only the summary text, no preamble.`;
 .memory-alert-text { display: flex; flex-direction: column; gap: 0.1rem; flex: 1; min-width: 0; }
 .memory-alert-text strong { font-weight: 600; }
 .memory-alert-text span { color: var(--text-muted); font-size: 0.8rem; }
+.failure-notice { align-items: flex-start; }
+.failure-notice .memory-alert-text span { overflow-wrap: anywhere; }
 
 .memory-settings { display: flex; flex-direction: column; gap: 0.5rem; }
 .memory-setting { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }
