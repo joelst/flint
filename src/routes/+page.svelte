@@ -4454,7 +4454,7 @@ updateStateFromSdk();
     // value); other providers (DirectML, WebGPU) keep the unrestricted inventory.
     const all = state.poolStats?.accelerators || [];
     const gpus = (cudaOnly ? cudaVisibleAccelerators(all, runtimeGpuApplied) : all).filter(
-      (a) => a.kind === "gpu",
+      (a) => a.kind === "gpu" && (!cudaOnly || a.vendor === "nvidia"),
     );
     let totalMb = 0;
     let freeMb = 0;
