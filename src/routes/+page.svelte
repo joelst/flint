@@ -4513,6 +4513,8 @@ updateStateFromSdk();
     vramOkAll: boolean;
     vramOkOne: boolean;
     vramUnknown: boolean;
+    vramAllFailureDetails: string[];
+    vramOneFailureDetails: string[];
   };
 
   function buildCompareMemoryPlan(slots: CompareSlot[]): CompareMemPlan {
@@ -4551,6 +4553,20 @@ updateStateFromSdk();
       vramCuda,
       vramAll,
     );
+    const describeVramFailure = (failure: (typeof admission.allFailures)[number]) => {
+      const view = failure.view === "cuda" ? vramCuda : vramAll;
+      const device =
+        failure.provider === "combined"
+          ? "combined GPU inventory"
+          : failure.provider === "cuda"
+            ? view.names.length === 1
+              ? `CUDA GPU ${view.names[0]}`
+              : "best CUDA-visible GPU"
+            : view.names.length === 1
+              ? `GPU ${view.names[0]} for non-CUDA providers`
+              : "GPU inventory for non-CUDA providers";
+      return `${device}: need ~${formatMbShort(failure.needMb)}, usable budget ~${formatMbShort(failure.budgetMb)}`;
+    };
 
     // Display the CUDA view only when every pending GPU slot is CUDA; mixed runs show the full inventory.
     const vram = admission.displayView === "cuda" ? vramCuda : vramAll;
@@ -4587,6 +4603,8 @@ updateStateFromSdk();
       vramOkAll,
       vramOkOne,
       vramUnknown,
+      vramAllFailureDetails: admission.allFailures.map(describeVramFailure),
+      vramOneFailureDetails: admission.oneFailures.map(describeVramFailure),
     };
   }
 
@@ -4809,9 +4827,7 @@ updateStateFromSdk();
         );
       }
       if (!plan.vramOkOne) {
-        parts.push(
-          `GPU VRAM: free ~${formatMbShort(plan.freeVramMb)} on best GPU (need ~${formatMbShort(plan.needOneVramMb)} for largest GPU model)`,
-        );
+        parts.push(...plan.vramOneFailureDetails);
       }
       return (
         `Not enough free memory for this arena run. ${parts.join(" · ")}. ` +
@@ -4826,7 +4842,7 @@ updateStateFromSdk();
         why.push(`RAM need ~${formatMbShort(plan.needAllRamMb)} vs free ${formatMbShort(plan.freeRamMb)}`);
       }
       if (!plan.vramOkAll) {
-        why.push(`VRAM need ~${formatMbShort(plan.needAllVramMb)} vs free ${formatMbShort(plan.freeVramMb)}`);
+        why.push(...plan.vramAllFailureDetails);
       }
       statusMessage =
         `Not enough memory to keep all models loaded (${why.join("; ")}). ` +

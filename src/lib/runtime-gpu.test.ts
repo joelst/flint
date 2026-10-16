@@ -125,6 +125,12 @@ describe('planVramAdmission', () => {
     expect(planVramAdmission([], [8000], view(4000), view(24000)).okOne).toBe(true);
   });
 
+  it('reports the failing provider budget in a mixed run', () => {
+    const r = planVramAdmission([8000], [10000], view(4000), view(24000));
+    expect(r.oneFailures).toEqual([{ view: 'cuda', provider: 'cuda', needMb: 8000, budgetMb: 3680 }]);
+    expect(r.allFailures).toEqual(r.oneFailures);
+  });
+
   it('does not treat missing CUDA telemetry as zero in a mixed run', () => {
     const r = planVramAdmission([2000], [2000], none, view(24000));
     expect(r.unknown).toBe(true);
@@ -139,7 +145,14 @@ describe('planVramAdmission', () => {
   });
 
   it('checks the combined total only when every needed class is known', () => {
-    expect(planVramAdmission([10000], [10000], view(20000), view(15000)).okAll).toBe(false);
+    const known = planVramAdmission([10000], [10000], view(20000), view(15000));
+    expect(known.okAll).toBe(false);
+    expect(known.allFailures).toContainEqual({
+      view: 'all',
+      provider: 'combined',
+      needMb: 20000,
+      budgetMb: 14488,
+    });
     expect(planVramAdmission([10000], [10000], none, view(15000)).okAll).toBe(true);
   });
 

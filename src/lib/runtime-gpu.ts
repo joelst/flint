@@ -89,6 +89,13 @@ export interface VramView {
   telemetryKnown: boolean;
 }
 
+export interface VramAdmissionFailure {
+  view: 'cuda' | 'all';
+  provider: 'cuda' | 'other' | 'combined';
+  needMb: number;
+  budgetMb: number;
+}
+
 /** Free VRAM and headroom for one view; zero free memory is still known telemetry. */
 export function vramBudgetOf(v: VramView): { free: number; budget: number; known: boolean } {
   const free = v.maxFreeMb > 0 ? v.maxFreeMb : v.freeMb;
@@ -107,7 +114,14 @@ export function planVramAdmission(
   otherNeedsMb: ReadonlyArray<number>,
   cudaView: VramView,
   allView: VramView,
-): { okAll: boolean; okOne: boolean; unknown: boolean; displayView: 'cuda' | 'all' } {
+): {
+  okAll: boolean;
+  okOne: boolean;
+  unknown: boolean;
+  displayView: 'cuda' | 'all';
+  allFailures: VramAdmissionFailure[];
+  oneFailures: VramAdmissionFailure[];
+} {
   const sum = (l: ReadonlyArray<number>) => l.reduce((a, b) => a + b, 0);
   const max = (l: ReadonlyArray<number>) => l.reduce((a, b) => Math.max(a, b), 0);
   const hasCuda = cudaNeedsMb.length > 0;
@@ -116,24 +130,41 @@ export function planVramAdmission(
   const all = vramBudgetOf(allView);
   const cudaKnown = !hasCuda || cuda.known;
   const otherKnown = !hasOther || all.known;
-  let okAll = true;
-  let okOne = true;
+  const allFailures: VramAdmissionFailure[] = [];
+  const oneFailures: VramAdmissionFailure[] = [];
   if (hasCuda && cuda.known) {
-    okAll &&= sum(cudaNeedsMb) <= cuda.budget;
-    okOne &&= max(cudaNeedsMb) <= cuda.budget;
+    const needAll = sum(cudaNeedsMb);
+    const needOne = max(cudaNeedsMb);
+    if (needAll > cuda.budget) {
+      allFailures.push({ view: 'cuda', provider: 'cuda', needMb: needAll, budgetMb: cuda.budget });
+    }
+    if (needOne > cuda.budget) {
+      oneFailures.push({ view: 'cuda', provider: 'cuda', needMb: needOne, budgetMb: cuda.budget });
+    }
   }
   if (hasOther && all.known) {
-    okAll &&= sum(otherNeedsMb) <= all.budget;
-    okOne &&= max(otherNeedsMb) <= all.budget;
+    const needAll = sum(otherNeedsMb);
+    const needOne = max(otherNeedsMb);
+    if (needAll > all.budget) {
+      allFailures.push({ view: 'all', provider: 'other', needMb: needAll, budgetMb: all.budget });
+    }
+    if (needOne > all.budget) {
+      oneFailures.push({ view: 'all', provider: 'other', needMb: needOne, budgetMb: all.budget });
+    }
   }
   if (hasCuda && hasOther && cudaKnown && otherKnown) {
-    okAll &&= sum(cudaNeedsMb) + sum(otherNeedsMb) <= all.budget;
+    const needAll = sum(cudaNeedsMb) + sum(otherNeedsMb);
+    if (needAll > all.budget) {
+      allFailures.push({ view: 'all', provider: 'combined', needMb: needAll, budgetMb: all.budget });
+    }
   }
   return {
-    okAll,
-    okOne,
+    okAll: allFailures.length === 0,
+    okOne: oneFailures.length === 0,
     unknown: !cudaKnown || !otherKnown,
     displayView: hasCuda && !hasOther ? 'cuda' : 'all',
+    allFailures,
+    oneFailures,
   };
 }
 
