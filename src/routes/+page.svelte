@@ -77,7 +77,7 @@
     type CacheInventory,
   } from "$lib/sdk";
   import { evaluateStartupPreload, publishedAccelerationKind, publishedAccelerationLabels } from "$lib/accelerator-readiness";
-  import { failureLogLine, summarizeFailure } from "$lib/status-message";
+  import { failureLogLine, failureNotice, summarizeFailure, type FailureNotice } from "$lib/status-message";
   import {
     evaluate as evaluateWatch,
     emptyWatchState,
@@ -200,6 +200,7 @@
     startupWebToolsPatch,
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
+  import { readRuntimeGpu, writeRuntimeGpu, runtimeGpuChoices, runtimeGpuPanelVisible, runtimeGpuRestartRequired, cudaVisibleAccelerators, isCudaVariant, planVramAdmission, vramBudgetOf } from "$lib/runtime-gpu";
   import { decideChipFetchHop, detectFetchableUrls, isFetchableUrl } from "$lib/url-chips";
   import {
     conversationImagePreviewPartIndexes,
@@ -978,8 +979,12 @@
       if (tracked) loggedFailures.add(error as object);
     }
     statusMessage = summarizeFailure(prefix, error);
+    const notice = failureNotice(prefix, error);
+    if (notice) loadFailureNotice = notice;
     return statusMessage;
   }
+
+  let loadFailureNotice = $state<FailureNotice | null>(null);
 
   // Mirror of SDK store for easy template access
   let state = $state({
@@ -1004,12 +1009,30 @@
     audioLaneModel: undefined as string | undefined,
     pool: [] as any[],
     poolStats: null as any,
+    runtimeGpuApplied: null as string | null,
+    runtimeGpuAppliedSource: null as "configured" | "inherited" | "unrestricted" | null,
   });
 
   // Recommended starters
   let recommendedStarters = $state([] as ModelInfo[]);
   let isLoadingRecommendations = $state(false);
   let selectedAccelerationPreference = $state<string>("auto");
+  // The selector the live runtime child was actually spawned with (published by the SDK per
+  // spawn, including crash recovery). Before any child exists, the saved value is what a start
+  // would use.
+  const savedRuntimeGpuAtLoad = readRuntimeGpu(localStorage);
+  const runtimeGpuApplied = $derived(state.runtimeGpuApplied ?? savedRuntimeGpuAtLoad);
+  const runtimeGpuAppliedSource = $derived(
+    state.runtimeGpuAppliedSource ?? (savedRuntimeGpuAtLoad ? "configured" : null),
+  );
+  let runtimeGpu = $state<string>(savedRuntimeGpuAtLoad);
+  let runtimeGpuSaveFailed = $state(false);
+  const runtimeGpuOptions = $derived(runtimeGpuChoices(state.poolStats?.accelerators));
+
+  function setRuntimeGpu(value: string) {
+    runtimeGpu = value;
+    runtimeGpuSaveFailed = !writeRuntimeGpu(localStorage, value);
+  }
   let cacheInventory = $state<CacheInventory | null>(null);
   let cacheInventoryLoading = $state(false);
   let hostPlatform = $state<"windows" | "macos" | "linux" | "unknown">("unknown");
@@ -3064,6 +3087,8 @@
     state.audioLaneModel = s.audioLaneModel;
     state.pool = s.pool ?? [];
     state.poolStats = s.poolStats ?? null;
+    state.runtimeGpuApplied = s.runtimeGpuApplied ?? null;
+    state.runtimeGpuAppliedSource = s.runtimeGpuAppliedSource ?? null;
     sidecarLogs = s.logs ?? [];
   }
 
@@ -4318,7 +4343,7 @@ updateStateFromSdk();
   }
 
   /** Infer where a compare slot will load: CPU system RAM vs GPU VRAM vs NPU. */
-  function resolveSlotTarget(slot: CompareSlot): "cpu" | "gpu" | "npu" | "unknown" {
+  function resolveSlotRuntime(slot: CompareSlot): { device: string; ep: string; variantId: string } {
     const model = state.models.find((m: ModelInfo) => m.alias === slot.alias);
     let device = String(slot.deviceType || "").toLowerCase();
     let ep = String(slot.executionProvider || "").toLowerCase();
@@ -4339,6 +4364,11 @@ updateStateFromSdk();
       if (!variantId) variantId = String(model.info?.id || model.info?.info?.id || "").toLowerCase();
     }
 
+    return { device, ep, variantId };
+  }
+
+  function resolveSlotTarget(slot: CompareSlot): "cpu" | "gpu" | "npu" | "unknown" {
+    const { device, ep, variantId } = resolveSlotRuntime(slot);
     const kind = publishedAccelerationKind({
       id: variantId,
       deviceType: device,
@@ -4348,6 +4378,11 @@ updateStateFromSdk();
     if (kind === "NPU") return "npu";
     if (kind === "CPU") return "cpu";
     return "unknown";
+  }
+
+  function slotUsesCuda(slot: CompareSlot): boolean {
+    const { ep, variantId } = resolveSlotRuntime(slot);
+    return isCudaVariant(ep, variantId);
   }
 
   function slotTargetLabel(target: "cpu" | "gpu" | "npu" | "unknown"): string {
@@ -4412,34 +4447,43 @@ updateStateFromSdk();
     return `${Math.round(mb)} MB`;
   }
 
-  function getGpuVramSummary(): {
+  function getGpuVramSummary(cudaOnly: boolean): {
     totalMb: number;
     freeMb: number;
     usedMb: number;
     count: number;
     maxFreeMb: number;
     names: string[];
+    telemetryKnown: boolean;
   } {
-    const gpus = (state.poolStats?.accelerators || []).filter((a) => a.kind === "gpu");
+    // CUDA loads see only the selector the running child was spawned with (not the pending picker
+    // value); other providers (DirectML, WebGPU) keep the unrestricted inventory.
+    const all = state.poolStats?.accelerators || [];
+    const gpus = (cudaOnly ? cudaVisibleAccelerators(all, runtimeGpuApplied) : all).filter(
+      (a) => a.kind === "gpu" && (!cudaOnly || a.vendor === "nvidia"),
+    );
     let totalMb = 0;
     let freeMb = 0;
     let usedMb = 0;
     let maxFreeMb = 0;
+    let telemetryKnown = false;
     const names: string[] = [];
     for (const g of gpus) {
       names.push(g.name);
       if (g.totalMb != null) totalMb += g.totalMb;
       if (g.freeMb != null) {
+        telemetryKnown = true;
         freeMb += g.freeMb;
         maxFreeMb = Math.max(maxFreeMb, g.freeMb);
       } else if (g.totalMb != null && g.usedMb != null) {
+        telemetryKnown = true;
         const f = Math.max(0, g.totalMb - g.usedMb);
         freeMb += f;
         maxFreeMb = Math.max(maxFreeMb, f);
       }
       if (g.usedMb != null) usedMb += g.usedMb;
     }
-    return { totalMb, freeMb, usedMb, count: gpus.length, maxFreeMb, names };
+    return { totalMb, freeMb, usedMb, count: gpus.length, maxFreeMb, names, telemetryKnown };
   }
 
   type CompareMemPlan = {
@@ -4469,6 +4513,8 @@ updateStateFromSdk();
     vramOkAll: boolean;
     vramOkOne: boolean;
     vramUnknown: boolean;
+    vramAllFailureDetails: string[];
+    vramOneFailureDetails: string[];
   };
 
   function buildCompareMemoryPlan(slots: CompareSlot[]): CompareMemPlan {
@@ -4478,12 +4524,8 @@ updateStateFromSdk();
       Math.max(1536, Math.round(totalRamMb * 0.12) || 1536),
       Math.max(2048, Math.round(totalRamMb * 0.25) || 2048),
     );
-    const vram = getGpuVramSummary();
-    // Prefer max free on a single GPU (models typically bind one device).
-    // Fall back to summed free if max is 0 but sum > 0.
-    const freeVramMb = vram.maxFreeMb > 0 ? vram.maxFreeMb : vram.freeMb;
-    const headroomVramMb = Math.min(512, Math.round((vram.totalMb || freeVramMb) * 0.08) || 256);
-
+    const vramAll = getGpuVramSummary(false);
+    const vramCuda = getGpuVramSummary(true);
     const perSlot = slots.map((slot) => {
       const est = estimateSlotDeviceMb(slot);
       return {
@@ -4493,6 +4535,7 @@ updateStateFromSdk();
         deviceMb: est.deviceMb,
         hostRamMb: est.hostRamMb,
         alreadyLoaded: isSlotInPool(slot),
+        cuda: est.target === "gpu" && slotUsesCuda(slot),
       };
     });
 
@@ -4502,18 +4545,43 @@ updateStateFromSdk();
     const gpuPending = pending.filter((s) => s.target === "gpu");
     const needAllVramMb = gpuPending.reduce((sum, s) => sum + s.deviceMb, 0);
     const needOneVramMb = gpuPending.reduce((max, s) => Math.max(max, s.deviceMb), 0);
+    const cudaPending = gpuPending.filter((s) => s.cuda);
+    const otherPending = gpuPending.filter((s) => !s.cuda);
+    const admission = planVramAdmission(
+      cudaPending.map((s) => s.deviceMb),
+      otherPending.map((s) => s.deviceMb),
+      vramCuda,
+      vramAll,
+    );
+    const describeVramFailure = (failure: (typeof admission.allFailures)[number]) => {
+      const view = failure.view === "cuda" ? vramCuda : vramAll;
+      const device =
+        failure.provider === "combined"
+          ? "combined GPU inventory"
+          : failure.provider === "cuda"
+            ? view.names.length === 1
+              ? `CUDA GPU ${view.names[0]}`
+              : "best CUDA-visible GPU"
+            : view.names.length === 1
+              ? `GPU ${view.names[0]} for non-CUDA providers`
+              : "GPU inventory for non-CUDA providers";
+      return `${device}: need ~${formatMbShort(failure.needMb)}, usable budget ~${formatMbShort(failure.budgetMb)}`;
+    };
+
+    // Display the CUDA view only when every pending GPU slot is CUDA; mixed runs show the full inventory.
+    const vram = admission.displayView === "cuda" ? vramCuda : vramAll;
+    const { free: freeVramMb } = vramBudgetOf(vram);
 
     const ramBudget = Math.max(0, freeRamMb - headroomRamMb);
-    const vramBudget = Math.max(0, freeVramMb - headroomVramMb);
     const hasGpuSlots = perSlot.some((s) => s.target === "gpu");
-    const vramAvailable = vram.count > 0 && freeVramMb > 0;
-    // If we have GPU slots but no VRAM telemetry, don't hard-fail — warn via vramUnknown.
-    const vramUnknown = hasGpuSlots && !vramAvailable;
+    const vramAvailable = vramBudgetOf(vram).known;
+    // Missing telemetry for any class that needs it warns (vramUnknown) rather than failing.
+    const vramUnknown = hasGpuSlots && (!vramAvailable || admission.unknown);
 
     const ramOkAll = needAllRamMb <= ramBudget;
     const ramOkOne = needOneRamMb <= ramBudget;
-    const vramOkAll = !hasGpuSlots || vramUnknown || needAllVramMb <= vramBudget;
-    const vramOkOne = !hasGpuSlots || vramUnknown || needOneVramMb <= vramBudget;
+    const vramOkAll = !hasGpuSlots || admission.okAll;
+    const vramOkOne = !hasGpuSlots || admission.okOne;
 
     return {
       freeRamMb,
@@ -4535,6 +4603,8 @@ updateStateFromSdk();
       vramOkAll,
       vramOkOne,
       vramUnknown,
+      vramAllFailureDetails: admission.allFailures.map(describeVramFailure),
+      vramOneFailureDetails: admission.oneFailures.map(describeVramFailure),
     };
   }
 
@@ -4757,9 +4827,7 @@ updateStateFromSdk();
         );
       }
       if (!plan.vramOkOne) {
-        parts.push(
-          `GPU VRAM: free ~${formatMbShort(plan.freeVramMb)} on best GPU (need ~${formatMbShort(plan.needOneVramMb)} for largest GPU model)`,
-        );
+        parts.push(...plan.vramOneFailureDetails);
       }
       return (
         `Not enough free memory for this arena run. ${parts.join(" · ")}. ` +
@@ -4774,7 +4842,7 @@ updateStateFromSdk();
         why.push(`RAM need ~${formatMbShort(plan.needAllRamMb)} vs free ${formatMbShort(plan.freeRamMb)}`);
       }
       if (!plan.vramOkAll) {
-        why.push(`VRAM need ~${formatMbShort(plan.needAllVramMb)} vs free ${formatMbShort(plan.freeVramMb)}`);
+        why.push(...plan.vramAllFailureDetails);
       }
       statusMessage =
         `Not enough memory to keep all models loaded (${why.join("; ")}). ` +
@@ -4806,11 +4874,11 @@ updateStateFromSdk();
       Math.max(2048, Math.round(totalRamMb * 0.25) || 2048),
     );
     const ramBudget = Math.max(0, freeRamMb - headroomRamMb);
-    const vram = getGpuVramSummary();
+    const vram = getGpuVramSummary(est.target === "gpu" && slotUsesCuda(slot));
     const freeVramMb = vram.maxFreeMb > 0 ? vram.maxFreeMb : vram.freeMb;
     const headroomVramMb = Math.min(512, Math.round((vram.totalMb || freeVramMb) * 0.08) || 256);
     const vramBudget = Math.max(0, freeVramMb - headroomVramMb);
-    const vramKnown = vram.count > 0 && freeVramMb > 0;
+    const vramKnown = vramBudgetOf(vram).known;
 
     const parts: string[] = [];
 
@@ -9105,6 +9173,18 @@ Output only the summary text, no preamble.`;
     </div>
   {/if}
 
+  {#if loadFailureNotice}
+    <!-- Long recovery advice does not fit the one-line status bar, which would clip it. -->
+    <div class="memory-alert failure-notice" role="alert">
+      <Icon name="monitor" size={16} />
+      <div class="memory-alert-text">
+        <strong>{loadFailureNotice.title}</strong>
+        <span>{loadFailureNotice.advice}</span>
+      </div>
+      <button class="small secondary" onclick={() => (loadFailureNotice = null)}>Dismiss</button>
+    </div>
+  {/if}
+
   <div class="body">
     <nav class="sidebar" class:collapsed={sidebarCollapsed}>
       <button
@@ -9535,6 +9615,41 @@ Output only the summary text, no preamble.`;
                     </span>
                   {/each}
                 </div>
+              {/if}
+              {#if runtimeGpuPanelVisible({ choiceCount: runtimeGpuOptions.length, current: runtimeGpu, appliedAtLaunch: runtimeGpuApplied, saveFailed: runtimeGpuSaveFailed })}
+                <div class="accel-panel-row">
+                  <label for="runtime-gpu">CUDA GPU</label>
+                  <select
+                    id="runtime-gpu"
+                    value={runtimeGpu}
+                    onchange={(e) => setRuntimeGpu((e.currentTarget as HTMLSelectElement).value)}
+                  >
+                    <option value="">
+                      {runtimeGpuAppliedSource === "inherited"
+                        ? "Inherited CUDA visibility"
+                        : "No Flint override (inherit environment)"}
+                    </option>
+                    {#each runtimeGpuOptions as gpu (gpu.deviceId)}
+                      <option value={gpu.deviceId}>{gpu.label}</option>
+                    {/each}
+                    {#if runtimeGpu && !runtimeGpuOptions.some((g) => g.deviceId === runtimeGpu)}
+                      <option value={runtimeGpu}>{runtimeGpu} (saved)</option>
+                    {/if}
+                  </select>
+                </div>
+                <p class="muted">
+                  Limits which NVIDIA GPU CUDA can use; DirectML and WebGPU are not affected. If CUDA fails with
+                  “No requested allocator available” while more than one GPU is installed, pick one here.
+                  {#if runtimeGpuAppliedSource === "inherited"}
+                    The current runtime inherited CUDA_VISIBLE_DEVICES={runtimeGpuApplied || "(empty)"}.
+                  {/if}
+                  {#if runtimeGpuRestartRequired(runtimeGpu, runtimeGpuApplied, runtimeGpuAppliedSource)}
+                    Restart Flint for this to take effect.
+                  {/if}
+                  {#if runtimeGpuSaveFailed}
+                    The choice could not be saved.
+                  {/if}
+                </p>
               {/if}
             </div>
 
@@ -16846,6 +16961,8 @@ Output only the summary text, no preamble.`;
 .memory-alert-text { display: flex; flex-direction: column; gap: 0.1rem; flex: 1; min-width: 0; }
 .memory-alert-text strong { font-weight: 600; }
 .memory-alert-text span { color: var(--text-muted); font-size: 0.8rem; }
+.failure-notice { align-items: flex-start; }
+.failure-notice .memory-alert-text span { overflow-wrap: anywhere; }
 
 .memory-settings { display: flex; flex-direction: column; gap: 0.5rem; }
 .memory-setting { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }

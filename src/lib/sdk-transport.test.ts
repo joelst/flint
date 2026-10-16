@@ -37,6 +37,7 @@ type Harness = {
   /** True once `spawn()` has been entered, so a test can act during a gated startup. */
   spawnEntered: boolean;
   spawnCount: number;
+  runtimeStartArgs?: Record<string, unknown>;
   killCount: number;
   hangKill: boolean;
 };
@@ -50,6 +51,13 @@ let gateSpawn = false;
 let readyProtocolVersion = 1;
 let nativeGeneration = 0;
 let nativePhase = 'stopped';
+let runtimeStartResult: {
+  gpuSelector: string | null;
+  gpuSelectorSource: 'configured' | 'inherited' | 'unrestricted';
+} = {
+  gpuSelector: null as string | null,
+  gpuSelectorSource: 'unrestricted' as const,
+};
 let listenerRegistrationCount = 0;
 let rejectListenerRegistration: number | null = null;
 let gateNativeWrite = false;
@@ -81,6 +89,7 @@ vi.mock('@tauri-apps/api/core', () => ({
     if (command === 'runtime_start') {
       harness.spawnEntered = true;
       harness.spawnCount += 1;
+      harness.runtimeStartArgs = args;
       nativeGeneration += 1;
       nativePhase = 'starting';
       const generation = nativeGeneration;
@@ -95,7 +104,7 @@ vi.mock('@tauri-apps/api/core', () => ({
           message: { ready: true, protocolVersion: readyProtocolVersion },
         }),
       );
-      return { generation };
+      return { generation, ...runtimeStartResult };
     }
     if (command === 'runtime_mark_ready') {
       if (args.generation !== nativeGeneration || nativePhase !== 'starting') return false;
@@ -175,6 +184,7 @@ async function loadSdk() {
     },
     spawnEntered: false,
     spawnCount: 0,
+    runtimeStartArgs: undefined,
     killCount: 0,
     hangKill: false,
   };
@@ -182,6 +192,7 @@ async function loadSdk() {
   readyProtocolVersion = 1;
   nativeGeneration = 0;
   nativePhase = 'stopped';
+  runtimeStartResult = { gpuSelector: null, gpuSelectorSource: 'unrestricted' };
   listenerRegistrationCount = 0;
   rejectListenerRegistration = null;
   gateNativeWrite = false;
@@ -503,6 +514,27 @@ describe('applyMemorySettings', () => {
 });
 
 describe('initialization', () => {
+  it('publishes inherited CUDA visibility when no Flint GPU override is saved', async () => {
+    const sdk = await loadSdk();
+    const selector = 'GPU-3f2a9c1e-1111-2222-3333-444455556666';
+    runtimeStartResult = { gpuSelector: selector, gpuSelectorSource: 'inherited' };
+
+    const request = sdk.getEps();
+    const requestId = await waitForWrite('getEps');
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+
+    expect(harness.runtimeStartArgs?.gpuDevices).toBeNull();
+    expect(snapshot.runtimeGpuApplied).toBe(selector);
+    expect(snapshot.runtimeGpuAppliedSource).toBe('inherited');
+
+    harness.emitStdout({ id: requestId, result: [] });
+    await expect(request).resolves.toEqual([]);
+    unsubscribe();
+  });
+
   it('passes the configured log level through initialization', async () => {
     const sdk = await loadSdk();
     const initialized = sdk.initializeSDK({ autoStartService: false, logLevel: 'debug' });

@@ -31,6 +31,7 @@ import {
   shellProgramForNodeMode,
   type NodeRuntimeMode,
 } from './sidecar-paths';
+import { readRuntimeGpu } from './runtime-gpu';
 import {
   createProgressStallWatchdog,
   type ProgressStallWatchdog,
@@ -356,6 +357,8 @@ export interface AcceleratorMemory {
   kind: 'gpu' | 'npu';
   name: string;
   vendor?: string | null;
+  /** Stable NVIDIA GPU UUID (`GPU-…`) when nvidia-smi reports one. */
+  deviceId?: string | null;
   totalMb: number | null;
   usedMb: number | null;
   freeMb: number | null;
@@ -414,6 +417,10 @@ export interface FlintSDKState {
   audioLaneModel?: string;
   pool: PoolEntry[];
   poolStats: PoolStats | null;
+  /** CUDA GPU selector the live runtime child was spawned with; null until a child has started. */
+  runtimeGpuApplied: string | null;
+  /** Whether live CUDA visibility is configured, inherited, or unrestricted. */
+  runtimeGpuAppliedSource: 'configured' | 'inherited' | 'unrestricted' | null;
 }
 
 export interface CacheInventoryEntry {
@@ -469,6 +476,8 @@ const initialState: FlintSDKState = {
   audioLaneModel: undefined,
   pool: [],
   poolStats: null,
+  runtimeGpuApplied: null,
+  runtimeGpuAppliedSource: null,
 };
 
 export const sdkState: Writable<FlintSDKState> = writable(initialState);
@@ -822,7 +831,13 @@ async function spawnSidecar() {
     if (generation === myGeneration) callback();
   };
 
-  let started: { generation: number };
+  let started: {
+    generation: number;
+    gpuSelector: string | null;
+    gpuSelectorSource: 'configured' | 'inherited' | 'unrestricted';
+  };
+  let appliedGpuSelector = '';
+  let appliedGpuSelectorSource: 'configured' | 'inherited' | 'unrestricted' = 'unrestricted';
   try {
     unlisteners.push(
       await listen<{ generation: number; message: any }>('flint://runtime-stdout', ({ payload }) => {
@@ -888,7 +903,14 @@ async function spawnSidecar() {
     console.log(`[sdk] Calling native runtime_start...`);
     ensureStartAuthorized();
     startingNative = true;
-    started = await invoke<{ generation: number }>('runtime_start', { nodeMode });
+    appliedGpuSelector = readRuntimeGpu(typeof localStorage === 'undefined' ? null : localStorage);
+    started = await invoke<{
+      generation: number;
+      gpuSelector: string | null;
+      gpuSelectorSource: 'configured' | 'inherited' | 'unrestricted';
+    }>('runtime_start', { nodeMode, gpuDevices: appliedGpuSelector || null });
+    appliedGpuSelector = started.gpuSelector ?? '';
+    appliedGpuSelectorSource = started.gpuSelectorSource;
   } catch (error) {
     startingNative = false;
     cleanupListeners();
@@ -907,6 +929,11 @@ async function spawnSidecar() {
   }
   myGeneration = started.generation;
   sidecarGeneration = started.generation;
+  // Every respawn (including crash recovery) rereads storage, so publish what this child got.
+  updateState({
+    runtimeGpuApplied: appliedGpuSelector,
+    runtimeGpuAppliedSource: appliedGpuSelectorSource,
+  });
   if (closeData) {
     throw new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError));
   }
@@ -1708,6 +1735,7 @@ function mapPoolStats(result: any): PoolStats {
           kind: a?.kind === 'npu' ? 'npu' as const : 'gpu' as const,
           name: String(a?.name || ''),
           vendor: a?.vendor ?? null,
+          deviceId: typeof a?.deviceId === 'string' ? a.deviceId : null,
           totalMb: a?.totalMb == null ? null : Number(a.totalMb),
           usedMb: a?.usedMb == null ? null : Number(a.usedMb),
           freeMb: a?.freeMb == null ? null : Number(a.freeMb),

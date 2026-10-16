@@ -64,17 +64,29 @@ This signature does not identify whether the cause is GPU visibility, the NVIDIA
 driver, or the runtime. It is not proof of insufficient VRAM or a damaged model.
 
 Use **Models → Recheck Providers** and check your NVIDIA driver. On a machine with
-multiple NVIDIA GPUs, a temporary workaround is to fully quit Flint, then launch
-the installed Windows app from PowerShell with only one CUDA device exposed:
+multiple NVIDIA GPUs, pick one in **Models → CUDA GPU** and restart Flint. The
+choice is saved by the GPU's UUID (so it survives device reordering) and is
+applied as `CUDA_VISIBLE_DEVICES` to the runtime child process only, not to your
+global environment. With no saved choice, the runtime inherits any existing
+`CUDA_VISIBLE_DEVICES` value from Flint's environment; the Models panel reports
+that inherited restriction instead of implying all GPUs are available. The
+picker appears when more than one NVIDIA GPU reports a UUID through `nvidia-smi`,
+and stays visible while a choice is saved. It limits
+CUDA only: DirectML and WebGPU can still use other GPUs. Arena VRAM checks apply
+the choice the running runtime was started with, to CUDA models only. Foundry Local
+initializes once per process and has no per-model device option, so the choice
+applies to every CUDA model in the runtime.
+
+Without the picker, you can launch the installed Windows app from PowerShell
+with only one CUDA device exposed:
 
 ```powershell
 $env:CUDA_VISIBLE_DEVICES = '0'
 Start-Process -FilePath "$($env:LOCALAPPDATA)\Flint\Flint.exe"
 ```
 
-This applies to that launch and its child runtime, not global settings. Device 0
-is the CUDA ordinal; do not assume it matches Windows' display ordering. An
-already running runtime will not adopt the change. Alternatively, explicitly
+Device 0 is the CUDA ordinal; do not assume it matches Windows' display ordering.
+An already running runtime will not adopt either change. Alternatively, explicitly
 select a downloaded CPU variant. Flint does not automatically retry, switch
 devices, or change model variants after this error. Per-model GPU placement is
 not currently exposed.

@@ -16,6 +16,22 @@ import { cudaAllocatorDiagnostic } from '../../sidecar/model-load-diagnostic.js'
 /** Hard ceiling for a status line, far above any real sentence. */
 const MAX_STATUS_LENGTH = 2000;
 
+const CUDA_ALLOCATOR_HEADLINE = "CUDA could not initialize a GPU allocator (details below the header)";
+
+export interface FailureNotice {
+  title: string;
+  advice: string;
+}
+
+/**
+ * A failure whose recovery advice is too long for the status bar. Returns null for
+ * every failure that the one-line summary already covers.
+ */
+export function failureNotice(prefix: string, error: unknown): FailureNotice | null {
+  const advice = cudaAllocatorDiagnostic(errorText(error));
+  return advice ? { title: `${prefix}: CUDA allocator unavailable`, advice } : null;
+}
+
 /** The full, unmodified text of an error, for the app log. */
 export function errorText(error: unknown): string {
   if (error === null || error === undefined) return "";
@@ -41,8 +57,9 @@ export function failureLogLine(prefix: string, error: unknown): string {
 export function summarizeFailure(prefix: string, error: unknown): string {
   const raw = errorText(error);
   if (!raw.trim()) return prefix;
-  const cudaDiagnostic = cudaAllocatorDiagnostic(raw);
-  if (cudaDiagnostic) return `${prefix}: ${cudaDiagnostic}`;
+  // The full guidance is several sentences and belongs in a wrapping notice
+  // (`failureNotice`), not in this single-line bar.
+  if (cudaAllocatorDiagnostic(raw)) return `${prefix}: ${CUDA_ALLOCATOR_HEADLINE}`;
   const json = raw.match(/JSON Error:\s*(.+?)\s+at line/i);
   const body = json
     ? json[1]

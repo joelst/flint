@@ -11,7 +11,7 @@ describe('CUDA allocator diagnostic', () => {
     expect(diagnostic).toContain('error does not establish which');
     expect(diagnostic).toContain('Recheck Providers');
     expect(diagnostic).toContain('If multiple NVIDIA GPUs are present');
-    expect(diagnostic).toContain('fully quit Flint');
+    expect(diagnostic).toContain('CUDA GPU');
     expect(diagnostic).toContain('CUDA_VISIBLE_DEVICES=0');
     expect(diagnostic).toContain('downloaded CPU variant');
     expect(diagnostic).toContain('has not retried or switched devices automatically');

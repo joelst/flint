@@ -53,6 +53,8 @@ pub struct RuntimeStatus {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStartResult {
     generation: u64,
+    gpu_selector: Option<String>,
+    gpu_selector_source: &'static str,
 }
 
 #[derive(Clone, Serialize)]
@@ -130,12 +132,42 @@ fn trusted_runtime_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf, String), 
     ))
 }
 
+/// Same shape as `normalizeRuntimeGpu` in `src/lib/runtime-gpu.ts`: a GPU UUID or a short index list.
+fn valid_gpu_selector(value: &str) -> bool {
+    let uuid = value.strip_prefix("GPU-").is_some_and(|rest| {
+        (8..=64).contains(&rest.len()) && rest.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    });
+    let indexes = {
+        let parts: Vec<&str> = value.split(',').collect();
+        (1..=16).contains(&parts.len())
+            && parts
+                .iter()
+                .all(|p| (1..=2).contains(&p.len()) && p.chars().all(|c| c.is_ascii_digit()))
+    };
+    uuid || indexes
+}
+
+fn effective_gpu_selector(
+    requested: Option<&str>,
+    inherited: Option<&std::ffi::OsStr>,
+) -> (Option<String>, &'static str) {
+    if let Some(selector) = requested {
+        return (Some(selector.to_string()), "configured");
+    }
+    match inherited {
+        Some(selector) => (Some(selector.to_string_lossy().into_owned()), "inherited"),
+        None => (None, "unrestricted"),
+    }
+}
+
 fn runtime_command(
     app: &AppHandle,
     node_mode: &str,
     script: &Path,
     base_dir: &Path,
     node_path: &str,
+    gpu_devices: Option<&str>,
+    inherited_gpu_devices: Option<&std::ffi::OsStr>,
 ) -> Result<Command, String> {
     let command = match node_mode {
         "bundled" => app
@@ -145,11 +177,18 @@ fn runtime_command(
         "path" => app.shell().command("node"),
         _ => return Err("Node mode must be 'bundled' or 'path'".to_string()),
     };
-    Ok(command
+    let command = command
         .arg(script)
         .current_dir(base_dir)
-        .env("NODE_PATH", node_path)
-        .into())
+        .env("NODE_PATH", node_path);
+    let command = match gpu_devices {
+        Some(devices) => command.env("CUDA_VISIBLE_DEVICES", devices),
+        None => match inherited_gpu_devices {
+            Some(devices) => command.env("CUDA_VISIBLE_DEVICES", devices),
+            None => command,
+        },
+    };
+    Ok(command.into())
 }
 
 struct OutputGate {
@@ -373,12 +412,30 @@ pub fn runtime_start(
     app: AppHandle,
     state: State<'_, NativeRuntime>,
     node_mode: String,
+    gpu_devices: Option<String>,
 ) -> Result<RuntimeStartResult, String> {
     if state.terminal.load(Ordering::Acquire) {
         return Err("The native runtime supervisor is shutting down".to_string());
     }
+    let gpu_devices = gpu_devices.filter(|value| !value.is_empty());
+    if let Some(devices) = gpu_devices.as_deref() {
+        if !valid_gpu_selector(devices) {
+            return Err("The GPU selection is not a valid device identifier".to_string());
+        }
+    }
+    let inherited_gpu_devices = std::env::var_os("CUDA_VISIBLE_DEVICES");
+    let (gpu_selector, gpu_selector_source) =
+        effective_gpu_selector(gpu_devices.as_deref(), inherited_gpu_devices.as_deref());
     let (script, base_dir, node_path) = trusted_runtime_paths(&app)?;
-    let command = runtime_command(&app, &node_mode, &script, &base_dir, &node_path)?;
+    let command = runtime_command(
+        &app,
+        &node_mode,
+        &script,
+        &base_dir,
+        &node_path,
+        gpu_devices.as_deref(),
+        inherited_gpu_devices.as_deref(),
+    )?;
     let started = {
         let mut supervisor = state
             .supervisor
@@ -393,7 +450,11 @@ pub fn runtime_start(
     };
     let generation = started.generation;
     start_event_threads(app, started);
-    Ok(RuntimeStartResult { generation })
+    Ok(RuntimeStartResult {
+        generation,
+        gpu_selector,
+        gpu_selector_source,
+    })
 }
 
 #[tauri::command]
@@ -486,6 +547,55 @@ mod tests {
             late_emitted = true;
         }));
         assert!(!late_emitted);
+    }
+
+    #[test]
+    fn test_gpu_selector_validation() {
+        assert!(valid_gpu_selector(
+            "GPU-3f2a9c1e-1111-2222-3333-444455556666"
+        ));
+        assert!(valid_gpu_selector("0"));
+        assert!(valid_gpu_selector("0,1"));
+        for bad in [
+            "",
+            "GPU-",
+            "GPU-zz",
+            "0;calc",
+            "-1",
+            "1,",
+            "123",
+            "MIG-abc12345",
+            "0 1",
+        ] {
+            assert!(!valid_gpu_selector(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_effective_gpu_selector_preserves_inherited_visibility_without_override() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            effective_gpu_selector(
+                None,
+                Some(OsStr::new("GPU-3f2a9c1e-1111-2222-3333-444455556666"))
+            ),
+            (
+                Some("GPU-3f2a9c1e-1111-2222-3333-444455556666".to_string()),
+                "inherited"
+            )
+        );
+        assert_eq!(effective_gpu_selector(None, None), (None, "unrestricted"));
+        assert_eq!(
+            effective_gpu_selector(
+                Some("GPU-aaaaaaaa-1111-2222-3333-444455556666"),
+                Some(OsStr::new("GPU-3f2a9c1e-1111-2222-3333-444455556666")),
+            ),
+            (
+                Some("GPU-aaaaaaaa-1111-2222-3333-444455556666".to_string()),
+                "configured"
+            )
+        );
     }
 
     #[test]

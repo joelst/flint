@@ -21,6 +21,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { annotateVariantUpdates } from './model-updates.js';
 import { loadModelWithDiagnostic } from './model-load-diagnostic.js';
+import { mergeAcceleratorDevices, vendorFromName } from './accelerator-merge.js';
 import { normalizeTextPartsForLegacyClient, selectChatTransport } from './chat-transport.js';
 import {
   createSessionChatClient,
@@ -1385,6 +1386,7 @@ function normalizeAccelDevice(d) {
     kind,
     name,
     vendor: d.vendor ? String(d.vendor) : null,
+    deviceId: typeof d.deviceId === 'string' && /^GPU-[0-9A-Fa-f-]{8,64}$/.test(d.deviceId) ? d.deviceId : null,
     totalMb,
     usedMb,
     freeMb,
@@ -1396,7 +1398,7 @@ async function queryNvidiaSmi() {
   try {
     const { stdout } = await execFileAsync(
       'nvidia-smi',
-      ['--query-gpu=name,memory.total,memory.used,memory.free', '--format=csv,noheader,nounits'],
+      ['--query-gpu=name,memory.total,memory.used,memory.free,uuid', '--format=csv,noheader,nounits'],
       { timeout: 5000, windowsHide: true, maxBuffer: 1024 * 1024 },
     );
     return stdout
@@ -1406,11 +1408,12 @@ async function queryNvidiaSmi() {
       .map((line) => {
         const parts = line.split(',').map((s) => s.trim());
         if (parts.length < 4) return null;
-        const [name, total, used, free] = parts;
+        const [name, total, used, free, uuid] = parts;
         return normalizeAccelDevice({
           kind: 'gpu',
           name,
           vendor: 'nvidia',
+          deviceId: uuid,
           totalMb: total,
           usedMb: used,
           freeMb: free,
@@ -1576,49 +1579,6 @@ async function queryLinuxAccelerators() {
   } catch { /* ignore */ }
 
   return devices.filter(Boolean);
-}
-
-function vendorFromName(name) {
-  const s = String(name || '').toLowerCase();
-  if (s.includes('nvidia') || s.includes('geforce') || s.includes('rtx') || s.includes('quadro')) return 'nvidia';
-  if (s.includes('amd') || s.includes('radeon')) return 'amd';
-  if (s.includes('intel') || s.includes('arc ')) return 'intel';
-  if (s.includes('qualcomm') || s.includes('hexagon') || s.includes('npu')) return 'npu-vendor';
-  return null;
-}
-
-/** Prefer nvidia-smi rows for NVIDIA devices; keep DXGI/other for non-NVIDIA + NPUs. */
-function mergeAcceleratorDevices(nvidia, others) {
-  const byKey = new Map();
-  const keyOf = (d) => `${d.kind}:${d.name.toLowerCase()}`;
-
-  for (const d of others || []) {
-    byKey.set(keyOf(d), d);
-  }
-  for (const d of nvidia || []) {
-    // nvidia-smi is authoritative for NVIDIA used/total
-    byKey.set(keyOf(d), d);
-    // Drop DXGI duplicate if names differ slightly: match by vendor nvidia + similar name
-  }
-
-  // If nvidia-smi found devices, remove DXGI nvidia entries that look like duplicates under different keys
-  if ((nvidia || []).length > 0) {
-    for (const [k, d] of [...byKey.entries()]) {
-      if (d.source === 'dxgi' && (d.vendor === 'nvidia' || vendorFromName(d.name) === 'nvidia')) {
-        const covered = (nvidia || []).some((n) => {
-          const a = n.name.toLowerCase();
-          const b = d.name.toLowerCase();
-          return a === b || a.includes(b) || b.includes(a);
-        });
-        if (covered) byKey.delete(k);
-      }
-    }
-  }
-
-  return [...byKey.values()].sort((a, b) => {
-    if (a.kind !== b.kind) return a.kind === 'gpu' ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
 }
 
 async function collectAcceleratorMemory(force = false) {
