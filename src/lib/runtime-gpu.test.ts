@@ -8,6 +8,7 @@ import {
   readRuntimeGpu,
   runtimeGpuChoices,
   runtimeGpuPanelVisible,
+  runtimeGpuRestartRequired,
   writeRuntimeGpu,
 } from './runtime-gpu';
 
@@ -108,6 +109,21 @@ describe('runtimeGpuPanelVisible', () => {
   });
 });
 
+describe('runtimeGpuRestartRequired', () => {
+  it('does not report a pending change for an empty picker with inherited visibility', () => {
+    expect(runtimeGpuRestartRequired('', UUID, 'inherited')).toBe(false);
+  });
+
+  it('still reports a saved selection change from inherited visibility', () => {
+    expect(runtimeGpuRestartRequired('GPU-aaaaaaaa-1111-2222-3333-444455556666', UUID, 'inherited')).toBe(true);
+  });
+
+  it('compares configured selections to the running selector', () => {
+    expect(runtimeGpuRestartRequired('', UUID, 'configured')).toBe(true);
+    expect(runtimeGpuRestartRequired(UUID, UUID, 'configured')).toBe(false);
+  });
+});
+
 describe('planVramAdmission', () => {
   const view = (free: number, total = free) => ({
     count: 1,
@@ -196,6 +212,19 @@ describe('cudaVisibleAccelerators', () => {
   });
   it('drops other NVIDIA GPUs but keeps non-NVIDIA devices', () => {
     expect(cudaVisibleAccelerators(list, UUID).map((a) => a.name)).toEqual(['A', 'Intel', 'NPU']);
+  });
+  it('filters inherited visibility lists containing multiple GPU UUIDs', () => {
+    const third = 'GPU-bbbbbbbb-1111-2222-3333-444455556666';
+    const devices = [
+      ...list,
+      { kind: 'gpu', name: 'C', vendor: 'nvidia', deviceId: third },
+    ];
+    expect(cudaVisibleAccelerators(devices, `${UUID},${other}`).map((a) => a.name)).toEqual([
+      'A',
+      'B',
+      'Intel',
+      'NPU',
+    ]);
   });
   it('drops an NVIDIA row without identity', () => {
     expect(cudaVisibleAccelerators([{ kind: 'gpu', name: 'X', vendor: 'nvidia' }], UUID)).toEqual([]);

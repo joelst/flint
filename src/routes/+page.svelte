@@ -200,7 +200,7 @@
     startupWebToolsPatch,
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
-  import { readRuntimeGpu, writeRuntimeGpu, runtimeGpuChoices, runtimeGpuPanelVisible, cudaVisibleAccelerators, isCudaVariant, planVramAdmission, vramBudgetOf } from "$lib/runtime-gpu";
+  import { readRuntimeGpu, writeRuntimeGpu, runtimeGpuChoices, runtimeGpuPanelVisible, runtimeGpuRestartRequired, cudaVisibleAccelerators, isCudaVariant, planVramAdmission, vramBudgetOf } from "$lib/runtime-gpu";
   import { decideChipFetchHop, detectFetchableUrls, isFetchableUrl } from "$lib/url-chips";
   import {
     conversationImagePreviewPartIndexes,
@@ -9643,7 +9643,7 @@ Output only the summary text, no preamble.`;
                   {#if runtimeGpuAppliedSource === "inherited"}
                     The current runtime inherited CUDA_VISIBLE_DEVICES={runtimeGpuApplied || "(empty)"}.
                   {/if}
-                  {#if runtimeGpu !== runtimeGpuApplied}
+                  {#if runtimeGpuRestartRequired(runtimeGpu, runtimeGpuApplied, runtimeGpuAppliedSource)}
                     Restart Flint for this to take effect.
                   {/if}
                   {#if runtimeGpuSaveFailed}

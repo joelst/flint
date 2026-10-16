@@ -81,6 +81,15 @@ export function runtimeGpuPanelVisible(state: {
   return state.choiceCount > 1 || !!state.current || !!state.appliedAtLaunch || state.saveFailed;
 }
 
+export function runtimeGpuRestartRequired(
+  current: string,
+  applied: string,
+  appliedSource: 'configured' | 'inherited' | 'unrestricted' | null,
+): boolean {
+  if (appliedSource === 'inherited' && current === '') return false;
+  return current !== applied;
+}
+
 export interface VramView {
   count: number;
   maxFreeMb: number;
@@ -188,13 +197,17 @@ export function cudaVisibleAccelerators<T extends GpuLike>(
   appliedSelector: string,
 ): T[] {
   const all = accelerators ?? [];
-  const uuids = normalizeRuntimeGpu(appliedSelector)
-    .split(',')
-    .filter((part) => UUID_SELECTOR.test(part));
+  const parts = appliedSelector.split(',').map((part) => part.trim());
+  const uuids = parts.length > 1 && parts.every((part) => UUID_SELECTOR.test(part))
+    ? parts
+    : normalizeRuntimeGpu(appliedSelector)
+        .split(',')
+        .filter((part) => UUID_SELECTOR.test(part));
   if (uuids.length === 0) return [...all];
+  const visible = new Set(uuids.map((uuid) => uuid.toLowerCase()));
   return all.filter((a) => {
     if (a.kind !== 'gpu') return true;
     if (!a.deviceId) return a.vendor !== 'nvidia';
-    return uuids.includes(a.deviceId);
+    return visible.has(a.deviceId.toLowerCase());
   });
 }
