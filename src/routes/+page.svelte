@@ -1010,6 +1010,7 @@
     pool: [] as any[],
     poolStats: null as any,
     runtimeGpuApplied: null as string | null,
+    runtimeGpuAppliedSource: null as "configured" | "inherited" | "unrestricted" | null,
   });
 
   // Recommended starters
@@ -1021,6 +1022,9 @@
   // would use.
   const savedRuntimeGpuAtLoad = readRuntimeGpu(localStorage);
   const runtimeGpuApplied = $derived(state.runtimeGpuApplied ?? savedRuntimeGpuAtLoad);
+  const runtimeGpuAppliedSource = $derived(
+    state.runtimeGpuAppliedSource ?? (savedRuntimeGpuAtLoad ? "configured" : null),
+  );
   let runtimeGpu = $state<string>(savedRuntimeGpuAtLoad);
   let runtimeGpuSaveFailed = $state(false);
   const runtimeGpuOptions = $derived(runtimeGpuChoices(state.poolStats?.accelerators));
@@ -3084,6 +3088,7 @@
     state.pool = s.pool ?? [];
     state.poolStats = s.poolStats ?? null;
     state.runtimeGpuApplied = s.runtimeGpuApplied ?? null;
+    state.runtimeGpuAppliedSource = s.runtimeGpuAppliedSource ?? null;
     sidecarLogs = s.logs ?? [];
   }
 
@@ -9603,7 +9608,11 @@ Output only the summary text, no preamble.`;
                     value={runtimeGpu}
                     onchange={(e) => setRuntimeGpu((e.currentTarget as HTMLSelectElement).value)}
                   >
-                    <option value="">All GPUs (default)</option>
+                    <option value="">
+                      {runtimeGpuAppliedSource === "inherited"
+                        ? "Inherited CUDA visibility"
+                        : "No Flint override (inherit environment)"}
+                    </option>
                     {#each runtimeGpuOptions as gpu (gpu.deviceId)}
                       <option value={gpu.deviceId}>{gpu.label}</option>
                     {/each}
@@ -9615,6 +9624,9 @@ Output only the summary text, no preamble.`;
                 <p class="muted">
                   Limits which NVIDIA GPU CUDA can use; DirectML and WebGPU are not affected. If CUDA fails with
                   “No requested allocator available” while more than one GPU is installed, pick one here.
+                  {#if runtimeGpuAppliedSource === "inherited"}
+                    The current runtime inherited CUDA_VISIBLE_DEVICES={runtimeGpuApplied || "(empty)"}.
+                  {/if}
                   {#if runtimeGpu !== runtimeGpuApplied}
                     Restart Flint for this to take effect.
                   {/if}

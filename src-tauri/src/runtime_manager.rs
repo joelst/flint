@@ -53,6 +53,8 @@ pub struct RuntimeStatus {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStartResult {
     generation: u64,
+    gpu_selector: Option<String>,
+    gpu_selector_source: &'static str,
 }
 
 #[derive(Clone, Serialize)]
@@ -145,6 +147,19 @@ fn valid_gpu_selector(value: &str) -> bool {
     uuid || indexes
 }
 
+fn effective_gpu_selector(
+    requested: Option<&str>,
+    inherited: Option<&std::ffi::OsStr>,
+) -> (Option<String>, &'static str) {
+    if let Some(selector) = requested {
+        return (Some(selector.to_string()), "configured");
+    }
+    match inherited {
+        Some(selector) => (Some(selector.to_string_lossy().into_owned()), "inherited"),
+        None => (None, "unrestricted"),
+    }
+}
+
 fn runtime_command(
     app: &AppHandle,
     node_mode: &str,
@@ -152,6 +167,7 @@ fn runtime_command(
     base_dir: &Path,
     node_path: &str,
     gpu_devices: Option<&str>,
+    inherited_gpu_devices: Option<&std::ffi::OsStr>,
 ) -> Result<Command, String> {
     let command = match node_mode {
         "bundled" => app
@@ -167,7 +183,10 @@ fn runtime_command(
         .env("NODE_PATH", node_path);
     let command = match gpu_devices {
         Some(devices) => command.env("CUDA_VISIBLE_DEVICES", devices),
-        None => command,
+        None => match inherited_gpu_devices {
+            Some(devices) => command.env("CUDA_VISIBLE_DEVICES", devices),
+            None => command,
+        },
     };
     Ok(command.into())
 }
@@ -404,6 +423,9 @@ pub fn runtime_start(
             return Err("The GPU selection is not a valid device identifier".to_string());
         }
     }
+    let inherited_gpu_devices = std::env::var_os("CUDA_VISIBLE_DEVICES");
+    let (gpu_selector, gpu_selector_source) =
+        effective_gpu_selector(gpu_devices.as_deref(), inherited_gpu_devices.as_deref());
     let (script, base_dir, node_path) = trusted_runtime_paths(&app)?;
     let command = runtime_command(
         &app,
@@ -412,6 +434,7 @@ pub fn runtime_start(
         &base_dir,
         &node_path,
         gpu_devices.as_deref(),
+        inherited_gpu_devices.as_deref(),
     )?;
     let started = {
         let mut supervisor = state
@@ -427,7 +450,11 @@ pub fn runtime_start(
     };
     let generation = started.generation;
     start_event_threads(app, started);
-    Ok(RuntimeStartResult { generation })
+    Ok(RuntimeStartResult {
+        generation,
+        gpu_selector,
+        gpu_selector_source,
+    })
 }
 
 #[tauri::command]
@@ -524,12 +551,51 @@ mod tests {
 
     #[test]
     fn test_gpu_selector_validation() {
-        assert!(valid_gpu_selector("GPU-3f2a9c1e-1111-2222-3333-444455556666"));
+        assert!(valid_gpu_selector(
+            "GPU-3f2a9c1e-1111-2222-3333-444455556666"
+        ));
         assert!(valid_gpu_selector("0"));
         assert!(valid_gpu_selector("0,1"));
-        for bad in ["", "GPU-", "GPU-zz", "0;calc", "-1", "1,", "123", "MIG-abc12345", "0 1"] {
+        for bad in [
+            "",
+            "GPU-",
+            "GPU-zz",
+            "0;calc",
+            "-1",
+            "1,",
+            "123",
+            "MIG-abc12345",
+            "0 1",
+        ] {
             assert!(!valid_gpu_selector(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn test_effective_gpu_selector_preserves_inherited_visibility_without_override() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            effective_gpu_selector(
+                None,
+                Some(OsStr::new("GPU-3f2a9c1e-1111-2222-3333-444455556666"))
+            ),
+            (
+                Some("GPU-3f2a9c1e-1111-2222-3333-444455556666".to_string()),
+                "inherited"
+            )
+        );
+        assert_eq!(effective_gpu_selector(None, None), (None, "unrestricted"));
+        assert_eq!(
+            effective_gpu_selector(
+                Some("GPU-aaaaaaaa-1111-2222-3333-444455556666"),
+                Some(OsStr::new("GPU-3f2a9c1e-1111-2222-3333-444455556666")),
+            ),
+            (
+                Some("GPU-aaaaaaaa-1111-2222-3333-444455556666".to_string()),
+                "configured"
+            )
+        );
     }
 
     #[test]

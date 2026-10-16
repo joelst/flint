@@ -419,6 +419,8 @@ export interface FlintSDKState {
   poolStats: PoolStats | null;
   /** CUDA GPU selector the live runtime child was spawned with; null until a child has started. */
   runtimeGpuApplied: string | null;
+  /** Whether live CUDA visibility is configured, inherited, or unrestricted. */
+  runtimeGpuAppliedSource: 'configured' | 'inherited' | 'unrestricted' | null;
 }
 
 export interface CacheInventoryEntry {
@@ -475,6 +477,7 @@ const initialState: FlintSDKState = {
   pool: [],
   poolStats: null,
   runtimeGpuApplied: null,
+  runtimeGpuAppliedSource: null,
 };
 
 export const sdkState: Writable<FlintSDKState> = writable(initialState);
@@ -828,8 +831,13 @@ async function spawnSidecar() {
     if (generation === myGeneration) callback();
   };
 
-  let started: { generation: number };
+  let started: {
+    generation: number;
+    gpuSelector: string | null;
+    gpuSelectorSource: 'configured' | 'inherited' | 'unrestricted';
+  };
   let appliedGpuSelector = '';
+  let appliedGpuSelectorSource: 'configured' | 'inherited' | 'unrestricted' = 'unrestricted';
   try {
     unlisteners.push(
       await listen<{ generation: number; message: any }>('flint://runtime-stdout', ({ payload }) => {
@@ -896,7 +904,13 @@ async function spawnSidecar() {
     ensureStartAuthorized();
     startingNative = true;
     appliedGpuSelector = readRuntimeGpu(typeof localStorage === 'undefined' ? null : localStorage);
-    started = await invoke<{ generation: number }>('runtime_start', { nodeMode, gpuDevices: appliedGpuSelector || null });
+    started = await invoke<{
+      generation: number;
+      gpuSelector: string | null;
+      gpuSelectorSource: 'configured' | 'inherited' | 'unrestricted';
+    }>('runtime_start', { nodeMode, gpuDevices: appliedGpuSelector || null });
+    appliedGpuSelector = started.gpuSelector ?? '';
+    appliedGpuSelectorSource = started.gpuSelectorSource;
   } catch (error) {
     startingNative = false;
     cleanupListeners();
@@ -916,7 +930,10 @@ async function spawnSidecar() {
   myGeneration = started.generation;
   sidecarGeneration = started.generation;
   // Every respawn (including crash recovery) rereads storage, so publish what this child got.
-  updateState({ runtimeGpuApplied: appliedGpuSelector });
+  updateState({
+    runtimeGpuApplied: appliedGpuSelector,
+    runtimeGpuAppliedSource: appliedGpuSelectorSource,
+  });
   if (closeData) {
     throw new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError));
   }

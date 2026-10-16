@@ -67,8 +67,11 @@ Use **Models → Recheck Providers** and check your NVIDIA driver. On a machine 
 multiple NVIDIA GPUs, pick one in **Models → CUDA GPU** and restart Flint. The
 choice is saved by the GPU's UUID (so it survives device reordering) and is
 applied as `CUDA_VISIBLE_DEVICES` to the runtime child process only, not to your
-global environment. The picker appears when more than one NVIDIA GPU reports a
-UUID through `nvidia-smi`, and stays visible while a choice is saved. It limits
+global environment. With no saved choice, the runtime inherits any existing
+`CUDA_VISIBLE_DEVICES` value from Flint's environment; the Models panel reports
+that inherited restriction instead of implying all GPUs are available. The
+picker appears when more than one NVIDIA GPU reports a UUID through `nvidia-smi`,
+and stays visible while a choice is saved. It limits
 CUDA only: DirectML and WebGPU can still use other GPUs. Arena VRAM checks apply
 the choice the running runtime was started with, to CUDA models only. Foundry Local
 initializes once per process and has no per-model device option, so the choice
