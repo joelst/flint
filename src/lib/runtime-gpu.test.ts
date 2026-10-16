@@ -109,8 +109,14 @@ describe('runtimeGpuPanelVisible', () => {
 });
 
 describe('planVramAdmission', () => {
-  const view = (free: number) => ({ count: free > 0 ? 1 : 0, maxFreeMb: free, freeMb: free, totalMb: free || 0 });
-  const none = view(0);
+  const view = (free: number, total = free) => ({
+    count: 1,
+    maxFreeMb: free,
+    freeMb: free,
+    totalMb: total,
+    telemetryKnown: true,
+  });
+  const none = { count: 0, maxFreeMb: 0, freeMb: 0, totalMb: 0, telemetryKnown: false };
 
   it('checks CUDA against the CUDA view and others against the full inventory', () => {
     // 4 GB visible to CUDA, 24 GB overall
@@ -140,6 +146,15 @@ describe('planVramAdmission', () => {
   it('is unknown, not failing, with no telemetry at all', () => {
     const r = planVramAdmission([5000], [], none, none);
     expect(r).toMatchObject({ okAll: true, okOne: true, unknown: true, displayView: 'cuda' });
+  });
+
+  it('rejects a known zero-free budget instead of treating it as missing telemetry', () => {
+    const exhausted = view(0, 8192);
+    expect(planVramAdmission([1], [], exhausted, exhausted)).toMatchObject({
+      okAll: false,
+      okOne: false,
+      unknown: false,
+    });
   });
 });
 

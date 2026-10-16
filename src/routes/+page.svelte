@@ -4449,6 +4449,7 @@ updateStateFromSdk();
     count: number;
     maxFreeMb: number;
     names: string[];
+    telemetryKnown: boolean;
   } {
     // CUDA loads see only the selector the running child was spawned with (not the pending picker
     // value); other providers (DirectML, WebGPU) keep the unrestricted inventory.
@@ -4460,21 +4461,24 @@ updateStateFromSdk();
     let freeMb = 0;
     let usedMb = 0;
     let maxFreeMb = 0;
+    let telemetryKnown = false;
     const names: string[] = [];
     for (const g of gpus) {
       names.push(g.name);
       if (g.totalMb != null) totalMb += g.totalMb;
       if (g.freeMb != null) {
+        telemetryKnown = true;
         freeMb += g.freeMb;
         maxFreeMb = Math.max(maxFreeMb, g.freeMb);
       } else if (g.totalMb != null && g.usedMb != null) {
+        telemetryKnown = true;
         const f = Math.max(0, g.totalMb - g.usedMb);
         freeMb += f;
         maxFreeMb = Math.max(maxFreeMb, f);
       }
       if (g.usedMb != null) usedMb += g.usedMb;
     }
-    return { totalMb, freeMb, usedMb, count: gpus.length, maxFreeMb, names };
+    return { totalMb, freeMb, usedMb, count: gpus.length, maxFreeMb, names, telemetryKnown };
   }
 
   type CompareMemPlan = {
@@ -4549,7 +4553,7 @@ updateStateFromSdk();
 
     const ramBudget = Math.max(0, freeRamMb - headroomRamMb);
     const hasGpuSlots = perSlot.some((s) => s.target === "gpu");
-    const vramAvailable = vram.count > 0 && freeVramMb > 0;
+    const vramAvailable = vramBudgetOf(vram).known;
     // Missing telemetry for any class that needs it warns (vramUnknown) rather than failing.
     const vramUnknown = hasGpuSlots && (!vramAvailable || admission.unknown);
 
@@ -4853,7 +4857,7 @@ updateStateFromSdk();
     const freeVramMb = vram.maxFreeMb > 0 ? vram.maxFreeMb : vram.freeMb;
     const headroomVramMb = Math.min(512, Math.round((vram.totalMb || freeVramMb) * 0.08) || 256);
     const vramBudget = Math.max(0, freeVramMb - headroomVramMb);
-    const vramKnown = vram.count > 0 && freeVramMb > 0;
+    const vramKnown = vramBudgetOf(vram).known;
 
     const parts: string[] = [];
 

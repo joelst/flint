@@ -86,13 +86,14 @@ export interface VramView {
   maxFreeMb: number;
   freeMb: number;
   totalMb: number;
+  telemetryKnown: boolean;
 }
 
-/** Free VRAM and headroom for one view; telemetry is `known` only when it reports free memory. */
+/** Free VRAM and headroom for one view; zero free memory is still known telemetry. */
 export function vramBudgetOf(v: VramView): { free: number; budget: number; known: boolean } {
   const free = v.maxFreeMb > 0 ? v.maxFreeMb : v.freeMb;
   const headroom = Math.min(512, Math.round((v.totalMb || free) * 0.08) || 256);
-  return { free, budget: Math.max(0, free - headroom), known: v.count > 0 && free > 0 };
+  return { free, budget: Math.max(0, free - headroom), known: v.count > 0 && v.telemetryKnown };
 }
 
 /**
