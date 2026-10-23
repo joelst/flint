@@ -602,16 +602,20 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
           // before changing it. Treat that first lookup as restart-bound uncertainty:
           // it may establish a stale native snapshot before the mutation completes.
           const catalogReadBeforeMutation = options.catalogReadBeforeMutation === true;
-          let catalogRefreshRequiresRestart = committed || catalogReadBeforeMutation;
+          let catalogRefreshRequiresRestart = options.confirmCatalogCommit === false
+            ? false
+            : committed || catalogReadBeforeMutation;
           if (catalogReadBeforeMutation) committed = true;
           const result = await operation();
-          try {
-            await confirmCatalogCommit();
-          } catch (error) {
-            // The local mutation is already durable. Report snapshot uncertainty
-            // separately so callers do not mistake a read failure for a failed mutation.
-            onCommitError(error);
-            catalogRefreshRequiresRestart = true;
+          if (options.confirmCatalogCommit !== false) {
+            try {
+              await confirmCatalogCommit();
+            } catch (error) {
+              // The local mutation is already durable. Report snapshot uncertainty
+              // separately so callers do not mistake a read failure for a failed mutation.
+              onCommitError(error);
+              catalogRefreshRequiresRestart = true;
+            }
           }
           return {
             result,

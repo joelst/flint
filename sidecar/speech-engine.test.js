@@ -204,7 +204,7 @@ describe('transcribeSpeech', () => {
     })).rejects.toMatchObject({
       name: 'SpeechEngineError',
       code: 'unsupported-by-runtime',
-      message: expect.stringContaining('Foundry Local SDK 2.0.1'),
+      message: expect.stringContaining('Foundry Local SDK 2.1.0'),
     });
     expect(createAudioClient).not.toHaveBeenCalled();
     expect(state.sessionDisposed).toBe(true);

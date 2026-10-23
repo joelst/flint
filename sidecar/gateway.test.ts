@@ -133,6 +133,28 @@ afterEach(async () => {
 });
 
 describe('gateway pass-through', () => {
+  it('appends cached local registrations to the native model listing', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        object: 'list',
+        data: [{ id: 'catalog-model', object: 'model', parent: 'Catalog Model' }],
+      }));
+    });
+    gateway = await startGateway({
+      listLocalModels: async () => [
+        { id: 'external-model', object: 'model', parent: 'External Model' },
+      ],
+    });
+    const res = await request(gateway.publicPort, '/v1/models');
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).data.map(({ id }) => id)).toEqual([
+      'catalog-model',
+      'external-model',
+    ]);
+  });
+
   it('forwards a plain GET and returns the upstream body', async () => {
     gateway = await startGateway();
     const res = await request(gateway.publicPort, '/v1/models');
@@ -140,14 +162,14 @@ describe('gateway pass-through', () => {
     expect(res.body).toBe('pong');
   });
 
-  it('omits neutral chat penalties before forwarding to Foundry', async () => {
+  it('omits frequency penalty and a neutral presence penalty before forwarding to Foundry', async () => {
     const model = 'already-loaded';
     upstream.state.loaded.add(model);
     gateway = await startGateway();
     const body = JSON.stringify({
       model,
       messages: [{ role: 'user', content: 'hello' }],
-      frequency_penalty: 0,
+      frequency_penalty: 0.4,
       presence_penalty: 0,
       temperature: 0,
     });
@@ -292,6 +314,93 @@ describe('gateway pass-through', () => {
 });
 
 describe('gateway autoload', () => {
+  it('serves local registrations through the SDK instead of replaying to the native HTTP router', async () => {
+    const serveLocal = vi.fn(async (_req, res, _body, model) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ model: model.variantId, source: 'session' }));
+    });
+    const load = vi.fn(async () => 'local-model:1');
+    gateway = await startGateway({
+      resolve: async () => ({ alias: 'local-model', variantId: null, local: true }),
+      load,
+      serveLocal,
+    });
+    const body = JSON.stringify({
+      model: 'local-model',
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ model: 'local-model:1', source: 'session' });
+    expect(load).toHaveBeenCalledWith('local-model', null);
+    expect(serveLocal).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      body,
+      { alias: 'local-model', variantId: 'local-model:1', local: true },
+    );
+    expect(upstream.state.hits).toHaveLength(1);
+  });
+
+  it('serves an already-loaded local model when autoload is disabled', async () => {
+    const serveLocal = vi.fn(async (_req, res, _body, model) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ model: model.variantId, source: 'session' }));
+    });
+    const load = vi.fn(async () => 'local-model:1');
+    const getLoadedModel = vi.fn(async () => 'local-model:1');
+    gateway = await startGateway({
+      autoload: false,
+      resolve: async () => ({ alias: 'local-model', variantId: null, local: true }),
+      load,
+      getLoadedModel,
+      serveLocal,
+    });
+    const body = JSON.stringify({
+      model: 'local-model',
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ model: 'local-model:1', source: 'session' });
+    expect(getLoadedModel).toHaveBeenCalledWith('local-model', null);
+    expect(load).not.toHaveBeenCalled();
+    expect(serveLocal).toHaveBeenCalledOnce();
+  });
+
+  it('does not load an unloaded local model when autoload is disabled', async () => {
+    const serveLocal = vi.fn();
+    const load = vi.fn(async () => 'local-model:1');
+    const getLoadedModel = vi.fn(async () => null);
+    gateway = await startGateway({
+      autoload: false,
+      resolve: async () => ({ alias: 'local-model', variantId: null, local: true }),
+      load,
+      getLoadedModel,
+      serveLocal,
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'local-model',
+        messages: [{ role: 'user', content: 'hello' }],
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(getLoadedModel).toHaveBeenCalledWith('local-model', null);
+    expect(load).not.toHaveBeenCalled();
+    expect(serveLocal).not.toHaveBeenCalled();
+  });
+
   it('loads the model and replays the request once', async () => {
     const loads = [];
     gateway = await startGateway({

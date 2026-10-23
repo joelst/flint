@@ -48,11 +48,13 @@ or deferred plans kept for the analysis they contain, not measured data
 | [POOL_SPIKE.md](./POOL_SPIKE.md) | Model pool co-residency spike protocol (complete; retained for re-runs) |
 | [pool-spike-results/](./pool-spike-results/) | Canonical pool-spike result |
 | [spikes/node-bundle-spike.md](./spikes/node-bundle-spike.md) | Bundled-Node packaging size/approach spike (referenced from [DEVELOPMENT.md](./DEVELOPMENT.md)) |
+| [spikes/foundry-2.1.0-spike.md](./spikes/foundry-2.1.0-spike.md) | Measured Foundry Local SDK 2.1.0 registration. The production pin is 2.1.0. Listener chat was not proven. |
 
 ## Planning process
 
 - **Operator runbook for an installed app:** [ADMIN.md](./ADMIN.md).
 - **Implementation sequencing and acceptance gates:** [PRODUCT_PLAN.md](./PRODUCT_PLAN.md).
+- **SDK 2.1.0, real BYOM, and the non-catalog ONNX model spike:** [SDK/BYOM shipping plan](./PRODUCT_PLAN.md#sdk-210-and-real-byom-shipping-plan).
 - **Forward plan through 1.0 and the 1.0 release bar:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).
   1.0 production is Windows; macOS Apple Silicon is evaluation-only.
 - **Release history:** [CHANGELOG.md](../CHANGELOG.md).

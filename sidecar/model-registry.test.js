@@ -5,6 +5,9 @@ import {
   buildCachedVariantIdsByAlias,
   isCachedModel,
   isLocalCatalogEntry,
+  indexableLocalModel,
+  localRegistrationInfo,
+  mergeLocalRegistrations,
   normalizeCachedModels,
   normalizeCatalogModels,
   resolveModelId,
@@ -53,11 +56,74 @@ describe('buildCachedModelIndex', () => {
   });
 
   describe('isLocalCatalogEntry', () => {
-    it('recognizes only local catalog URIs', () => {
+    it('recognizes a local uri or a Foundry local registration', () => {
       expect(isLocalCatalogEntry({ info: { uri: 'local://custom-model' } })).toBe(true);
+      expect(isLocalCatalogEntry({ info: { providerType: 'LocalRegistration' } })).toBe(true);
       expect(isLocalCatalogEntry({ info: { uri: 'azureml://registry/model' } })).toBe(false);
+      expect(isLocalCatalogEntry({ info: { providerType: 'FoundryLocal' } })).toBe(false);
       expect(isLocalCatalogEntry({ info: {} })).toBe(false);
       expect(isLocalCatalogEntry(null)).toBe(false);
+    });
+  });
+
+  describe('mergeLocalRegistrations', () => {
+    it('adds a registration the public catalog does not list and gives it a variant', () => {
+      const merged = mergeLocalRegistrations(
+        [{ alias: 'phi-4', id: 'Phi-4-cuda-gpu:2', variants: [{ id: 'Phi-4-cuda-gpu:2' }] }],
+        [{ alias: 'llama', id: 'llama:1', info: { task: 'chat-completion', providerType: 'LocalRegistration' } }],
+      );
+      expect(merged).toHaveLength(2);
+      expect(merged[1]).toEqual({
+        alias: 'llama',
+        id: 'llama:1',
+        info: { task: 'chat-completion', providerType: 'LocalRegistration' },
+        isCached: true,
+        variants: [{ id: 'llama:1', isCached: true, info: { cached: true } }],
+      });
+      expect(indexableLocalModel(merged[1])).toBe(merged[1]);
+    });
+
+    it('keeps a public row that already has variants and fills a taskless row', () => {
+      const publicRow = { alias: 'qwen', id: 'qwen:4', info: { task: 'chat-completion' }, variants: [{ id: 'qwen:4' }] };
+      const taskless = { alias: 'bare', id: 'bare:1', info: {} };
+      const merged = mergeLocalRegistrations(
+        [publicRow, taskless],
+        [
+          { alias: 'qwen', id: 'qwen:4', info: { task: 'chat-completion' } },
+          { alias: 'bare', id: 'bare:1', info: { task: 'embeddings' } },
+        ],
+      );
+      expect(merged[0]).toBe(publicRow);
+      expect(merged[1].info.task).toBe('embeddings');
+      expect(merged[1].variants[0].id).toBe('bare:1');
+    });
+
+    it('reports a local registration uri for the model list', () => {
+      expect(localRegistrationInfo({ providerType: 'LocalRegistration', task: 'chat-completion' }, 'llama').uri)
+        .toBe('local://llama');
+      const catalog = { providerType: 'FoundryLocal', uri: 'azureml://phi' };
+      expect(localRegistrationInfo(catalog, 'phi')).toBe(catalog);
+    });
+
+    it('keeps the other rows when a catalog getter throws', () => {
+      const readable = { alias: 'phi', id: 'phi:1', variants: [{ id: 'phi:1' }] };
+      const throwingAlias = { get alias() { throw new Error('native getter failed'); } };
+      const throwingId = {
+        alias: 'parakeet-cached-partial',
+        get id() { throw new Error('cached native getter failed'); },
+        info: { task: 'automatic-speech-recognition' },
+      };
+      const local = {
+        alias: 'llama',
+        id: 'llama:1',
+        info: { task: 'chat-completion', providerType: 'LocalRegistration' },
+      };
+      const merged = mergeLocalRegistrations([readable, throwingAlias], [local, throwingId]);
+      expect(merged).toHaveLength(4);
+      expect(merged[0]).toBe(readable);
+      expect(merged[1]).toBe(throwingAlias);
+      expect(merged[2]).toMatchObject({ alias: 'llama', id: 'llama:1', isCached: true });
+      expect(merged[3]).toBe(throwingId);
     });
   });
 

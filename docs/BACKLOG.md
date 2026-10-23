@@ -185,6 +185,15 @@ first per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) — these are not 1.0 work.
       endpoint).
 - [ ] **Curated ONNX catalog** — Flint-validated imports (pinned repo/revision, tested
       EP, required files). See [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) "After 1.0".
+- [ ] **Windows ML Server (watch)** — Windows-only, and only after llama.cpp
+      compatibility and the experimental server API settle. `WinMLServer.exe` is a
+      closed binary from the `Microsoft.Windows.AI.MachineLearning` package. It can
+      serve a GGUF, or an ONNX language model, on loopback with a bearer key that
+      changes every start. If that API settles, Flint could supervise the process
+      beside the Foundry sidecar and keep Foundry's gateway on its own port. The
+      Windows ML CLI may also help prepare an ONNX folder before Foundry
+      registration. The open
+      question for registration itself is [spikes/foundry-2.1.0-spike.md](./spikes/foundry-2.1.0-spike.md).
 
 ## Control CLI — not planned
 

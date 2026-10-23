@@ -13,6 +13,230 @@ are done.
 
 ## 0.10.0 release preparation
 
+### SDK 2.1.0 and real BYOM shipping plan
+
+**Status:** The integration branch pins SDK 2.1.0 and contains local-catalog
+registration, merged frontend discovery, local load/delete handling, runtime
+version reporting, and live-probe scripts. The linked external-model spike
+demonstrates CPU inference through IPC and the session-backed OpenAI gateway.
+Unsigned Windows packaging and bundle-resource verification also pass; these
+are not installed-app qualification or full SDK compatibility. Do not publish
+the SDK/BYOM changeset until the remaining gates below pass.
+
+**Scope:** Qualify every existing Flint model operation on 2.1.0: discovery,
+download, import/link, load/unload/delete, Playground chat/vision/tools,
+embeddings, speech, gateway clients, Arena/Benchmark, cancellation, recovery, and
+packaging. SDK custom-tool payloads are a transport feature, not permission to
+execute files, patches, or shell commands. A new runtime, GGUF, hosted Qwen API
+integration, and a general `/v1/responses` implementation are not prerequisites
+and must not be presented as part of this work.
+
+#### Model scope: existing ONNX GenAI packages
+
+**Release gate:** working BYOM for an existing compatible ONNX Runtime GenAI
+package, including one real model outside the current Foundry Local catalog.
+Use the measured Qwen 2.5 0.5B CPU folder as a harness control, not as the
+external-model proof. Renaming a catalog model does not satisfy this gate.
+
+The input package must already be ONNX GenAI; the model's original training or
+checkpoint format is not the criterion. Converting non-ONNX weights, building
+new architecture/operator support, or adopting another runtime is out of scope
+and must not block SDK 2.1.0/BYOM shipping.
+
+[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) is an example
+of a desirable model, not a named release requirement. Its published
+[configuration](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/de4b8e4d43b917e7706784d8bb445c9af86a3540/config.json)
+uses `qwen4_exp`, and this repository has no verified compatible ONNX GenAI
+recipe for it. Unless an existing supported package is available, record it as
+outside this spike's scope and choose another model. Do not open a conversion
+workstream or advertise Flash-Next support from the SDK pin alone.
+
+#### Non-catalog ONNX model test spike
+
+**Objective:** establish one repeatable recipe for a popular model that is
+absent from Foundry Local's current public catalog, using real external ONNX
+GenAI weights rather than synthetic fixtures or a renamed catalog download.
+
+**Measured candidate:** Llama 3.2 3B Instruct passed the isolated CPU chat spike
+and the public-catalog absence check recorded in the
+[spike evidence](./spikes/foundry-2.1.0-spike.md#go--no-go). Package provenance
+and the remaining lifecycle/provider checks still need qualification. A
+smaller published ONNX GenAI package is an alternative when the target
+provider/memory budget requires it and the same selection checks pass.
+
+1. Capture the current public catalog after accelerator setup and compare the
+   candidate's actual family, checkpoint, aliases, and variants. Do not count a
+   new alias or quantization of a catalog-listed checkpoint as a new model.
+2. Pin the external package's repository/revision, license, tokenizer, template,
+   `genai_config.json`, weights/external data, quantization, and execution
+   provider. Check architecture compatibility, disk space, RAM/VRAM, and context
+   budget before acquiring weights. A Transformers.js/plain ONNX export alone
+   is not an ONNX GenAI package.
+3. With Flint closed, use an isolated app/cache to prove native registration,
+   load, and meaningful generation. Record native listener behavior separately
+   so a listener 404 is not mistaken for a bad model. Stop the isolated runtime
+   before testing Flint; do not alter the external source folder.
+4. Exercise the same package through Flint copy and link: discover, load,
+   non-streaming/streaming IPC with HTTP off, gateway discovery/chat/streaming,
+   unload/reload, restart, unregister/delete. Verify the served identity and
+   unchanged external-file hashes. Test tool calls when the package supports
+   them; otherwise label that capability unverified and use the separate
+   tool-capable control for the SDK tool gate.
+5. Record the exact commands, outputs, catalog snapshot, package manifest, and
+   pass/fail/blocked results with the existing spike evidence. A successful
+   recipe becomes the real external-model release evidence and user-guide
+   recipe. Distinguish Flint integration bugs from unsupported model packages.
+
+**Bound:** try at most two existing ONNX GenAI packages before reporting the
+specific package/runtime/hardware blocker and revisiting selection. Do not
+expand the spike into conversion, training, new kernels, GGUF, or a replacement
+runtime. No specific model's unsupported architecture becomes a release gate;
+the supported external-ONNX BYOM path still requires a successful real-model
+recipe.
+
+#### Implementation order
+
+| Order | Deliverable | Exit gate |
+|---|---|---|
+| 1 | SDK/native compatibility and startup | Exact 2.1.0 JS package and matching native assets; accelerator registration precedes the catalog snapshot/local-registration work; one manager per process; generation-owned readiness and About data; existing catalog operations still work. |
+| 2 | Reliable local-model lifecycle | Durable, collision-safe registrations with explicit task/provider/device/context/capability metadata; copy/link/restart/recovery/unregister/delete matrix passes without modifying or deleting external assets. |
+| 3 | Real BYOM sessions | Control model and genuine external package produce meaningful non-streaming and streaming answers through Flint IPC, including a fresh launch and HTTP service off. |
+| 4 | BYOM OpenAI endpoint | The same registered models appear in gateway discovery and work by advertised name and alias, cold and resident, with streaming, tool results, usage, correct errors, admission, and activity accounting. No public-only native-listener 404 remains. |
+| 5 | SDK 2.1 feature adoption | Native cancellation, download cancellation, tool-call fixes, parameter/usage/output-limit handling, and audio behavior are exercised on real models; unsupported features fail explicitly. |
+| 6 | Installed-app qualification and release | Full automated gates plus a fresh target-specific Windows package, installed-app BYOM dogfood, source-file preservation, and updater/rollback evidence pass for the same release candidate. |
+
+Steps 1-2 precede 3; 3 precedes 4; 5 builds on the same lifecycle and inference
+ownership, and all precede 6. The non-catalog spike's package/catalog selection
+can run alongside steps 1-2; its Flint inference matrix closes steps 3-4.
+Each implementation slice gets its own focused changeset and review;
+do not combine a runtime replacement or storage-format change with this upgrade.
+
+**1. SDK/native and startup**
+
+- Audit the installed 2.1.0 declarations and actual calls, not just release
+  notes: local `Catalog`, `MutableModelInfo`, session/request APIs, cancellation,
+  download signals, and metadata getters. Prefer session paths; test that normal
+  2.1.0 operations never invoke deprecated clients. Compatibility fallbacks must
+  not hide a primary inference error or submit it a second time.
+- Verify `deps_versions.json` and native-cache manifests on clean install and
+  package staging. Report JS/core mismatches; do not reuse an incompatible
+  cached native payload or describe a load smoke as inference qualification.
+- Move startup registration out of the current `init` fast path into the
+  serialized, accelerator-ready catalog lifecycle. Respect offline/deferred
+  catalog startup, Stop authorization, partial provider failures, and recovery
+  generations. Reuse the manager; never initialize the native core twice.
+
+**2. Local registration and ownership**
+
+- Use the local catalog, not the public default. Carry catalog ownership through
+  resolution/load/delete rather than treating every public lookup failure as
+  permission to hide the error with a local fallback.
+- Reconcile persisted registrations with owned imports and explicit links on
+  restart/recovery. Check path, identity, version, task, provider, and source
+  availability; handle moved folders and duplicate aliases/ids explicitly.
+  Never unregister an unrelated existing row just because a lookup failed or a
+  task is missing. Do not present a stale registration as cached/loadable.
+- Add reviewed metadata overrides to inspection/import/link contracts, SDK
+  wrappers, sidecar validation, and UI. Filename heuristics are suggestions,
+  not proof of architecture, vision, tool calling, or a working provider.
+- Serialize registration/update/unregister against model admission and eviction.
+  Revalidate assets under the residency lock. Invalidate derived indexes on
+  every mutation; surface local-catalog read and registration failures rather
+  than returning an empty/success-shaped result.
+- Both copy and link must distinguish files added, registration established,
+  load verified, and restart required. Report partial outcomes and safe retry
+  instructions. On cleanup failures, report what remains; never imply rollback.
+- Keep template synthesis for owned copies until a real model proves it is no
+  longer needed. Test registration without `inference_model.json`; links must
+  never author it in the source. Unregister before removing owned assets, but
+  capture/validate cleanup identity while the SDK handle is still usable.
+  Deleting a link removes only that link. Imported/linked/unmanaged folder tests
+  must check source hashes, not just successful return values.
+
+**3-4. Sessions and the OpenAI gateway**
+
+- `scripts/byom-gateway-live.mjs` now exercises a real model through Flint's
+  sidecar and gateway; `scripts/spike-foundry-210.mjs` separately records the
+  native listener behavior. The Llama 3.2 3B CPU run passed IPC, gateway
+  discovery, buffered chat, streaming chat, and source-file integrity.
+- The gateway now appends cached local registrations to `/v1/models`. Continue
+  qualifying canonical alias/version resolution against frontend discovery and
+  the exact loaded build; unknown or uncached remote identifiers must never
+  trigger a download.
+- The native listener still does not route local registrations. Flint now
+  dispatches those requests through `ChatSession` under the existing manager,
+  residency/admission locks, and in-flight lease. Tool/usage parity and
+  installed-app behavior are not yet proven. Ordinary catalog-model proxy
+  behavior remains unchanged.
+- Complete the lifecycle/error matrix: unknown model/version, missing source,
+  registration/load failure, malformed/oversized request, disconnect,
+  concurrent requests, model switch, idle eviction, benchmark-exclusive 503,
+  Stop & Unload, and terminal Quit. No finite control-plane deadline may cut
+  off a successful inference stream.
+
+**5. Native 2.1 feature completion**
+
+- Wire `Request.cancel()` for active one-shot work and the streaming
+  `AbortSignal`/terminal `response` contract. Preserve completion-vs-cancel
+  races and queued-request semantics; retain residency protection until native
+  completion/confirmed cancellation or child exit, not until iterator break or
+  the UI Stop acknowledgement. Exercise gateway disconnect independently.
+- Wire cooperative download `AbortSignal` cancellation and retain partial-file
+  cleanup/reporting. A checkpoint delay is not proof cancellation failed; an
+  acknowledgement alone is not proof the download stopped.
+- Prove Qwen enum arguments, fragmented/cumulative tool calls, malformed-call
+  recovery, a tool-result follow-up, unique ids, and a tool-free final answer.
+  Keep Llama text-call compatibility model-scoped and subject to the existing
+  consent, allowlist, two-round, size, and schema limits.
+- Add a bounded discriminated transport representation for SDK custom/raw-text
+  tools if exposed through Flint's public contracts, with explicit support or
+  rejection on each transport. Never JSON-parse a custom payload as a function
+  argument or add an executor to Playground.
+- Verify sampling, reasoning, tool-choice, structured output, usage and
+  output-limit/finish reasons across IPC, fallback, and gateway. Resolve the
+  imported code's silent removal of every frequency penalty: supported values
+  must preserve semantics; unsupported non-neutral values need an explicit UI
+  and API outcome, not a successful response that hides an ignored setting.
+- Re-probe Whisper URI and Nemotron PCM/language behavior on 2.1.0; do not infer
+  success from the old 2.0.1 shapes or claim native word timestamps. Run a real
+  embedding package through both `embedTexts` and `/v1/embeddings` with numeric,
+  finite vectors before claiming end-to-end embedding support.
+- Evaluate `ChatSession.preflightRequest` for exact structural token admission
+  on native session paths. Preserve whole-turn packing, reply reserve and
+  untrusted-envelope rules; structural fit does not reserve runtime memory.
+
+#### Required evidence and release decision
+
+For each real model, record source URL/revision, artifact hashes, conversion
+recipe/version, license, quantization, task, template, provider, device, RAM/VRAM,
+context/output limits, SDK/core/native versions, app commit/build, served id,
+commands and results. Keep model weights and prompt bodies out of the repo.
+Store repeatable measurements with the existing spike evidence; keep this plan
+for remaining gates, not a running history.
+
+The live runner must make an absent requested model, missing required usage,
+malformed/absent tool call, or absent tool-result turn fail the relevant gate.
+Its current optional `model-listed`/`usage` checks and HTTP-only tool success
+are not sufficient. Run disconnect last, after all functional probes; a client
+abort proves neither native quiescence nor released memory.
+
+| Qualification | Required checks |
+|---|---|
+| Automated | `npm run check`, `npm run build`, `npm run verify:ipc-contracts`, `npm run verify:markdown-links`, `npm test`, `npm run test:coverage`; native BYOM E2E and both live-runner self-tests; new guards demonstrated red then green. |
+| Real models | Copy and link, no-metadata import, direct IPC with HTTP off, gateway discovery/chat/stream/tools, restart/recovery, unload/reload/delete with unchanged external source; CPU control and supported GPU/provider; separate vision, embedding and speech checks. |
+| Runtime coexistence | Catalog and external models together; model swap, concurrent requests, leases/pins/eviction, Arena/Benchmark exclusivity and recovery; gateway 200 before a run, 503 while Running, 200 after release. |
+| Packaged Windows | Fresh target-specific build; `npm run verify:bundle -- --target x86_64-pc-windows-msvc --require-build`, `npm run smoke:node`, `npm run smoke:runtime`; installed copy/link/load/chat/stream/tools/delete/relaunch without PATH Node; signed-installer and updater/rollback qualification per [RELEASE.md](./RELEASE.md). |
+
+**Integration baseline (2026-10-22):** `npm run check` has zero errors and one
+existing label warning; frontend build and IPC verification pass. The 14
+focused SDK/BYOM/gateway/transport/GPU suites pass 692 tests; native BYOM
+registration E2E passes 24 tests. Both runner self-tests and bundled Node smoke
+pass. These do **not** establish real-weight inference. `npm run verify:bundle`
+fails against the existing non-targeted release tree because its staged
+sidecar/NSIS script lacks the web helper files. A fresh package, full
+test/coverage run, and the non-catalog ONNX real-model spike remain unqualified.
+Flash-Next conversion or architecture enablement is not a release gate.
+
 0.10.0 is a qualification release, not permission to merge every accumulated
 changeset immediately. Keep the generated version PR open while these gates are
 unfinished; newly completed work must flow into it through normal changesets.
@@ -90,7 +314,7 @@ Rubber-duck: this is not a security product. The boundary already exists; 1.0 re
 - Prune unused grants: opener plugin (renderer never imported it); `$RESOURCE` read scope (sidecar paths are native `trusted_runtime_paths`); redundant `core:tray:default` / `core:menu:default` (already in `core:default`). Keep `$RESOURCE` write deny. Comment each survivor.
 - Dedicated `src/lib/security-boundary.test.ts` that fails CI if opener/spawn/kill return, `$RESOURCE` reads return, shell execute is more than `node -v`, IPC allowlists drift, or BYOM `isInsideRoot` accepts a traversal.
 - Cache `runtime/foundry-native-cache` in CI/release. CI runs `npm run ci:deps` (extract packages, restore cache, `npm rebuild`) so the SDK `skipIfPresent` installer sees the cores. There is no root `preinstall` restore; that hook cannot run before the SDK installer.
-- Pin `foundry-local-sdk` to `2.0.1`. Warn (do not fail) at sidecar `init` when loaded SDK/core versions differ from that pin.
+- Pin `foundry-local-sdk` to `2.1.0`. Warn (do not fail) at sidecar `init` when loaded SDK/core versions differ from that pin.
 
 ### Wave 2 — Native lifecycle and conversation integrity
 
@@ -102,7 +326,10 @@ Rubber-duck: a Svelte tray created on first close is not renderer-independent. N
 
 ### Wave 3 — Cancellation and timeout certainty
 
-Foundry has no abort API. 1.0 closes honesty and fencing, not a fake Stop.
+SDK 2.1.0 exposes native request and streaming cancellation. Flint's current
+transport still suppresses output and drains the native operation; adoption and
+confirmation are gated by the SDK shipping plan above. Stop must remain honest
+until native completion or cancellation is established.
 
 - Chat streaming: Stop settles the caller; native loop keeps consuming until stream end or child exit; UI already says the background may finish.
 - Compare: no Stop control. The running state says the run cannot be cancelled — wait for slots.
@@ -226,7 +453,7 @@ audio-decoder work has no 1.0 gate.
 | Would rewriting the backend fix conversation loss? | No. Correct hydration, storage identity, and asynchronous ownership in the frontend first. |
 | Should the emergency fix introduce a new database? | No. Stop destructive writes immediately; give the subsequent storage migration its own compatibility gate. |
 | Does keeping old storage make every downgrade safe? | No. Define a supported rollback version that understands the new format, including conversations created after migration. |
-| Does a timeout or Stop acknowledgement mean inference stopped? | No. Separate caller completion from native-operation completion. Retain resource protection until completion is established or the owning process is gone. Foundry has no abort API; 1.0 closes honesty and fencing, not a fake Stop. |
+| Does a timeout or Stop acknowledgement mean inference stopped? | No. Separate caller completion from native-operation completion. SDK 2.1.0 cancellation is cooperative and can race completion; retain resource protection until the terminal native outcome is established or the owning process is gone. |
 | Can a missing heartbeat prove the sidecar crashed? | Not while synchronous native work can block its event loop. Distinguish unresponsive from exited; avoid restart loops and duplicate work. |
 | Would moving inference into Tauri prevent all windows disappearing? | It can do the opposite: a native fault would enter the desktop process. Keep inference in a supervised process even if its implementation later becomes Rust. |
 | Can a worker thread initialize another Foundry manager? | Not safely as a workaround for the process-global native core. Keep one manager owner; do not duplicate ownership across Node workers. |

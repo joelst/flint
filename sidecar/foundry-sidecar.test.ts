@@ -2975,6 +2975,9 @@ describe('foundry-sidecar error propagation and resilience', () => {
     expect(res.ok).toBe(true);
     expect(res.result.initialized).toBe(false);
     expect(res.result.modelLoaded).toBe(false);
+    expect(res.result.foundrySdkPin).toBe('2.1.0');
+    expect(res.result.foundryCorePin).toBe('2.1.0');
+    expect(res.result.foundrySdkVersion).toBe('2.1.0');
   });
 
   it('getStatus reports benchmarkExclusive, reflecting setBenchmarkExclusive without requiring init', async () => {
@@ -3524,7 +3527,7 @@ describe('transcribeAudio AudioSession path', () => {
       language: 'en',
     });
     const res = await transcribed;
-    expect(res.error).toContain('Foundry Local SDK 2.0.1');
+    expect(res.error).toContain('Foundry Local SDK 2.1.0');
     expect(res.error).toContain('does not support audio processing');
     expect(events()).not.toContain('legacy-transcribe');
   }, 30000);
@@ -4024,7 +4027,7 @@ describe('chatCompletion ChatSession path', () => {
     expect(request.tools[0].function.name).toBe('read_status');
     expect(request.tool_choice).toEqual({ type: 'function', function: { name: 'read_status' } });
     expect(request.response_format).toEqual({ type: 'json_object' });
-    expect(request.frequency_penalty).toBe(0.25);
+    expect(request.frequency_penalty).toBeUndefined();
     expect(request.presence_penalty).toBe(-0.5);
     expect(request.top_p).toBe(0.8);
     expect(request.metadata).toEqual({ top_k: '12', random_seed: '17' });

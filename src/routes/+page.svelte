@@ -62,6 +62,7 @@
     setBenchmarkExclusive as sdkSetBenchmarkExclusive,
     reconcileBenchmarkExclusive,
     getLastAppliedMemorySettingsSeq,
+    refreshFoundryRuntimeAbout,
     getWslStatus,
     enableWslMirroredNetworking,
     shutdownWsl,
@@ -78,6 +79,7 @@
   } from "$lib/sdk";
   import { evaluateStartupPreload, publishedAccelerationKind, publishedAccelerationLabels } from "$lib/accelerator-readiness";
   import { failureLogLine, failureNotice, summarizeFailure, type FailureNotice } from "$lib/status-message";
+  import { foundrySdkAboutLine } from "$lib/foundry-about";
   import {
     evaluate as evaluateWatch,
     emptyWatchState,
@@ -262,6 +264,9 @@
     webToolSchemaTokens,
     canonicalFetchUrl,
     collectCurrentWebFetchUrls,
+    contentWebToolCalls,
+    offerAnotherWebToolRound,
+    usedToolCallIds,
     executeWebImage,
     executeWebToolCalls,
     messagesContainImages,
@@ -508,7 +513,7 @@
     }
   }
 
-  /** About strip — app + Node + service (Help + Settings). */
+  /** About strip — app + Node + Foundry SDK + service (Help + Settings). */
   const appVersion = String(
     import.meta.env.VITE_FLINT_BUILD_VERSION || (packageJson as { version?: string }).version || "0.0.0",
   );
@@ -690,6 +695,21 @@
       nodeVersionOk = null;
     }
   }
+
+  async function refreshFoundryAboutLine() {
+    try {
+      await refreshFoundryRuntimeAbout();
+    } catch {
+      // The connection row already says when the sidecar is down.
+    }
+  }
+
+  let foundryAbout = $derived(foundrySdkAboutLine(state.foundryRuntimeReported ? {
+    sdkVersion: state.foundrySdkVersion,
+    coreVersion: state.foundryCoreVersion,
+    sdkPin: state.foundrySdkPin,
+    corePin: state.foundryCorePin,
+  } : null));
 
   function dismissFirstRunCoach() {
     showFirstRunCoach = false;
@@ -1009,6 +1029,11 @@
     audioLaneModel: undefined as string | undefined,
     pool: [] as any[],
     poolStats: null as any,
+    foundrySdkVersion: null as string | null,
+    foundryCoreVersion: null as string | null,
+    foundrySdkPin: null as string | null,
+    foundryCorePin: null as string | null,
+    foundryRuntimeReported: false,
     runtimeGpuApplied: null as string | null,
     runtimeGpuAppliedSource: null as "configured" | "inherited" | "unrestricted" | null,
   });
@@ -3087,8 +3112,13 @@
     state.audioLaneModel = s.audioLaneModel;
     state.pool = s.pool ?? [];
     state.poolStats = s.poolStats ?? null;
+    state.foundrySdkVersion = s.foundrySdkVersion ?? null;
+    state.foundryCoreVersion = s.foundryCoreVersion ?? null;
+    state.foundrySdkPin = s.foundrySdkPin ?? null;
+    state.foundryCorePin = s.foundryCorePin ?? null;
     state.runtimeGpuApplied = s.runtimeGpuApplied ?? null;
     state.runtimeGpuAppliedSource = s.runtimeGpuAppliedSource ?? null;
+    state.foundryRuntimeReported = s.foundryRuntimeReported === true;
     sidecarLogs = s.logs ?? [];
   }
 
@@ -3374,9 +3404,10 @@
   let byomPreset = $state("");
   let byomTemplateOpen = $state(false);
 
-  /** Locally imported and linked models report a `local://` uri; catalog models do not. */
+  /** Imported and linked models use a `local://` uri or Foundry's LocalRegistration provider. */
   function isLocalModel(model: any): boolean {
-    return String(model?.info?.uri || "").startsWith("local://");
+    if (String(model?.info?.uri || "").startsWith("local://")) return true;
+    return model?.info?.providerType === "LocalRegistration";
   }
 
   const byomTemplateCheck = $derived(
@@ -3448,12 +3479,18 @@
           promptTemplate: byomTemplateDirty() ? (byomTemplate as any) : undefined,
         });
       }
-      const addedMessage = `Added model "${byomName.trim()}" (${mode === "link" ? "linked" : "copied"})`;
+      let addedMessage = `Added model "${byomName.trim()}" (${mode === "link" ? "linked" : "copied"})`;
+      if (mode === "copy" && result.registrationError) {
+        addedMessage += `. Task registration failed: ${result.registrationError}`;
+      } else if (mode === "copy" && result.registered && result.registrationTask) {
+        addedMessage += `. Task set to ${result.registrationTask}`;
+      }
       if (result.catalogRefreshRequiresRestart) {
         statusMessage = `${addedMessage}. Restart Flint to let the model catalog detect the change.`;
         appendAppLog(statusMessage, "warn");
       } else {
-        appendAppLog(addedMessage, "info");
+        statusMessage = addedMessage;
+        appendAppLog(addedMessage, result.registrationError ? "warn" : "info");
       }
       byomOpen = false;
       resetByom();
@@ -4460,9 +4497,8 @@ updateStateFromSdk();
     // value); other providers (DirectML, WebGPU) keep the unrestricted inventory.
     const all = state.poolStats?.accelerators || [];
     const gpus = (cudaOnly ? cudaVisibleAccelerators(all, runtimeGpuApplied) : all).filter(
-      (a) => a.kind === "gpu" && (!cudaOnly || a.vendor === "nvidia"),
+      (a) => a.kind === "gpu",
     );
-    let totalMb = 0;
     let freeMb = 0;
     let usedMb = 0;
     let maxFreeMb = 0;
@@ -5551,6 +5587,7 @@ updateStateFromSdk();
       bindAddress: networkBindAddress || undefined,
     });
     void refreshNodeAboutLine();
+    void refreshFoundryAboutLine();
 
     try {
       if (ok) {
@@ -7228,6 +7265,9 @@ updateStateFromSdk();
       presencePenalty,
       randomSeed: randomSeed ?? undefined,
     };
+    if (frequencyPenalty !== 0) {
+      statusMessage = "Foundry Local does not apply frequency penalty, so this send omitted it.";
+    }
 
     const nextMessages = [...chatMessages];
     const userCreatedAt = Date.now();
@@ -7497,12 +7537,18 @@ updateStateFromSdk();
         // helper still requires public HTTPS.
         const maxWebToolRounds = 2;
         let webToolRounds = 0;
+        let contentToolAnswer = false;
         let retriedWithoutTools = false;
         let roundMaxChars = 20_000;
         let data: any;
         while (true) {
-          const roundsRemaining = offerWebTools ? Math.max(0, maxWebToolRounds - webToolRounds) : 0;
-          const sendTools = offerWebTools && webToolRounds < maxWebToolRounds;
+          const sendTools = offerAnotherWebToolRound({
+            offerWebTools,
+            webToolRounds,
+            maxWebToolRounds,
+            contentToolAnswer,
+          });
+          const roundsRemaining = sendTools ? Math.max(0, maxWebToolRounds - webToolRounds) : 0;
           const latestKeep = [...requestMessages].reverse().findIndex((message: { role?: string }) => message?.role === "user");
           const latestKeepAt = latestKeep < 0 ? 0 : requestMessages.length - 1 - latestKeep;
           const keptHead = requestMessages.slice(0, Math.min(1, latestKeepAt));
@@ -7605,7 +7651,20 @@ updateStateFromSdk();
             }
             return;
           }
-          const rawCalls = data?.choices?.[0]?.message?.tool_calls;
+          let rawCalls = data?.choices?.[0]?.message?.tool_calls;
+          if ((!Array.isArray(rawCalls) || rawCalls.length === 0) && offerWebTools) {
+            const lifted = contentWebToolCalls(
+              data?.choices?.[0]?.message?.content,
+              usedToolCallIds(requestMessages),
+            );
+            const message = data?.choices?.[0]?.message;
+            if (lifted && message) {
+              rawCalls = lifted;
+              message.content = null;
+              // The chat template requires a function call while tools remain offered.
+              contentToolAnswer = true;
+            }
+          }
           const hasCalls = Array.isArray(rawCalls) && rawCalls.length > 0;
           if (!offerWebTools || !hasCalls) break;
           if (!sendTools) {
@@ -7750,9 +7809,9 @@ updateStateFromSdk();
           chatClient.settings.maxTokens = maxTokens;
           chatClient.settings.topP = topP;
           chatClient.settings.topK = topK;
-          // Zero is neutral, but Foundry Local 2.0.1 misapplies an explicitly serialized
-          // frequency_penalty of 0 for some models. Clear reused-client settings instead.
-          chatClient.settings.frequencyPenalty = frequencyPenalty === 0 ? undefined : frequencyPenalty;
+          // The session client never serializes frequency penalty. Clear a reused client
+          // so an older nonzero value cannot linger on that object.
+          chatClient.settings.frequencyPenalty = undefined;
           chatClient.settings.presencePenalty = presencePenalty === 0 ? undefined : presencePenalty;
           chatClient.settings.randomSeed = randomSeed ?? undefined;
         }
@@ -10891,7 +10950,7 @@ Output only the summary text, no preamble.`;
                       disabled={isStreaming}
                     />
 
-                    <label for="genparams-freqpenalty" title="Penalize tokens by how often they've already appeared (-2 to 2)">Frequency penalty</label>
+                    <label for="genparams-freqpenalty" title="Foundry Local does not apply frequency penalty. A nonzero value is omitted so the reply can run.">Frequency penalty</label>
                     <input
                       type="range"
                       id="genparams-freqpenalty"
@@ -12251,6 +12310,13 @@ Output only the summary text, no preamble.`;
                 </dd>
               </div>
               <div class="about-row">
+                <dt>Foundry SDK</dt>
+                <dd class:about-ok={foundryAbout.ok === true} class:about-bad={foundryAbout.ok === false}>
+                  {foundryAbout.label}
+                  <button type="button" class="tiny about-refresh" onclick={() => refreshFoundryAboutLine()}>Recheck</button>
+                </dd>
+              </div>
+              <div class="about-row">
                 <dt>Sidecar / Foundry</dt>
                 <dd class:about-ok={state.ready} class:about-bad={!state.ready && !!state.error}>
                   {#if state.ready}
@@ -13235,6 +13301,13 @@ Output only the summary text, no preamble.`;
                 <dd class:about-ok={nodeVersionOk === true} class:about-bad={nodeVersionOk === false}>
                   {nodeVersionLabel}
                   <button type="button" class="tiny about-refresh" onclick={() => refreshNodeAboutLine()}>Recheck</button>
+                </dd>
+              </div>
+              <div class="about-row">
+                <dt>Foundry SDK</dt>
+                <dd class:about-ok={foundryAbout.ok === true} class:about-bad={foundryAbout.ok === false}>
+                  {foundryAbout.label}
+                  <button type="button" class="tiny about-refresh" onclick={() => refreshFoundryAboutLine()}>Recheck</button>
                 </dd>
               </div>
               <div class="about-row">

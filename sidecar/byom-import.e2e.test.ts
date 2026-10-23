@@ -1,9 +1,9 @@
 // End-to-end coverage for the BYOM import path.
 //
 // These tests drive the real sidecar over its JSON-lines protocol and then ask the real
-// Foundry SDK whether the imported model is discoverable. That last step is the point:
-// unit tests can prove Flint writes the files it intends to, but only the native scanner
-// can prove those files add up to a model Foundry will load.
+// Foundry SDK whether the imported model is registered. That last step is the point:
+// unit tests can prove Flint writes the files it intends to, but only the local catalog
+// can prove Foundry kept the session task.
 //
 // Everything happens under a throwaway appName, so the developer's own ~/.flint is never
 // touched.
@@ -101,6 +101,8 @@ beforeAll(async () => {
     let msg: any;
     try { msg = JSON.parse(line); } catch { return; }
     if (msg?.id && pending.has(msg.id)) {
+      // Accelerator downloads emit progress on this command's id before the reply.
+      if (msg.progress !== undefined || msg.stream) return;
       pending.get(msg.id)!(msg);
       pending.delete(msg.id);
     }
@@ -119,7 +121,7 @@ beforeAll(async () => {
   // incomplete SDK snapshot. Establish provider setup once; the first mutation below still
   // owns the initial native catalog scan and has a matching timeout.
   await send('ensureAccelerators');
-}, 0);
+}, 600_000);
 
 afterAll(async () => {
   if (proc) await killAndWait(proc);
@@ -267,14 +269,17 @@ describe('BYOM link', () => {
 });
 
 describe('BYOM discovery by the Foundry SDK', () => {
-  it.skipIf(!hasNativeSdk)('surfaces an imported model as a Local provider resolvable by alias', async () => {
+  it.skipIf(!hasNativeSdk)('registers an imported model on the local catalog with its session task', async () => {
     const src = track(makeSourceRepo());
     const imported = await send('importModelFolder', { folderPath: src, name: 'discoverable-model' });
     expect(imported.ok, JSON.stringify(imported)).toBe(true);
+    expect(imported.result.registered).toBe(true);
+    expect(imported.result.registrationTask).toBe('chat-completion');
 
     const embedSrc = track(makeEmbeddingSourceRepo());
     const embedImported = await send('importModelFolder', { folderPath: embedSrc, name: 'discoverable-embed' });
     expect(embedImported.ok, JSON.stringify(embedImported)).toBe(true);
+    expect(embedImported.result.registrationTask).toBe('embeddings');
 
     const templateSrc = track(makeSourceRepo());
     await send('importModelFolder', { folderPath: templateSrc, name: 'tpl-write-sdk' });
@@ -284,22 +289,25 @@ describe('BYOM discovery by the Foundry SDK', () => {
     });
     expect(templateUpdated.ok, JSON.stringify(templateUpdated)).toBe(true);
 
+    const { CatalogType } = await import('foundry-local-sdk');
     const mgr = await getNativeManager();
-    const cached = await mgr.catalog.getCachedModels();
+    const local = mgr.getCatalog(CatalogType.Local);
+    const cached = await local.getCachedModels();
 
     const found = cached.find((m: any) => String(m.id).startsWith('discoverable-model'));
     expect(found, `cached: ${cached.map((m: any) => m.id).join(', ')}`).toBeTruthy();
-    expect(found.info.providerType).toBe('Local');
-    expect(found.info.uri).toBe('local://discoverable-model');
+    expect(found.info.providerType).toBe('LocalRegistration');
+    expect(found.info.task).toBe('chat-completion');
 
     const foundEmbed = cached.find((m: any) => String(m.id).startsWith('discoverable-embed'));
     expect(foundEmbed, `cached: ${cached.map((m: any) => m.id).join(', ')}`).toBeTruthy();
-    expect(foundEmbed.info.providerType).toBe('Local');
-    expect(foundEmbed.info.uri).toBe('local://discoverable-embed');
+    expect(foundEmbed.info.providerType).toBe('LocalRegistration');
+    expect(foundEmbed.info.task).toBe('embeddings');
 
-    const byAlias = await mgr.catalog.getModel('discoverable-model');
+    const byAlias = await local.getModel('discoverable-model');
     expect(byAlias.id).toBe('discoverable-model:1');
-    const rewrittenTemplate = await mgr.catalog.getModel('tpl-write-sdk');
+    expect(byAlias.info.task).toBe('chat-completion');
+    const rewrittenTemplate = await local.getModel('tpl-write-sdk');
     expect(rewrittenTemplate.id).toBe('tpl-write-sdk:1');
   }, 60000);
 });

@@ -7,6 +7,9 @@ import {
   collectWebFetchUrls,
   searchResultUrls,
   executeWebImage,
+  contentWebToolCalls,
+  offerAnotherWebToolRound,
+  usedToolCallIds,
   executeWebToolCalls,
   messagesContainImages,
   modelCannotUseWebTools,
@@ -33,6 +36,67 @@ function parsedError(calls: unknown): string {
   if (!parsed || !('error' in parsed)) throw new Error('expected a web tool error');
   return parsed.error;
 }
+
+describe('content web tool calls', () => {
+  it('lifts a Llama parameters object that is the entire reply', () => {
+    expect(contentWebToolCalls(
+      '{"name": "web_search", "parameters": {"query": "windspeed velocity of a swallow"}}',
+    )).toEqual([{
+      id: 'call-content-1',
+      type: 'function',
+      function: {
+        name: 'web_search',
+        arguments: '{"query":"windspeed velocity of a swallow"}',
+      },
+    }]);
+    expect(contentWebToolCalls(
+      '  <|python_tag|>\n{"name":"web_fetch","parameters":{"url":"https://example.com/a"}}\n',
+    )?.[0]?.function).toEqual({
+      name: 'web_fetch',
+      arguments: '{"url":"https://example.com/a"}',
+    });
+    expect(parsedRequest(contentWebToolCalls(
+      '{"name":"web_search","arguments":{"query":"swallows"}}',
+    ))).toEqual({ operation: 'search', query: 'swallows', maxResults: 5 });
+  });
+
+  it('leaves prose, extra keys, and a second object as ordinary text', () => {
+    expect(contentWebToolCalls(
+      'The speed is unknown.\n{"name":"web_search","parameters":{"query":"swallow"}}',
+    )).toBeNull();
+    expect(contentWebToolCalls(
+      '{"name":"web_search","parameters":{"query":"swallow"},"id":"1"}',
+    )).toBeNull();
+    expect(contentWebToolCalls(
+      '{"name":"web_search","parameters":{"query":"a"}}{"name":"web_search","parameters":{"query":"b"}}',
+    )).toBeNull();
+    expect(contentWebToolCalls('{"name":"shell","parameters":{"query":"x"}}')).toBeNull();
+    expect(contentWebToolCalls('{"name":"web_search","parameters":["swallow"]}')).toBeNull();
+    expect(contentWebToolCalls('{"name":"web_search"')).toBeNull();
+    expect(contentWebToolCalls(null)).toBeNull();
+  });
+
+  it('picks the next id when the transcript already used call-content-1', () => {
+    const fetch = '{"name":"web_fetch","parameters":{"url":"https://interestingengineering.com/a"}}';
+    expect(contentWebToolCalls(fetch, ['call-content-1'])?.[0]?.id).toBe('call-content-2');
+    const messages = [
+      { role: 'assistant', tool_calls: [{ id: 'call-content-1', type: 'function', function: { name: 'web_search', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'call-content-1', content: 'snippets' },
+    ];
+    expect(usedToolCallIds(messages)).toEqual(['call-content-1', 'call-content-1']);
+    expect(contentWebToolCalls(fetch, usedToolCallIds(messages))?.[0]?.id).toBe('call-content-2');
+    expect(usedToolCallIds(null)).toEqual([]);
+    expect(contentWebToolCalls(fetch, Array.from({ length: 1000 }, (_, index) => `call-content-${index + 1}`))).toBeNull();
+  });
+
+  it('stops offering tools after a call that was recovered from assistant text', () => {
+    const base = { offerWebTools: true, webToolRounds: 1, maxWebToolRounds: 2, contentToolAnswer: false };
+    expect(offerAnotherWebToolRound(base)).toBe(true);
+    expect(offerAnotherWebToolRound({ ...base, contentToolAnswer: true })).toBe(false);
+    expect(offerAnotherWebToolRound({ ...base, webToolRounds: 2 })).toBe(false);
+    expect(offerAnotherWebToolRound({ ...base, offerWebTools: false })).toBe(false);
+  });
+});
 
 describe('web tool calls', () => {
   it('exposes bounded search and fetch tools to the model', () => {
