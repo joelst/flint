@@ -10,16 +10,6 @@ Verify an item against the tree before acting on it.
 [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md). This file is deferred and post-1.0 only.
 Do not add 1.0 work here; that duplicates the plan and the two will drift.
 
-## Current execution priorities
-
-Finish the **0.10.0** qualification gates in
-[PRODUCT_PLAN.md](./PRODUCT_PLAN.md): packaged Benchmark Preview dogfood,
-confirmation that the shipped public web-retrieval helper still matches its
-boundary, infrastructure/release validation, and the generated release review. Then
-continue the remaining 1.0 process gates: signed clean-machine Windows dogfood,
-stable updater evidence, and pinned
-integration versions. Defer wholesale Foundry runtime replacement.
-
 **Linux work is deferred:** preserve existing checks and mappings. Continue
 Linux-specific work only where it is already part of another feature; shared
 Windows/macOS fixes do not establish Linux release support. 1.0 production is

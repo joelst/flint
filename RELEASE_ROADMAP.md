@@ -47,26 +47,23 @@ pins, and corrections found by that evidence; sequencing lives in
   OpenClaw accepts any non-empty placeholder API key on loopback and health-checks
   `GET /v1/models`.
 
-### Current stable → 0.10.0
+### Current stable → 0.11.0
 
-**0.9.2** is the current published stable release. **0.10.0** is the next
-release; its changeset version PR and GitHub release remain open drafts until
-the release gates in [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) are complete.
+**0.10.0** is the current published stable release. **0.11.0** is the next
+release. Its SDK 2.1.0 and real-BYOM qualification gates are tracked in
+[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md); do not publish until those gates
+are complete.
 
-0.10.0 qualifies the existing product rather than opening broad new feature
-work:
-
-- packaged Windows Benchmark Preview dogfood covers pin, Stop, Resume,
-  served-variant reporting, and a gateway `503`; the preview stays opt-in and
-  off by default until that evidence exists;
-- the bounded, read-only public web-search/retrieval helper stays outside
-  the Foundry sidecar, with no ambient credentials or filesystem operations
-  exposed to retrieved content and with request-scoped untrusted content;
-- unit/contract/sidecar E2E, bundle verification, packaged runtime smoke, and
-  release metadata agree on the same build before the draft is published.
+The 0.11.0 work qualifies Flint's existing ONNX model path rather than opening
+broad new feature work. One real, non-catalog Llama 3.2 3B package has already
+passed CPU registration, IPC chat, and buffered/streaming chat through Flint's
+gateway, with its source files unchanged. Remaining package provenance,
+lifecycle, SDK feature, and installed-app gates are listed in the product plan.
+The native Foundry listener still does not route local registrations; Flint's
+session-backed gateway handles them.
 
 Authenticated retrieval, browser automation, shell/file tools, autonomous agent
-loops, full RAG, and multi-endpoint routing remain outside 0.10.0.
+loops, full RAG, and multi-endpoint routing remain outside 0.11.0.
 
 ### After 1.0
 - **Curated model acquisition** — a Flint-validated ONNX catalog (pinned repo and
@@ -91,7 +88,7 @@ not a multi-provider control plane and not "every backlog item closed."
 
 **1.0 production is Windows.** macOS Apple Silicon remains evaluation-only
 (unsigned builds; `scripts/install-macos.sh` or `xattr -cr`). Linux is deferred.
-Do not date 1.0 until 0.10.0 qualification and the remaining clean-machine,
+Do not date 1.0 until 0.11.0 qualification and the remaining clean-machine,
 stable-updater, and integration-version gates are recorded. Sequenced work lives in
 [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md).
 
@@ -136,9 +133,9 @@ stable-updater, and integration-version gates are recorded. Sequenced work lives
 
 ### 1.0 ship gate (process)
 
-- **0.10.0** release gates recorded; version, changelog, artifacts, and updater
-  metadata identify the same reviewed build. Publish the existing draft as a
-  full stable release only after those checks.
+- **0.11.0** release gates recorded; version, changelog, artifacts, and updater
+  metadata identify the same reviewed build. Publish it as a full stable
+  release only after those checks.
 - Signed Windows MSI/NSIS on a clean machine (no PATH Node, Rust, or Foundry)
   downloads and loads a model.
 - Stable-channel updater and rollback evidence is current.
@@ -152,6 +149,6 @@ stable-updater, and integration-version gates are recorded. Sequenced work lives
 remaining bar is the seven criteria above holding under real-world Windows use,
 not new features (multi-endpoint routing, RAG, Azure, Linux, a
 general Flint-native tool executor). The bounded public web-retrieval helper
-planned for 0.10.0 is read-only infrastructure, not an autonomous agent loop.
+shipped in 0.10.0 is read-only infrastructure, not an autonomous agent loop.
 
 ---

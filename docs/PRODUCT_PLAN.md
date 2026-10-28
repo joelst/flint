@@ -1,17 +1,17 @@
 # Flint reliability execution plan
 
-**Status:** The 1.0 foundation waves are present in the 0.9.x stable line. **0.9.2**
-is the current published stable release. **0.10.0** is the next release, with its
-changeset release PR and draft GitHub release kept open until the benchmark,
-infrastructure, and packaged qualification gates below are complete. No 1.0 date
-until the remaining process gates in [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md)
-are done.
+**Status:** **0.10.0** is the current published stable release. **0.11.0** is
+the next release and carries the SDK 2.1.0 / real-BYOM work below. The external
+Llama 3.2 3B ONNX GenAI model has passed CPU registration, IPC chat, and
+buffered/streaming gateway chat; package provenance, broader lifecycle and SDK
+qualification, and installed-app evidence remain. No 1.0 date until the
+remaining process gates in [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) are done.
 
 **Scope:** 1.0 production is Windows. macOS Apple Silicon remains evaluation-only (unsigned). Linux is deferred.
 
 **Release ownership:** [CHANGELOG.md](../CHANGELOG.md) owns version assignments and release history. [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) owns the forward plan through 1.0 and the 1.0 release bar. This document owns 1.0 implementation sequencing and acceptance gates. [BACKLOG.md](./BACKLOG.md) holds deferred and post-1.0 work.
 
-## 0.10.0 release preparation
+## 0.11.0 SDK/BYOM release preparation
 
 ### SDK 2.1.0 and real BYOM shipping plan
 
@@ -101,7 +101,7 @@ recipe.
 | 1 | SDK/native compatibility and startup | Exact 2.1.0 JS package and matching native assets; accelerator registration precedes the catalog snapshot/local-registration work; one manager per process; generation-owned readiness and About data; existing catalog operations still work. |
 | 2 | Reliable local-model lifecycle | Durable, collision-safe registrations with explicit task/provider/device/context/capability metadata; copy/link/restart/recovery/unregister/delete matrix passes without modifying or deleting external assets. |
 | 3 | Real BYOM sessions | Control model and genuine external package produce meaningful non-streaming and streaming answers through Flint IPC, including a fresh launch and HTTP service off. |
-| 4 | BYOM OpenAI endpoint | The same registered models appear in gateway discovery and work by advertised name and alias, cold and resident, with streaming, tool results, usage, correct errors, admission, and activity accounting. No public-only native-listener 404 remains. |
+| 4 | BYOM OpenAI endpoint | The same registered models appear in gateway discovery and work by advertised name and alias, cold and resident, with streaming, tool results, usage, correct errors, admission, and activity accounting. Flint's gateway must handle local registrations without exposing the native listener's 404. |
 | 5 | SDK 2.1 feature adoption | Native cancellation, download cancellation, tool-call fixes, parameter/usage/output-limit handling, and audio behavior are exercised on real models; unsupported features fail explicitly. |
 | 6 | Installed-app qualification and release | Full automated gates plus a fresh target-specific Windows package, installed-app BYOM dogfood, source-file preservation, and updater/rollback evidence pass for the same release candidate. |
 
@@ -227,19 +227,24 @@ abort proves neither native quiescence nor released memory.
 | Runtime coexistence | Catalog and external models together; model swap, concurrent requests, leases/pins/eviction, Arena/Benchmark exclusivity and recovery; gateway 200 before a run, 503 while Running, 200 after release. |
 | Packaged Windows | Fresh target-specific build; `npm run verify:bundle -- --target x86_64-pc-windows-msvc --require-build`, `npm run smoke:node`, `npm run smoke:runtime`; installed copy/link/load/chat/stream/tools/delete/relaunch without PATH Node; signed-installer and updater/rollback qualification per [RELEASE.md](./RELEASE.md). |
 
-**Integration baseline (2026-10-22):** `npm run check` has zero errors and one
-existing label warning; frontend build and IPC verification pass. The 14
-focused SDK/BYOM/gateway/transport/GPU suites pass 692 tests; native BYOM
-registration E2E passes 24 tests. Both runner self-tests and bundled Node smoke
-pass. These do **not** establish real-weight inference. `npm run verify:bundle`
-fails against the existing non-targeted release tree because its staged
-sidecar/NSIS script lacks the web helper files. A fresh package, full
-test/coverage run, and the non-catalog ONNX real-model spike remain unqualified.
-Flash-Next conversion or architecture enablement is not a release gate.
+**Integration baseline (commit `864e0c5`):** `npm run check`, `npm run build`,
+`npm run test:coverage`, IPC-contract and Markdown-link verification pass.
+Coverage passes all configured thresholds; the focused SDK/BYOM suites and
+native registration E2E pass. Both live-runner self-tests, bundled Node smoke,
+and fresh unsigned Windows packaging with bundle verification pass. CI passes
+on Windows and macOS. The Llama 3.2 3B CPU run proves real external-model
+registration, IPC chat, gateway discovery, and buffered/streaming gateway chat;
+all eight source-file hashes remained unchanged. This does not establish full
+SDK/BYOM qualification. Package revision/license provenance, broader lifecycle
+and provider checks, tool-capable-model behavior, and installed-app qualification
+remain open. Flash-Next conversion or architecture enablement is not a release
+gate.
 
-0.10.0 is a qualification release, not permission to merge every accumulated
-changeset immediately. Keep the generated version PR open while these gates are
-unfinished; newly completed work must flow into it through normal changesets.
+Do not publish 0.11.0 until the qualification gates above pass. Keep completed
+work in reviewed changesets; do not merge unrelated accumulated changesets as
+part of this release.
+
+## 1.0 qualification
 
 ### Benchmark Preview qualification
 
@@ -253,7 +258,8 @@ unfinished; newly completed work must flow into it through normal changesets.
 
 ### Tool and retrieval boundary
 
-The helper below is in the tree. 0.10.0 still requires the published build to match these rules.
+The helper shipped in 0.10.0. Keep these security and behavior constraints in
+force through 1.0 qualification.
 
 - The public web-search/retrieval tool stays narrow and read-only. It does
   not turn Playground into an autonomous agent runtime.
@@ -296,14 +302,14 @@ The helper below is in the tree. 0.10.0 still requires the published build to ma
 - Run unit, contract, sidecar E2E, bundle verification, and packaged Windows
   runtime smoke. Record any clean-machine or signed-installer dogfood completed
   for this release.
-- Reconcile operator/release docs with the published 0.9.x stable line. Do not
-  publish the draft 0.10.0 release until its generated changelog, version files,
-  artifacts, and updater metadata describe the same build.
+- Reconcile operator/release docs with the current published stable line.
+  Before publication, ensure the generated changelog, version files, artifacts,
+  and updater metadata all describe the same reviewed build.
 
 ## 1.0 execution waves
 
 These waves define the continuing 1.0 acceptance bar. Their implementation is
-already present in the 0.9.x line; remaining work is qualification, recorded
+present in the released line; remaining work is qualification, recorded
 dogfood, integration version pins, and corrections found during that work. Do
 not compensate for a slipped gate with RAG, a scheduler, or broad tool execution.
 
@@ -415,8 +421,8 @@ output, constructor failures, disposal failures, and streaming cancellation.
 
 ## Acceptance gates for 1.0 workstreams
 
-Each wave must remain satisfied through 0.10.0 and 1.0 qualification. Extra
-audio-decoder work has no 1.0 gate.
+Each wave must remain satisfied through subsequent stable releases and 1.0
+qualification. Extra audio-decoder work has no 1.0 gate.
 
 - **Security gate:** Capability JSON is pruned and commented; the boundary suite fails if unused dangerous grants return or sidecar allowlisting/IPC/BYOM containment regress.
 - **Installed-path and lifecycle gate:** Native tray Open restores the main window and Quit terminates the app on packaged Windows; macOS Dock reopen restores the main window (already native); single-instance launch refocuses the existing instance; process termination tears down the sidecar child without orphans; recovery controls operate if the renderer webview fails; quit waits for a conversation-flush ack or a bounded timeout.
@@ -426,9 +432,9 @@ audio-decoder work has no 1.0 gate.
 - **UX gate:** The checklist in Wave 6 holds on a packaged Windows build.
 - **Docs gate:** Operator runbook exists and is indexed; USER_GUIDE sidecar troubleshooting matches bundled Node.
 - **Updater UX gate:** In-app updater displays download progress, notifies when an update is ready, prompts to restart, and supports deferral.
-- **Ship gate (0.10.0):** The release-preparation gates above are recorded;
-  version/changelog/artifacts/updater metadata agree; publish as a full stable
-  release only after the draft is reviewed.
+- **Ship gate (0.11.0):** SDK/BYOM qualification and the release-preparation
+  gates above are recorded; version/changelog/artifacts/updater metadata agree;
+  publish as a full stable release only after review.
 - **Ship gate (1.0.0):** Signed Windows clean-machine dogfood and stable-channel
   updater evidence are recorded; 1.0.0 is published stable.
 

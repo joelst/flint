@@ -48,7 +48,7 @@ or deferred plans kept for the analysis they contain, not measured data
 | [POOL_SPIKE.md](./POOL_SPIKE.md) | Model pool co-residency spike protocol (complete; retained for re-runs) |
 | [pool-spike-results/](./pool-spike-results/) | Canonical pool-spike result |
 | [spikes/node-bundle-spike.md](./spikes/node-bundle-spike.md) | Bundled-Node packaging size/approach spike (referenced from [DEVELOPMENT.md](./DEVELOPMENT.md)) |
-| [spikes/foundry-2.1.0-spike.md](./spikes/foundry-2.1.0-spike.md) | Measured Foundry Local SDK 2.1.0 registration. The production pin is 2.1.0. Listener chat was not proven. |
+| [spikes/foundry-2.1.0-spike.md](./spikes/foundry-2.1.0-spike.md) | SDK 2.1.0 registration measurements and real external-model BYOM evidence; the native listener does not route local registrations. |
 
 ## Planning process
 

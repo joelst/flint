@@ -139,7 +139,7 @@ config is removed after the build, and `package.json`, `src-tauri/tauri.conf.jso
 `src-tauri/Cargo.toml` remain unchanged:
 
 ```bash
-npm run tauri:build:local:version -- 0.10.0
+npm run tauri:build:local:version -- 0.11.0
 ```
 
 Forward additional Tauri build options after the version, for example
@@ -211,23 +211,24 @@ on every development OS. SVG generation is intentionally excluded.
 ## Screenshots
 
 README and docs screenshots go stale after UI changes (nav labels, theme, branding).
-The Windows and macOS PNGs in `images/` were recaptured for the 0.10.0 candidate.
+The Windows and macOS PNGs in `images/` currently show 0.10.0. Use the next
+release version when recapturing them.
 
 To refresh them:
 
 1. Launch the dev build with the version the screenshots should show. Help and
    Settings render `VITE_FLINT_BUILD_VERSION` when it is set, and otherwise
-   `package.json`. Set it to the next release (currently `0.10.0`) in the same
+   `package.json`. Set it to the next release (currently `0.11.0`) in the same
    terminal that starts the dev build, before Vite starts. That does not change
    `package.json`, `src-tauri/tauri.conf.json`, or `src-tauri/Cargo.toml`.
    On Windows, also enable WebView2's remote debugging port so its content can be
    driven over the Chrome DevTools Protocol (CDP):
    ```powershell
-   $env:VITE_FLINT_BUILD_VERSION = "0.10.0"
+   $env:VITE_FLINT_BUILD_VERSION = "0.11.0"
    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
    .\build-local.ps1 -Command "npm run tauri dev"
    ```
-   On macOS, run `VITE_FLINT_BUILD_VERSION=0.10.0 npm run tauri dev`. The terminal
+   On macOS, run `VITE_FLINT_BUILD_VERSION=0.11.0 npm run tauri dev`. The terminal
    that invokes the capture script needs Accessibility and Screen Recording
    permission.
 2. Once the window is visible and connected, in another terminal run:
