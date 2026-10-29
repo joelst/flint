@@ -34,12 +34,146 @@ export function stripVersion (id) {
   return String(id || '').replace(/:\d+$/, '');
 }
 
+export const LOCAL_REGISTRATION_PROVIDER = 'LocalRegistration';
+
 /**
- * @param {{info?: {uri?: unknown}}|null|undefined} entry
+ * @typedef {{
+ *   alias?: unknown,
+ *   id?: unknown,
+ *   info?: Record<string, unknown>,
+ *   variants?: unknown,
+ *   isCached?: boolean
+ * }} CatalogEntry
+ */
+
+/**
+ * @param {{info?: {uri?: unknown, providerType?: unknown}}|null|undefined} entry
  * @returns {boolean}
  */
 export function isLocalCatalogEntry (entry) {
-  return typeof entry?.info?.uri === 'string' && entry.info.uri.startsWith('local://');
+  const uri = entry?.info?.uri;
+  if (typeof uri === 'string' && uri.startsWith('local://')) return true;
+  return entry?.info?.providerType === LOCAL_REGISTRATION_PROVIDER;
+}
+
+/**
+ * List rows keep the `local://` uri the UI already uses. SDK 2.1.0 leaves that
+ * field empty and reports `providerType: LocalRegistration` instead.
+ *
+ * @param {Record<string, unknown> | null | undefined} info
+ * @param {string} [alias]
+ */
+export function localRegistrationInfo (info, alias) {
+  const source = info && typeof info === 'object' ? info : {};
+  if (source.providerType !== LOCAL_REGISTRATION_PROVIDER) return source;
+  if (typeof source.uri === 'string' && source.uri.startsWith('local://')) return source;
+  const name = typeof alias === 'string' && alias ? alias : source.alias;
+  if (typeof name !== 'string' || !name) return source;
+  return { ...source, uri: `local://${name}` };
+}
+
+/**
+ * @template T
+ * @param {() => T} read
+ * @returns {T | undefined}
+ */
+function readField (read) {
+  try {
+    return read();
+  } catch {
+    // A native getter can throw. One unreadable row must not drop the rest of the catalog.
+    return undefined;
+  }
+}
+
+/** @param {CatalogEntry | null | undefined} model */
+function cleanAlias (model) {
+  const alias = readField(() => model?.alias);
+  return typeof alias === 'string' ? alias.trim().toLowerCase() : '';
+}
+
+/** @param {CatalogEntry | null | undefined} model */
+function cleanId (model) {
+  const id = readField(() => model?.id);
+  return typeof id === 'string' ? id.trim().toLowerCase() : '';
+}
+
+/** @param {CatalogEntry | null | undefined} model */
+function cleanTask (model) {
+  const task = readField(() => model?.info?.task);
+  return typeof task === 'string' && task.trim() ? task.trim() : '';
+}
+
+/** @param {CatalogEntry | null | undefined} model */
+function variantCount (model) {
+  try {
+    return Array.isArray(model?.variants) ? model.variants.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * A local registration is one on-disk build. The public catalog's variant list
+ * does not include it, so the index and the model list treat the registration
+ * itself as its cached variant.
+ *
+ * @param {CatalogEntry} model
+ */
+export function indexableLocalModel (model) {
+  if (variantCount(model) > 0) return model;
+  const idValue = readField(() => model?.id);
+  const aliasValue = readField(() => model?.alias);
+  const id = typeof idValue === 'string' ? idValue : '';
+  const alias = typeof aliasValue === 'string' ? aliasValue : '';
+  if (!id || !alias) return model;
+  return {
+    alias,
+    id,
+    info: model?.info,
+    isCached: true,
+    variants: [{
+      id,
+      isCached: true,
+      info: { cached: true },
+    }],
+  };
+}
+
+/**
+ * Append local-catalog registrations the public snapshot does not already name.
+ * A public row with no task and no variants is replaced by the registration
+ * that carries the session task.
+ *
+ * @param {CatalogEntry[] | null | undefined} publicModels
+ * @param {CatalogEntry[] | null | undefined} localModels
+ */
+export function mergeLocalRegistrations (publicModels, localModels) {
+  const merged = [];
+  const aliasAt = new Map();
+  for (const model of Array.isArray(publicModels) ? publicModels : []) {
+    aliasAt.set(cleanAlias(model), merged.length);
+    merged.push(model);
+  }
+  const seenIds = new Set(merged.map(cleanId).filter(Boolean));
+  for (const model of Array.isArray(localModels) ? localModels : []) {
+    const alias = cleanAlias(model);
+    const id = cleanId(model);
+    const indexable = indexableLocalModel(model);
+    if (alias && aliasAt.has(alias)) {
+      const at = aliasAt.get(alias);
+      const existing = merged[at];
+      if (!cleanTask(existing) && variantCount(existing) === 0 && cleanTask(model)) {
+        merged[at] = indexable;
+      }
+      continue;
+    }
+    if (id && seenIds.has(id)) continue;
+    merged.push(indexable);
+    if (alias) aliasAt.set(alias, merged.length - 1);
+    if (id) seenIds.add(id);
+  }
+  return merged;
 }
 
 /**

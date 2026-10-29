@@ -19,6 +19,7 @@ import {
   TEMPLATE_ROLES,
   TEMPLATE_PRESETS,
 } from './prompt-template.js';
+import { looksLikeSpeech } from './model-classification.js';
 
 export { selectPromptTemplate, validatePromptTemplate, TEMPLATE_ROLES, TEMPLATE_PRESETS };
 
@@ -65,6 +66,35 @@ export function sanitizeModelName (raw) {
 export function isEmbeddingModel (options) {
   const blob = [options?.architecture, options?.dirName, options?.task].filter(Boolean).join(' ').toLowerCase();
   return blob.includes('embed');
+}
+
+/** Session tasks Foundry Local 2.1.0 accepts on a local registration. */
+export const LOCAL_MODEL_TASK = /** @type {const} */ ({
+  chat: 'chat-completion',
+  vision: 'vision-language-chat',
+  embeddings: 'embeddings',
+  speech: 'automatic-speech-recognition',
+});
+
+/**
+ * Task to register for a folder the public catalog has never labeled.
+ * Embeddings win over a speech- or vision-like name. Everything else is chat.
+ *
+ * @param {{ architecture?: string|null, dirName?: string|null, task?: string|null }} [options]
+ * @returns {'chat-completion'|'vision-language-chat'|'embeddings'|'automatic-speech-recognition'}
+ */
+export function localModelTask (options) {
+  if (isEmbeddingModel(options)) return LOCAL_MODEL_TASK.embeddings;
+  const blob = [options?.architecture, options?.dirName, options?.task]
+    .filter((value) => typeof value === 'string' && value)
+    .join(' ');
+  if (looksLikeSpeech(blob) || /automatic-speech-recognition/i.test(blob)) {
+    return LOCAL_MODEL_TASK.speech;
+  }
+  if (/\b(?:vl|vision)\b|vision-language|multimodal/i.test(blob)) {
+    return LOCAL_MODEL_TASK.vision;
+  }
+  return LOCAL_MODEL_TASK.chat;
 }
 
 /**

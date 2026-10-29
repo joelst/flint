@@ -442,7 +442,7 @@ describe('createSessionChatClient buffered chat', () => {
     });
     await client.completeChat([{ role: 'user', content: 'hi' }]);
     const wire = JSON.parse(capturedItem!.text);
-    expect(wire.frequency_penalty).toBe(0.1);
+    expect(wire.frequency_penalty).toBeUndefined();
     expect(wire.max_tokens).toBe(128);
     expect(wire.presence_penalty).toBe(0.2);
     expect(wire.temperature).toBe(0.7);
@@ -451,8 +451,8 @@ describe('createSessionChatClient buffered chat', () => {
   });
 
   it('omits neutral penalties while preserving other zero-valued settings', async () => {
-    // Foundry Local 2.0.1 misapplies an explicit frequency_penalty of 0 for some models.
-    // Omission is semantically identical for penalties, but not for the other settings.
+    // Frequency penalty is never sent. 2.0.1 misapplies an explicit 0, and 2.1.0 rejects
+    // a nonzero value. Omission of a zero presence penalty is semantically identical.
     let capturedItem: { text: string } | undefined;
     class Request {
       addItem (item: { text: string }) { capturedItem = item; return this; }

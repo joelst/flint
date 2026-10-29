@@ -1124,6 +1124,23 @@ describe('createCatalogRegistrationGate', () => {
     });
   });
 
+  it('serializes local registration without forcing a public catalog snapshot', async () => {
+    const readCatalog = vi.fn(async () => []);
+    const gate = createCatalogRegistrationGate(
+      vi.fn().mockResolvedValue({ success: true, registeredEps: ['CPUExecutionProvider'] }),
+      readCatalog,
+    );
+
+    await expect(gate.mutateAndCommit(
+      async () => 'registered',
+      vi.fn(),
+      undefined,
+      { confirmCatalogCommit: false },
+    )).resolves.toEqual({ result: 'registered' });
+    expect(gate.isCommitConfirmed()).toBe(false);
+    expect(readCatalog).not.toHaveBeenCalled();
+  });
+
   it('restart-bounds a first mutation whose callback reads the catalog before changing it', async () => {
     const gate = createCatalogRegistrationGate(
       vi.fn(async () => ({ success: true, registeredEps: [], failedEps: [] })),

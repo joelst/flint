@@ -60,6 +60,8 @@ export function mergeSessionCleanupFailure (primaryFailure, cleanupFailure) {
 // Zero is the OpenAI-defined neutral value for both penalties, so omitting it preserves
 // semantics. Foundry Local 2.0.1 misapplies an explicitly serialized frequency_penalty of 0
 // for some models (notably Gemma 4 E2B), causing otherwise normal replies to degenerate.
+// Foundry Local 2.1.0 rejects a nonzero frequency_penalty in chat_completions_converter.cc
+// because ORT repetition_penalty has different semantics. Never send frequency_penalty.
 export function normalizeChatPenalty (value) {
   return Number.isFinite(value) && value !== 0 ? value : undefined;
 }
@@ -194,9 +196,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
   const settings = {};
   const serializeSettings = () => {
     const out = {};
-    const frequencyPenalty = normalizeChatPenalty(settings.frequencyPenalty);
     const presencePenalty = normalizeChatPenalty(settings.presencePenalty);
-    if (frequencyPenalty !== undefined) out.frequency_penalty = frequencyPenalty;
     if (Number.isFinite(settings.maxTokens)) out.max_tokens = settings.maxTokens;
     if (presencePenalty !== undefined) out.presence_penalty = presencePenalty;
     if (Number.isFinite(settings.temperature)) out.temperature = settings.temperature;
@@ -209,9 +209,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
   };
   const serializeNativeSettings = () => {
     const search = {};
-    const frequencyPenalty = normalizeChatPenalty(settings.frequencyPenalty);
     const presencePenalty = normalizeChatPenalty(settings.presencePenalty);
-    if (frequencyPenalty !== undefined) search.frequencyPenalty = frequencyPenalty;
     if (Number.isFinite(settings.maxTokens)) search.maxOutputTokens = settings.maxTokens;
     if (presencePenalty !== undefined) search.presencePenalty = presencePenalty;
     if (Number.isFinite(settings.temperature)) search.temperature = settings.temperature;

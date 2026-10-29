@@ -4,8 +4,8 @@
  * mismatch is an operability signal, not a hard incompatibility.
  */
 
-export const PINNED_FOUNDRY_SDK_VERSION = '2.0.1';
-export const PINNED_FOUNDRY_CORE_VERSION = '2.0.1';
+export const PINNED_FOUNDRY_SDK_VERSION = '2.1.0';
+export const PINNED_FOUNDRY_CORE_VERSION = '2.1.0';
 
 /**
  * @param {{ sdkVersion?: string | null, coreVersion?: string | null }} versions

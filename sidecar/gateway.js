@@ -123,6 +123,13 @@ function extractLeadingMultipartModel (body, boundary, ended = false) {
  * @param {(id: string) => Promise<{alias: string, variantId: string|null}|null>} options.resolve
  * @param {(alias: string, variantId: string|null) => Promise<string|null|void>} options.load
  *        resolves to the variant id actually loaded, which the replay needs to name
+ * @param {(req: object, res: object, body: string, model: object) => Promise<void>} [options.serveLocal]
+ *        serves a local registration through the in-process SDK when Foundry's HTTP router
+ *        cannot expose that registration
+ * @param {(alias: string, variantId: string|null) => Promise<string|null>} [options.getLoadedModel]
+ *        returns the resident variant id without loading; used when remote autoload is disabled
+ * @param {() => Promise<object[]>} [options.listLocalModels]
+ *        returns cached local registrations to append to the native `/v1/models` listing
  * @param {(level: string, msg: string) => void} [options.log]
  * @param {(model: string, phase: 'start'|'end', booking?: unknown) => unknown} [options.onActivity]
  *        called around every request that names a model, so the owner can keep a model
@@ -148,6 +155,9 @@ export function createGateway (options) {
     upstreamPort,
     resolve,
     load,
+    serveLocal,
+    getLoadedModel,
+    listLocalModels = async () => [],
     log = () => {},
     onActivity = () => {},
     onAccess = () => {},
@@ -388,8 +398,9 @@ export function createGateway (options) {
     // Upstream's rejection must name the model we sent, which is the rewritten id when a
     // rewrite was applied, not the client's own wording.
     const sentModel = known ?? requested;
+    const localFallbackMayBeNeeded = isChatCompletionPath(req.url);
     const attempt = await forward(req, res, outgoing, {
-      captureNotLoaded: mayAutoload,
+      captureNotLoaded: mayAutoload || localFallbackMayBeNeeded,
       sentModel,
       metrics,
     });
@@ -404,6 +415,9 @@ export function createGateway (options) {
       // Nothing to load: hand back what upstream said rather than inventing an error.
       return respondBuffered(res, attempt.status, attempt.headers, attempt.body);
     }
+    if (!mayAutoload && target.local !== true) {
+      return respondBuffered(res, attempt.status, attempt.headers, attempt.body);
+    }
     // `requested` can be a versionless variant id that aliases a resident model even when
     // the catalog resolves it to a different version. Move the activity lease to the exact
     // resolved id before loading so the switch does not mistake this request for work against
@@ -414,13 +428,42 @@ export function createGateway (options) {
 
     const gen = generation;
     let loadedId = null;
-    try {
-      loadedId = await loadOnce(target.alias, target.variantId);
-    } catch (err) {
-      log('warn', `Gateway autoload failed for ${target.alias}: ${err?.message ?? err}`);
-      return respondBuffered(res, attempt.status, attempt.headers, attempt.body);
+    if (target.local === true && !mayAutoload) {
+      loadedId = await getLoadedModel?.(target.alias, target.variantId) ?? null;
+      if (!loadedId) {
+        return respondBuffered(res, attempt.status, attempt.headers, attempt.body);
+      }
+    } else {
+      try {
+        loadedId = await loadOnce(target.alias, target.variantId);
+      } catch (err) {
+        log('warn', `Gateway autoload failed for ${target.alias}: ${err?.message ?? err}`);
+        return respondBuffered(res, attempt.status, attempt.headers, attempt.body);
+      }
     }
     if (gen !== generation || res.writableEnded || res.destroyed) return;
+
+    if (target.local === true) {
+      const canonical = typeof loadedId === 'string' && loadedId ? loadedId : target.variantId;
+      if (canonical && !setActivityModel(canonical)) {
+        return respondUnloading(req, res, canonical);
+      }
+      if (typeof serveLocal !== 'function') {
+        res.writeHead(501, { 'content-type': 'application/json' });
+        res.end(openAiError('Local model inference is unavailable through this gateway.', 'server_error'));
+        return;
+      }
+      if (buffered === null) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(openAiError('A buffered JSON request is required for local model inference.', 'invalid_request_error'));
+        return;
+      }
+      await serveLocal(req, res, buffered, {
+        ...target,
+        variantId: canonical ?? target.variantId,
+      });
+      return;
+    }
 
     // Name the variant that was actually loaded. Foundry routes only that exact id and
     // answers 404 to the alias even when the model is resident, so replaying the client's
@@ -531,7 +574,8 @@ export function createGateway (options) {
       const parsed = JSON.parse(body);
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return body;
       let changed = false;
-      if (parsed.frequency_penalty === 0) {
+      // 2.1.0 rejects a nonzero frequency_penalty, and 2.0.1 misapplies an explicit 0.
+      if (Object.prototype.hasOwnProperty.call(parsed, 'frequency_penalty')) {
         delete parsed.frequency_penalty;
         changed = true;
       }
@@ -672,10 +716,12 @@ export function createGateway (options) {
         // rejection that names the model we sent is acted on below.
         const mayRetry = captureNotLoaded && buffered !== null && (status === 400 || status === 404);
         const isStatus = isStatusPath(req.url);
+        const isModelList = req.method === 'GET'
+          && canonicalGatewayPath(req.url) === '/v1/models';
 
         const isChatJson = isChatCompletionPath(req.url) && isJsonContentType(upRes.headers['content-type']);
         const isChatStream = isChatCompletionPath(req.url) && isEventStream(upRes.headers['content-type']);
-        if (!mayRetry && !isStatus && !isChatJson) {
+        if (!mayRetry && !isStatus && !isChatJson && !isModelList) {
           if (isChatStream) {
             delete outHeaders['content-length'];
             delete outHeaders['Content-Length'];
@@ -770,6 +816,50 @@ export function createGateway (options) {
 
           if (mayRetry && rejectionNames(modelRejection(status, body), sentModel)) {
             resolve2({ status, headers: outHeaders, body });
+            return;
+          }
+
+          if (isModelList && status >= 200 && status < 300) {
+            void (async () => {
+              let finalBody = body;
+              let parsed;
+              try {
+                parsed = JSON.parse(body);
+              } catch {
+                parsed = null;
+              }
+              if (parsed && typeof parsed === 'object' && Array.isArray(parsed.data)) {
+                const localModels = await listLocalModels();
+                if (!Array.isArray(localModels)) {
+                  throw new TypeError('Local model listing did not return an array.');
+                }
+                const seen = new Set(parsed.data
+                  .map((entry) => typeof entry?.id === 'string' ? entry.id.toLowerCase() : '')
+                  .filter(Boolean));
+                const additions = localModels.filter((entry) =>
+                  entry && typeof entry.id === 'string'
+                  && entry.id.trim()
+                  && !seen.has(entry.id.toLowerCase()),
+                );
+                if (additions.length) {
+                  finalBody = JSON.stringify({ ...parsed, data: [...parsed.data, ...additions] });
+                }
+              }
+              if (Buffer.byteLength(finalBody) > bufferedResponseLimit) {
+                throw new Error('Merged model listing exceeded the gateway response limit.');
+              }
+              respondBuffered(res, status, outHeaders, finalBody);
+              resolve2(SENT);
+            })().catch((error) => {
+              log('warn', `Could not merge local models into the gateway listing: ${error?.message ?? error}`);
+              respondBuffered(
+                res,
+                502,
+                { 'content-type': 'application/json' },
+                openAiError('Could not build the local model listing.', 'server_error'),
+              );
+              resolve2(SENT);
+            });
             return;
           }
 

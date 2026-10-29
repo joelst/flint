@@ -417,9 +417,14 @@ export interface FlintSDKState {
   audioLaneModel?: string;
   pool: PoolEntry[];
   poolStats: PoolStats | null;
+  foundrySdkVersion: string | null;
+  foundryCoreVersion: string | null;
+  foundrySdkPin: string | null;
+  foundryCorePin: string | null;
+  foundryRuntimeReported: boolean;
   /** CUDA GPU selector the live runtime child was spawned with; null until a child has started. */
   runtimeGpuApplied: string | null;
-  /** Whether live CUDA visibility is configured, inherited, or unrestricted. */
+  /** Whether live CUDA visibility comes from a Flint choice, the inherited environment, or CUDA default. */
   runtimeGpuAppliedSource: 'configured' | 'inherited' | 'unrestricted' | null;
 }
 
@@ -476,6 +481,11 @@ const initialState: FlintSDKState = {
   audioLaneModel: undefined,
   pool: [],
   poolStats: null,
+  foundrySdkVersion: null,
+  foundryCoreVersion: null,
+  foundrySdkPin: null,
+  foundryCorePin: null,
+  foundryRuntimeReported: false,
   runtimeGpuApplied: null,
   runtimeGpuAppliedSource: null,
 };
@@ -579,6 +589,22 @@ function reportRuntimeProgressStall(cmd: SidecarCommandName) {
 
 function registerCatalogProgressHandler(id: number, cmd: SidecarCommandName) {
   registerProgressHandler(id, undefined, () => reportRuntimeProgressStall(cmd));
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function rememberFoundryRuntime(result: any) {
+  if (!result || typeof result !== 'object') return;
+  if (!('foundrySdkVersion' in result) && !('foundrySdkPin' in result)) return;
+  updateState({
+    foundrySdkVersion: stringOrNull(result.foundrySdkVersion),
+    foundryCoreVersion: stringOrNull(result.foundryCoreVersion),
+    foundrySdkPin: stringOrNull(result.foundrySdkPin),
+    foundryCorePin: stringOrNull(result.foundryCorePin),
+    foundryRuntimeReported: true,
+  });
 }
 
 function updateState(partial: Partial<FlintSDKState>) {
@@ -1442,6 +1468,7 @@ async function establishManagerReadiness(refreshCatalog: boolean): Promise<void>
   // A local status probe proves the manager is usable without calling listModels(), whose
   // Foundry Local implementation contacts Microsoft's remote model catalog.
   const status = await sendInternal('getStatus');
+  rememberFoundryRuntime(status.result);
   if (status.result) {
     currentEndpoint = status.result.endpoint;
     const loadedAliases = new Set(
@@ -1579,7 +1606,10 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
 }
 
 async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
-  const initPayload = { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' };
+  const initPayload = {
+    appName: config.appName || 'flint',
+    logLevel: config.logLevel || 'info',
+  };
   const refreshCatalog =
     typeof config.refreshCatalog === 'boolean'
       ? config.refreshCatalog
@@ -1610,6 +1640,7 @@ async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
       } else {
         // Adopt whatever is actually running — including a service started before this init.
         const status = await send('getStatus');
+        rememberFoundryRuntime(status.result);
         if (status.result?.endpoint) {
           currentEndpoint = status.result.endpoint;
           updateState({ endpoint: status.result.endpoint, serviceRunning: true });
@@ -1662,6 +1693,7 @@ export async function refreshModels(
 
     // Also refresh status first so loaded-model state is accurate for UI + actions
     const status = await send('getStatus');
+    rememberFoundryRuntime(status.result);
     if (status.result) {
       currentEndpoint = status.result.endpoint;
       updateState({
@@ -1960,6 +1992,11 @@ export async function reconcileBenchmarkExclusive(
  * during startup does not block the rest of initialization -- worst case, this page's first
  * `applyMemorySettings` call is itself silently skipped as stale, same as before this existed.
  */
+export async function refreshFoundryRuntimeAbout(): Promise<void> {
+  const status = await send('getStatus');
+  rememberFoundryRuntime(status.result);
+}
+
 export async function getLastAppliedMemorySettingsSeq(): Promise<number | null> {
   try {
     const status = await send('getStatus');
@@ -2313,6 +2350,7 @@ export async function ensureServiceRunning(
 
     try {
       const status = await send('getStatus');
+      rememberFoundryRuntime(status.result);
       const endpoint = status.result?.endpoint;
       if (status.result?.serviceRunning && endpoint) {
         assertAuthorized();

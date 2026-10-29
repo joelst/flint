@@ -166,6 +166,8 @@ export default defineConfig(() => ({
         'sidecar/tool-calls.js',
         'sidecar/inference-metrics.js',
         'sidecar/foundry-runtime-pin.js',
+        'sidecar/local-model-registration.js',
+        'src/lib/foundry-about.ts',
         'sidecar/health-ring.js',
         'sidecar/cache-inventory.js',
         'scripts/release-metadata.cjs',

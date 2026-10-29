@@ -1,4 +1,5 @@
-export const SPEECH_SDK_VERSION = '2.0.1';
+/** Request shapes below were probed on Foundry Local SDK 2.0.1. This label tracks the pinned package. */
+export const SPEECH_SDK_VERSION = '2.1.0';
 
 const FAMILY_RULES = [
   {
@@ -20,8 +21,9 @@ const FAMILY_RULES = [
 ];
 
 /**
- * Select the probed SDK 2.0.1 audio request shape from model names, which carry the
- * family information absent from catalog metadata.
+ * Select the probed audio request shape from model names, which carry the
+ * family information absent from catalog metadata. The shapes were probed on
+ * SDK 2.0.1 and are still the ones this pin uses.
  *
  * @param {string} alias
  * @param {string} [variantId]
