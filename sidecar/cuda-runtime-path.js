@@ -7,6 +7,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const CUDA_TOOLKIT_ROOT = 'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA';
 const dllDirectoryCookies = [];
@@ -88,7 +89,8 @@ export async function addDllDirectory(directory) {
     throw new Error('AddDllDirectory is only available on Windows.');
   }
   if (!addDllDirectoryFn) {
-    const imported = await import('koffi');
+    const bundledEntry = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'koffi', 'index.js');
+    const imported = await import(fs.existsSync(bundledEntry) ? pathToFileURL(bundledEntry).href : 'koffi');
     const koffi = imported.default ?? imported;
     const kernel32 = koffi.load('kernel32.dll');
     addDllDirectoryFn = kernel32.func('void * __stdcall AddDllDirectory(str16)');

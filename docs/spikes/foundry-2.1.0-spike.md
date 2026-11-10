@@ -1,6 +1,6 @@
 # Spike — Foundry Local SDK 2.1.0
 
-**Status:** Recorded 2026-10-07. Checks 1–3 and 7 passed for the Qwen 2.5 0.5B CPU folder. Checks 4 and 5 failed: Foundry's listener returned HTTP 404 for the registered id. Check 6 left the spike catalog file empty after the second 0.5B run. Listener chat was not proven. The shipping branch pins 2.4.0. This file records the 2026-10-07 SDK 2.1.0 measurement and does not qualify 2.4.0.
+**Status:** The original checks below record SDK 2.1.0 measurements, not 2.4.0 qualification. Checks 1–3 and 7 passed for the Qwen 2.5 0.5B CPU folder; native-listener chat and tools failed with HTTP 404. The separate [SDK 2.4.0 qualification](#sdk-240-qualification) records the current Flint gateway CPU copy/link results.
 **Date opened:** 2026-10-07
 **Measured pin:** `foundry-local-sdk` **2.1.0**. The shipping branch now pins **2.4.0** ([the SDK/BYOM shipping plan](../PRODUCT_PLAN.md#sdk-240-and-real-byom-shipping-plan)). This file records the 2026-10-07 measurement. It does not by itself prove listener chat.
 **npm:** `foundry-local-sdk@2.1.0` was published 2026-09-29. The GitHub release is [v2.1.0](https://github.com/microsoft/Foundry-Local/releases/tag/v2.1.0).
@@ -67,11 +67,40 @@ The BYOM chat gate is demonstrated for this CPU model, not the full SDK 2.1.0 re
 
 **Real external-model run.** `scripts/byom-gateway-live.mjs` linked an existing 3.66 GB Llama 3.2 3B ONNX GenAI folder into an isolated app home. The public catalog probe returned 48 models and no Llama 3.2 match. Flint discovered `flint-byom-live`, loaded variant `flint-byom-live:1`, and returned `6 times 7 equals 42.` through IPC, buffered gateway chat, and gateway streaming; the SSE stream ended with `[DONE]`. The source snapshot contained eight files and was unchanged after unlink/delete. This proves real CPU chat through this branch's sidecar and gateway, not tool, GPU, or installed-app behavior.
 
+## SDK 2.4.0 qualification
+
+Measured on Windows x64 with the exact SDK/core 2.4.0 package, ONNX Runtime
+1.31.0, GenAI 0.19.0, Windows ML 2.5.96, and bundled Node 22.18.0.
+The model is Llama 3.2 3B Instruct, CPU int4 RTN block 32 / accuracy level 4.
+The original seven-file ONNX GenAI folder has no `inference_model.json`; the
+link source is the existing eight-file imported folder with Flint-authored metadata.
+
+| Probe | Command | Result |
+|---|---|---|
+| Original folder, copy | `node .\scripts\byom-gateway-live.mjs --model <original-onnx-folder> --copy` | Passed registration, load, IPC chat with HTTP off, gateway discovery, buffered chat, streaming chat with `[DONE]`, unload/delete, all seven source hashes, and graceful child close without forced termination. |
+| Metadata-bearing folder, link | `node .\scripts\byom-gateway-live.mjs --model <metadata-bearing-onnx-folder>` | Passed the same matrix; all eight source hashes unchanged, isolated junction removed, graceful close confirmed. |
+
+Both runs served `flint-byom-live:1` through IPC, advertised
+`flint-byom-live` through gateway discovery, and answered `6 times 7 equals 42.`
+through IPC and both gateway modes. Neither source folder was changed.
+The runner uses a short isolated cache path: placing the CUDA EP bundle under
+a long session-artifact path produced Windows load error 206. A short isolated
+cache completed CUDA, WebGPU, and TensorRT registration; provider registration
+alone is not proof of GPU inference.
+
+Fresh unsigned target-specific Windows MSI/NSIS packaging, required-build bundle
+verification, bundled Node smoke, and executable runtime smoke pass on 2.4.0.
+The real Windows CUDA DLL-search binding also loads from an isolated flattened
+resource tree without a checkout dependency; this is not GPU inference proof.
+This does not qualify a signed install, updater/rollback, GPU inference, tools,
+usage parity, speech, embeddings, cancellation, or the full restart/recovery matrix.
+Source repository/revision/license provenance remains open.
+
 ## Runner
 
 `scripts/spike-foundry-210.mjs` is research tooling. It is not wired into the app. `node .\scripts\spike-foundry-210.mjs --self-test` checks folder diffs, tool-call assembly, and the work-directory guard. That command does not load Foundry. When listener checks fail, the runner also attempts a direct `ChatSession` probe so an HTTP 404 does not hide whether the model can run in process.
 
-`scripts/byom-gateway-live.mjs --model <onnx-genai-folder>` qualifies a real folder through Flint's sidecar and gateway. It refuses to run while `Flint.exe` is open, links the source under an isolated temporary app home, records SHA-256 for every source file, tests IPC and buffered/streaming gateway chat, unloads and deletes the isolated registration, verifies the source hashes, and removes the temporary home. It never copies or edits the external folder.
+`scripts/byom-gateway-live.mjs --model <onnx-genai-folder>` qualifies a real folder through Flint's sidecar and gateway. It refuses to run while `Flint.exe` is open, links the source under a short isolated temporary app home, records SHA-256 for every source file, tests IPC and buffered/streaming gateway chat, unloads and deletes the isolated registration, verifies source hashes, waits for child `close`, and removes the temporary home only after closure is confirmed. `--copy` instead exercises import, including sources without inference metadata. Neither mode edits the external folder.
 
 `--install` puts the package in the work directory and can run while Flint is open. Every other command, except `--self-test`, creates a manager and refuses to start while `Flint.exe` is running unless `--force` is passed.
 

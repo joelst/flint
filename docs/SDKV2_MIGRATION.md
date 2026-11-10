@@ -80,8 +80,10 @@ returns 404 for them. Flint's gateway now appends cached local registrations to
 discovery and sends local chat completions through `ChatSession`, while keeping
 the existing model admission, residency, and activity leases. Focused gateway
 tests cover the adapter boundary. The external Llama 3.2 3B spike also proves
-real-weight CPU IPC and buffered/streaming gateway chat, as recorded in the
-linked spike evidence. Tool/usage parity, other providers, and installed-app
+real-weight CPU IPC and buffered/streaming gateway chat on 2.4.0 for both a
+metadata-free copy and a metadata-bearing link, as recorded in the linked spike
+evidence. Source hashes and graceful child closure are verified.
+Tool/usage parity, other providers, and installed-app
 behavior remain release gates until the complete qualification matrix passes.
 
 ## SDK 2.1.0 session features

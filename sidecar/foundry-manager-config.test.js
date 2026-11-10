@@ -26,9 +26,21 @@ describe('foundryManagerCreateConfig', () => {
       serviceEndpoint: 'http://127.0.0.1:9',
     })).toThrow(/Shared host cannot be combined with serviceEndpoint/);
   });
+
+  it('preserves an explicit in-process endpoint without treating a blank endpoint as a shared-host conflict', () => {
+    expect(foundryManagerCreateConfig({ ...base, serviceEndpoint: 'http://127.0.0.1:5272' }))
+      .toEqual({ ...base, serviceEndpoint: 'http://127.0.0.1:5272' });
+    expect(foundryManagerCreateConfig({ ...base, useSharedHost: true, serviceEndpoint: '  ' }))
+      .toEqual({ ...base, useSharedHost: true });
+  });
 });
 
 describe('createFoundryManager', () => {
+  it('reports an unavailable manager constructor without attempting shared-host fallback', () => {
+    expect(() => createFoundryManager({}, { ...base, useSharedHost: true }))
+      .toThrow(/FoundryLocalManager.create is unavailable/);
+  });
+
   it('does not retry an in-process manager when the shared host fails', () => {
     const create = vi.fn(() => {
       throw new Error('host refused');

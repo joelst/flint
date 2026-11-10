@@ -61,8 +61,8 @@ publish until those gates are complete.
 The 0.11.0 work qualifies Flint's existing ONNX model path rather than opening
 broad new feature work. One real, non-catalog Llama 3.2 3B package has already
 passed CPU registration, IPC chat, and buffered/streaming chat through Flint's
-gateway on SDK 2.1.0, with its source files unchanged. That run must be
-repeated on 2.4.0. Remaining package provenance, lifecycle, SDK feature, and
+gateway on SDK 2.4.0 as both a metadata-free copy and a metadata-bearing link,
+with unchanged source hashes and confirmed graceful shutdown. Remaining package provenance, lifecycle, SDK feature, and
 installed-app gates are listed in the product plan.
 The native Foundry listener still does not route local registrations; Flint's
 session-backed gateway handles them.

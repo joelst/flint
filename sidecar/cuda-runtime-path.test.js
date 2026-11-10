@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   addDllDirectory,
   prepareCudaRuntime,
@@ -8,6 +8,16 @@ import {
 } from './cuda-runtime-path.js';
 
 const PROGRAM_FILES = 'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA';
+
+const native = vi.hoisted(() => ({
+  add: vi.fn(),
+  func: vi.fn(),
+  load: vi.fn(),
+}));
+vi.mock('koffi', () => ({
+  default: { load: native.load },
+}));
+afterEach(() => vi.unstubAllGlobals());
 
 describe('resolveCudaBinDirectory', () => {
   it('uses CUDA_PATH/bin when that directory exists', () => {
@@ -26,6 +36,33 @@ describe('resolveCudaBinDirectory', () => {
       exists,
       readdir: () => ['v11.8', 'v12.6', 'v12.8', 'notes.txt'],
     })).toBe(`${PROGRAM_FILES}\\v12.8\\bin`);
+  });
+
+  describe('AddDllDirectory binding', () => {
+    it('surfaces binding failure, retries initialization, rejects null cookies, and reuses a valid binding', async () => {
+      vi.stubGlobal('process', { ...process, platform: 'win32' });
+      native.load.mockImplementationOnce(() => { throw new Error('native binding unavailable'); })
+        .mockReturnValue({ func: native.func });
+      native.func.mockReturnValue(native.add);
+      await expect(prepareCudaRuntime({
+        platform: 'win32',
+        arch: 'x64',
+        env: { CUDA_PATH: 'D:\\CUDA\\v12.8' },
+        exists: () => true,
+        readdir: () => [],
+      })).resolves.toMatchObject({ ok: false, reason: 'native binding unavailable' });
+      native.add.mockReturnValueOnce(null).mockReturnValueOnce(0).mockReturnValueOnce(0n)
+        .mockReturnValueOnce(42n).mockReturnValueOnce(43n);
+      for (let i = 0; i < 3; i++) {
+        await expect(addDllDirectory('D:\\CUDA\\v12.8\\bin')).rejects.toThrow(/no directory cookie/);
+      }
+      await expect(addDllDirectory('D:\\CUDA\\v12.8\\bin')).resolves.toBe(42n);
+      await expect(addDllDirectory('E:\\CUDA\\v12.8\\bin')).resolves.toBe(43n);
+      expect(native.load).toHaveBeenCalledTimes(2);
+      expect(native.func).toHaveBeenCalledTimes(1);
+      expect(native.func).toHaveBeenCalledWith('void * __stdcall AddDllDirectory(str16)');
+      expect(native.add).toHaveBeenLastCalledWith('E:\\CUDA\\v12.8\\bin');
+    });
   });
 
   it('skips a CUDA_PATH that names another major version and uses CUDA 12', () => {
@@ -57,6 +94,22 @@ describe('resolveCudaBinDirectory', () => {
       exists: () => false,
       readdir: () => ['v11.8'],
     })).toBeNull();
+  });
+
+  it('selects numeric minor and patch versions instead of lexical directory order', () => {
+    expect(resolveCudaBinDirectory({
+      env: {},
+      exists: () => true,
+      readdir: () => ['v12.9', 'v12.10.1', 'v12.10.2'],
+    })).toBe(`${PROGRAM_FILES}\\v12.10.2\\bin`);
+  });
+
+  it('keeps an explicit CUDA root usable when the default installation directory cannot be read', () => {
+    expect(resolveCudaBinDirectory({
+      env: { CUDA_PATH: ' D:\\custom-cuda\\ ' },
+      exists: (directory) => directory === 'D:\\custom-cuda\\bin',
+      readdir: () => { throw new Error('access denied'); },
+    })).toBe('D:\\custom-cuda\\bin');
   });
 });
 
@@ -120,7 +173,7 @@ describe('prepareCudaRuntime', () => {
   });
 
   it('does not load kernel32 except on Windows', async () => {
-    if (process.platform === 'win32') return;
+    vi.stubGlobal('process', { ...process, platform: 'linux' });
     await expect(addDllDirectory('D:\\CUDA\\v12.8\\bin')).rejects.toThrow(/only available on Windows/);
   });
 

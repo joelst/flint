@@ -6,6 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { validateKoffiNative } = require('./stage-koffi-native.cjs');
 const {
   describeInvalidNativeFile,
   platformKeyForTriple,
@@ -82,8 +83,23 @@ function checkPayloadAt(label, dir) {
   return validation.files;
 }
 
+function checkKoffiAt(label, koffiRoot, nativeRoot) {
+  if (platformKey !== 'win32-x64') return;
+  try {
+    validateKoffiNative(koffiRoot, nativeRoot, platformKey);
+    ok(`${label}: Windows x64 koffi CUDA binding`);
+  } catch (error) {
+    bad(`${label}: ${error.message}`);
+  }
+}
+
 console.log('Verifying Foundry Local SDK packaging prerequisites...');
 console.log(`Platform: ${platformKey}`);
+checkKoffiAt(
+  'koffi staging',
+  path.join(root, 'node_modules', 'koffi'),
+  path.join(root, 'runtime', 'koffi-stage', '@koromix'),
+);
 
 const webToolSources = ['web-tool.js', 'web-address-policy.js'];
 for (const file of webToolSources) {
@@ -147,6 +163,7 @@ if (!fs.existsSync(sdkRoot)) {
 const stagedSdk = path.join(releaseDir, 'foundry-local-sdk');
 if (fs.existsSync(releaseDir)) {
   console.log(`Checking release resource staging (${path.relative(root, releaseDir)})...`);
+  checkKoffiAt('staged resources', path.join(releaseDir, 'koffi'), path.join(releaseDir, '@koromix'));
   for (const file of webToolSources) {
     if (!fs.existsSync(path.join(releaseDir, 'sidecar', file))) {
       bad(`staged resources missing sidecar/${file}`);
@@ -254,6 +271,7 @@ if (failed) {
   console.error('\nVerification FAILED. Fix with:');
   console.error('  npm run ensure:node');
   console.error('  node scripts/ensure-foundry-native.cjs');
+  console.error('  npm run stage:koffi');
   console.error('  npm run tauri:build:local');
   console.error('  npm run verify:bundle');
   process.exit(1);

@@ -1,6 +1,6 @@
 // Live qualification for a real ONNX GenAI folder through Flint's sidecar and gateway.
-// The model stays at its source path; Flint gets a temporary junction under an isolated
-// app home, and cleanup removes that junction without touching the source.
+// Flint gets a copy or temporary junction under an isolated app home; the source
+// is hashed before and after the run and is never modified.
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -18,10 +18,15 @@ const ALIAS = 'flint-byom-live';
 const PROMPT = 'What is 6 times 7? Reply with one short sentence.';
 
 function parseArgs(argv) {
-  const args = { model: null, selfTest: false };
+  const args = { model: null, selfTest: false, copy: false };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
-    else if (argv[i] === '--model') args.model = path.resolve(argv[++i] ?? '');
+    else if (argv[i] === '--copy') args.copy = true;
+    else if (argv[i] === '--model') {
+      const model = argv[++i];
+      if (!model || model.startsWith('--')) throw new Error('--model requires a folder path.');
+      args.model = path.resolve(model);
+    }
     else throw new Error(`Unknown argument: ${argv[i]}`);
   }
   return args;
@@ -101,6 +106,7 @@ function startSidecar(home, appName, stderrLines) {
   });
   const stdout = readline.createInterface({ input: child.stdout });
   let exitResolve;
+  let hasClosed = false;
   const exited = new Promise((resolve) => { exitResolve = resolve; });
   stdout.on('line', (line) => {
     let message;
@@ -116,7 +122,8 @@ function startSidecar(home, appName, stderrLines) {
     while (stderrLines.join('').length > 16000) stderrLines.shift();
   });
   child.once('error', readyReject);
-  child.once('exit', (code, signal) => {
+  child.once('close', (code, signal) => {
+    hasClosed = true;
     exitResolve({ code, signal });
     readyReject(new Error(`Sidecar exited before readiness (${code ?? signal}).`));
     for (const entry of pending.values()) {
@@ -152,7 +159,36 @@ function startSidecar(home, appName, stderrLines) {
     });
   }
 
-  return { child, ready, send, exited };
+  return { child, ready, send, exited, get hasClosed() { return hasClosed; } };
+}
+
+async function waitForClose(sidecar, timeoutMs) {
+  if (sidecar.hasClosed) return true;
+  let timer;
+  try {
+    return await Promise.race([
+      sidecar.exited.then(() => true),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function stopSidecar(sidecar, { graceMs = 1500, forceMs = 5000 } = {}) {
+  let error = null;
+  if (sidecar.hasClosed) return { error, forced: false };
+  try {
+    assertReply(await sidecar.send('shutdownRuntime', { drainTimeoutMs: 10000 }, 15000), 'shutdownRuntime');
+  } catch (failure) {
+    error = `Graceful sidecar shutdown failed: ${failure?.message || failure}`;
+  }
+  if (await waitForClose(sidecar, graceMs)) return { error, forced: false };
+  sidecar.child.kill();
+  if (!await waitForClose(sidecar, forceMs)) {
+    error = 'The isolated sidecar did not close; temporary files were retained.';
+  }
+  return { error, forced: true };
 }
 
 function assertReply(reply, command) {
@@ -196,7 +232,7 @@ async function complete(endpoint, body, stream = false) {
   return { text, done };
 }
 
-async function run(modelPath) {
+async function run(modelPath, { copy = false } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
   }
@@ -207,19 +243,21 @@ async function run(modelPath) {
     throw new Error('Quit Flint before this spike creates an isolated Foundry runtime.');
   }
 
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'flint-byom-gateway-live-'));
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'flt-live-'));
   const home = path.join(work, 'home');
   fs.mkdirSync(home, { recursive: true });
-  const appName = `flint-byom-live-${process.pid}`;
+  const appName = 'flint-live';
   const stderrLines = [];
   const report = {
     modelPath,
+    mode: copy ? 'copy' : 'link',
     sourceUnchanged: false,
     sourceFileCount: 0,
     ipc: null,
     gateway: null,
     error: null,
     cleanupError: null,
+    cleanupForced: false,
   };
   let sidecar;
   let linkedPath = null;
@@ -231,14 +269,15 @@ async function run(modelPath) {
     await sidecar.ready;
     assertReply(await sidecar.send('init', { appName, logLevel: 'error' }), 'init');
     assertReply(await sidecar.send('ensureAccelerators'), 'ensureAccelerators');
-    const linked = assertReply(await sidecar.send('linkModelFolder', {
+    const addCommand = copy ? 'importModelFolder' : 'linkModelFolder';
+    const added = assertReply(await sidecar.send(addCommand, {
       folderPath: modelPath,
       name: ALIAS,
-    }), 'linkModelFolder').result;
-    if (linked.registered !== true) {
-      throw new Error(`Local registration failed: ${linked.registrationError || linked.registrationTask || 'unknown reason'}`);
+    }), addCommand).result;
+    if (added.registered !== true) {
+      throw new Error(`Local registration failed: ${added.registrationError || added.registrationTask || 'unknown reason'}`);
     }
-    linkedPath = linked.linkPath;
+    linkedPath = copy ? added.path : added.linkPath;
 
     const listed = assertReply(await sidecar.send('listModels'), 'listModels').result;
     const local = listed.find((model) => model.alias === ALIAS);
@@ -300,30 +339,18 @@ async function run(modelPath) {
     report.sourceUnchanged = JSON.stringify(sourceBefore) === JSON.stringify(finalFiles);
     if (!report.sourceUnchanged) throw new Error('The source model files changed during the test.');
     if (linkedPath && fs.existsSync(linkedPath)) {
-      throw new Error('Flint did not remove the isolated link during cleanup.');
+      throw new Error('Flint did not remove the isolated model assets during cleanup.');
     }
   } catch (error) {
     report.error = error?.message || String(error);
     if (stderrLines.length) report.sidecarStderr = stderrLines.join('').slice(-8000);
   } finally {
-    if (sidecar?.child && sidecar.child.exitCode === null) {
-      try {
-        await sidecar.send('shutdownRuntime', { drainTimeoutMs: 10000 }, 15000);
-      } catch (error) {
-        report.cleanupError = `Graceful sidecar shutdown failed: ${error?.message || error}`;
-      }
-      if (sidecar.child.exitCode === null) {
-        sidecar.child.kill();
-        await Promise.race([
-          sidecar.exited,
-          new Promise((resolve) => setTimeout(resolve, 5000)),
-        ]);
-      }
-      if (sidecar.child.exitCode === null) {
-        report.cleanupError = 'The isolated sidecar did not exit; temporary files were retained.';
-      }
+    if (sidecar?.child) {
+      const cleanup = await stopSidecar(sidecar);
+      report.cleanupError = cleanup.error;
+      report.cleanupForced = cleanup.forced;
     }
-    if (!sidecar || sidecar.child.exitCode !== null) {
+    if (!sidecar || sidecar.hasClosed) {
       fs.rmSync(work, { recursive: true, force: true });
     }
   }
@@ -335,17 +362,23 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.selfTest) {
     assert.equal(parseArgs(['--model', 'model']).model, path.resolve('model'));
+    assert.equal(parseArgs(['--model', 'model', '--copy']).copy, true);
+    assert.throws(() => parseArgs(['--model']), /requires a folder/);
     assert.throws(() => parseArgs(['--unexpected']), /Unknown argument/);
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder>');
-  const report = await run(args.model);
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy]');
+  const report = await run(args.model, { copy: args.copy });
   console.log(JSON.stringify(report, null, 2));
   if (report.error) process.exitCode = 2;
 }
 
-main().catch((error) => {
-  console.error(error?.message || String(error));
-  process.exitCode = 1;
-});
+export { parseArgs, stopSidecar };
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error?.message || String(error));
+    process.exitCode = 1;
+  });
+}

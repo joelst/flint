@@ -40,7 +40,12 @@ npm run verify:bundle
 
 Spike A (2026-08-10): MSI ~**54 MB** / NSIS ~**38 MB** with bundled Node (~+30 / +20 MB vs pre-spike 0.3.1 artifacts). Details: [spikes/node-bundle-spike.md](./spikes/node-bundle-spike.md).
 
-**CI:** `cargo check` and Tauri builds require `src-tauri/binaries/node-<triple>` to exist (`externalBin`). Workflows run `npm run ci:deps` (not plain `npm ci`) so the Foundry native cache is restored before staging Node.
+**CI:** `cargo check` and Tauri builds require `src-tauri/binaries/node-<triple>` to exist (`externalBin`) and `npm run stage:koffi` to create the native-binding resource tree. Workflows run `npm run ci:deps` (not plain `npm ci`) so the Foundry native cache is restored before staging Node. Before running Cargo directly, stage both Node and koffi; `tauri dev` and `tauri build` stage koffi automatically.
+
+On Windows x64, the staging tests also load the real native binding from an
+isolated flattened resource tree without `node_modules` or `NODE_PATH`.
+The sidecar resolves the bundled koffi entry beside it; development uses the
+installed dependency. A broken bundled binding is reported, not bypassed.
 
 `ensure:foundry` prefers the **build target**, not the host:
 
@@ -59,6 +64,7 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 | `npm install` | Install dependencies (+ host Foundry native cores) |
 | `npm run ensure:foundry` | Ensure Foundry cores for host or build target |
 | `npm run ensure:node` | Download/stage bundled Node for Tauri externalBin |
+| `npm run stage:koffi` | Stage native koffi packages required by Tauri resources and Windows x64 CUDA setup |
 | `npm run smoke:node` | Prove staged Node 22 + foundry-local-sdk native load |
 | `npm run tauri dev` | Dev app (hot reload + sidecar) |
 | `npm run check` | Svelte/TS check |

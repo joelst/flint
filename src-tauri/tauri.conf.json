@@ -4,7 +4,7 @@
   "version": "0.10.0",
   "identifier": "com.flint.flint",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run stage:koffi && npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run ensure:node && npm run ensure:foundry && npm run stage:koffi && npm run build",
     "frontendDist": "../build"

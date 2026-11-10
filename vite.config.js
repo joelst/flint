@@ -176,6 +176,7 @@ export default defineConfig(() => ({
         'scripts/release-metadata.cjs',
         'scripts/verify-ipc-contracts.cjs',
         'scripts/verify-markdown-links.cjs',
+        'scripts/stage-koffi-native.cjs',
       ],
       // Set just below the level the included files actually achieve, so the
       // gate catches regressions instead of rubber-stamping them. Raise these

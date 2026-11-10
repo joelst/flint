@@ -3,7 +3,8 @@
 **Status:** **0.10.0** is the current published stable release. **0.11.0** is
 the next release and carries the SDK 2.4.0 / real-BYOM work below. The external
 Llama 3.2 3B ONNX GenAI model has passed CPU registration, IPC chat, and
-buffered/streaming gateway chat on SDK 2.1.0; that run does not qualify 2.4.0.
+buffered/streaming gateway chat on SDK 2.4.0, both as a metadata-free copy and
+as a metadata-bearing link, with unchanged source hashes and confirmed shutdown.
 Package provenance, broader lifecycle and SDK qualification, and installed-app
 evidence remain. No 1.0 date until the remaining process gates in
 [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) are done.
@@ -27,9 +28,11 @@ out. GitHub has no `v2.4.0` release notes. The npm package, published
 local-catalog registration, merged frontend discovery, local load/delete
 handling, runtime version reporting, and live-probe scripts. The linked
 external-model spike demonstrates CPU inference through IPC and the
-session-backed OpenAI gateway on 2.1.0. Unsigned Windows packaging and
-bundle-resource verification passed on that 2.1.0 pin. None of that is 2.4.0
-model qualification or installed-app qualification. Do not publish until the
+session-backed OpenAI gateway on 2.4.0 for copy and link, including a copy whose
+source has no `inference_model.json`. Local automated gates, fresh unsigned
+target-specific Windows packaging, bundle verification, and executable runtime
+smoke pass on this pin. These are not installed-app or full SDK qualification.
+Do not publish until the
 gates below pass on 2.4.0. `.changeset/foundry-sdk-2.1.0.md` describes the
 2.1.0 integration. The 2.4.0 pin, coding-task, and shared-host changes have
 their own changesets.
@@ -40,8 +43,8 @@ TensorRT. The 2.4.0 JavaScript catalog does not expose a minimum SDK version,
 so Flint does not add a second download filter. Task `coding` stays text-only
 chat, and the shared-host opt-in stays off unless the user turns it on.
 Ranking, typed decisions, and the deprecated OpenAI client constructors stay
-out. Live Llama, Whisper, Parakeet, GPU, and installed-app checks are still
-open.
+out. Llama CPU copy/link chat is qualified; Whisper, Parakeet, GPU inference,
+broader lifecycle, and installed-app checks are still open.
 
 **Scope:** Qualify every existing Flint model operation on 2.4.0: discovery,
 download, import/link, load/unload/delete, Playground chat/vision/tools,
@@ -179,9 +182,10 @@ do not combine a runtime replacement or storage-format change with this upgrade.
 
 - `scripts/byom-gateway-live.mjs` now exercises a real model through Flint's
   sidecar and gateway; `scripts/spike-foundry-210.mjs` separately records the
-  native listener behavior. The Llama 3.2 3B CPU run on SDK 2.1.0 passed
-  IPC, gateway discovery, buffered chat, streaming chat, and source-file
-  integrity. Repeat that run after the pin moves to 2.4.0.
+  native listener behavior. The Llama 3.2 3B CPU runs on SDK 2.4.0 pass
+  IPC with HTTP off, gateway discovery, buffered chat, streaming chat,
+  unload/delete, source-file integrity, and confirmed graceful shutdown for
+  both copy and link. Copy accepts the original source without inference metadata.
 - The gateway now appends cached local registrations to `/v1/models`. Continue
   qualifying canonical alias/version resolution against frontend discovery and
   the exact loaded build; unknown or uncached remote identifiers must never
@@ -298,16 +302,18 @@ abort proves neither native quiescence nor released memory.
 | Runtime coexistence | Catalog and external models together; model swap, concurrent requests, leases/pins/eviction, Arena/Benchmark exclusivity and recovery; gateway 200 before a run, 503 while Running, 200 after release. |
 | Packaged Windows | Fresh target-specific build; `npm run verify:bundle -- --target x86_64-pc-windows-msvc --require-build`, `npm run smoke:node`, `npm run smoke:runtime`; installed copy/link/load/chat/stream/tools/delete/relaunch without PATH Node; signed-installer and updater/rollback qualification per [RELEASE.md](./RELEASE.md). |
 
-**Integration baseline (commit `864e0c5`):** `npm run check`, `npm run build`,
+**Current local qualification (SDK 2.4.0):** `npm run check`, `npm run build`,
 `npm run test:coverage`, IPC-contract and Markdown-link verification pass.
 Coverage passes all configured thresholds; the focused SDK/BYOM suites and
 native registration E2E pass. Both live-runner self-tests, bundled Node smoke,
-and fresh unsigned Windows packaging with bundle verification pass. CI passes
-on Windows and macOS. The Llama 3.2 3B CPU run proves real external-model
-registration, IPC chat, gateway discovery, and buffered/streaming gateway chat;
-all eight source-file hashes remained unchanged. This does not establish full
-SDK/BYOM qualification on 2.1.0, and it does not qualify SDK 2.4.0. Repeat
-the automated, live-runner, packaging, and Llama checks after the pin moves.
+debug/release Rust checks, fresh unsigned target-specific Windows packaging,
+bundle verification, and executable runtime smoke pass. CUDA, WebGPU, and
+TensorRT registration completed in an isolated runtime; that is not GPU inference
+proof. The Llama 3.2 3B CPU copy and link runs prove real external-model
+registration, IPC chat with HTTP off, gateway discovery, buffered/streaming chat,
+unload/delete, and confirmed graceful shutdown. All seven original source files
+and all eight metadata-bearing source files retained their hashes. PR CI still
+needs a fresh run; local Windows results do not prove the Linux/macOS jobs pass.
 Package revision/license provenance, broader lifecycle and provider checks,
 tool-capable-model behavior, the 2.2.0–2.3.1 gates on this pin, and installed-app
 qualification remain open. Flash-Next conversion or architecture enablement
