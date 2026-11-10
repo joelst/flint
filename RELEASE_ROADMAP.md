@@ -50,15 +50,20 @@ pins, and corrections found by that evidence; sequencing lives in
 ### Current stable → 0.11.0
 
 **0.10.0** is the current published stable release. **0.11.0** is the next
-release. Its SDK 2.1.0 and real-BYOM qualification gates are tracked in
-[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md); do not publish until those gates
-are complete.
+release. Its SDK pin is **2.4.0**, inclusive of the 2.1.0 through 2.4.0
+behavior Flint already uses, and its real-BYOM qualification gates are tracked in
+[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md). The existing model paths,
+including the Windows x64 CUDA runtime directory, task `coding`, and an
+off-by-default shared host, move onto that package. Ranking, typed decisions,
+and the deprecated OpenAI client constructors stay out. Do not
+publish until those gates are complete.
 
 The 0.11.0 work qualifies Flint's existing ONNX model path rather than opening
 broad new feature work. One real, non-catalog Llama 3.2 3B package has already
 passed CPU registration, IPC chat, and buffered/streaming chat through Flint's
-gateway, with its source files unchanged. Remaining package provenance,
-lifecycle, SDK feature, and installed-app gates are listed in the product plan.
+gateway on SDK 2.1.0, with its source files unchanged. That run must be
+repeated on 2.4.0. Remaining package provenance, lifecycle, SDK feature, and
+installed-app gates are listed in the product plan.
 The native Foundry listener still does not route local registrations; Flint's
 session-backed gateway handles them.
 

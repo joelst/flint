@@ -1,6 +1,6 @@
 // Register a Flint-owned ONNX folder on Foundry's local catalog so ChatSession,
-// EmbeddingsSession, and AudioSession see a task. Foundry 2.1.0's scanner still
-// does not read a task out of inference_model.json. registerModel copies metadata
+// EmbeddingsSession, and AudioSession see a task. The scanner does not read a
+// task out of inference_model.json. registerModel copies metadata
 // and does not delete the folder. removeFromCache throws for a LocalRegistration;
 // delete unregisters the catalog row, then removes a Flint-owned copy or the
 // junction and never the linked folder.

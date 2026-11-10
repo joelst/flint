@@ -18,6 +18,7 @@
     "tauri": "tauri",
     "ci:deps": "node scripts/ci-npm-ci.cjs",
     "ensure:foundry": "node scripts/ensure-foundry-native.cjs",
+    "stage:koffi": "node scripts/stage-koffi-native.cjs",
     "ensure:node": "node scripts/ensure-bundled-node.cjs",
     "smoke:node": "node scripts/smoke-bundled-node.cjs",
     "smoke:runtime": "node scripts/smoke-packaged-runtime.cjs",
@@ -42,7 +43,8 @@
     "@tauri-apps/plugin-notification": "^2.4.0",
     "@tauri-apps/plugin-shell": "^2.3.6",
     "@tauri-apps/plugin-updater": "^2.12.0",
-    "foundry-local-sdk": "2.1.0",
+    "foundry-local-sdk": "2.4.0",
+    "koffi": "3.3.4",
     "marked": "^18.0.14"
   },
   "devDependencies": {

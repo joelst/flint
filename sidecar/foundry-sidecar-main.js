@@ -121,6 +121,8 @@ import {
   PINNED_FOUNDRY_CORE_VERSION,
   PINNED_FOUNDRY_SDK_VERSION,
 } from './foundry-runtime-pin.js';
+import { prepareCudaRuntime } from './cuda-runtime-path.js';
+import { createFoundryManager, foundryManagerCreateConfig } from './foundry-manager-config.js';
 import { writeProtocolLine } from './protocol-stdout.js';
 import { createModelOperationQueue } from './model-operation-queue.js';
 
@@ -240,7 +242,7 @@ const KNOWN_COMMANDS = new Set([
 // Per-command type requirements. Keys are required or optional field names; values are:
 // 'number', 'string' (any string), 'non-empty-string', 'array'.
 const FIELD_TYPES = {
-  init:              { appName: 'non-empty-string', logLevel: 'non-empty-string' },
+  init:              { appName: 'non-empty-string', logLevel: 'non-empty-string', useSharedHost: 'boolean' },
   setLogLevel:       { level: 'non-empty-string' },
   startService:      { port: 'number', bindAddress: 'string', gateway: 'boolean', deferCatalogRead: 'boolean' },
   stopAndUnload:     { drainTimeoutMs: 'number' },
@@ -285,7 +287,7 @@ const VALID_LANES = new Set(['chat', 'audio']);
 // Each entry lists required fields and all allowed optional fields.
 // Payloads with unknown fields are rejected to prevent injection attacks.
 const COMMAND_SCHEMA = {
-  init:               { required: ['appName', 'logLevel'], optional: [] },
+  init:               { required: ['appName', 'logLevel'], optional: ['useSharedHost'] },
   setLogLevel:        { required: ['level'], optional: [] },
   startService:       { required: ['port'], optional: ['alias', 'preferredEp', 'bindAddress', 'gateway', 'deferCatalogRead'] },
   stopService:        { required: [], optional: [] },
@@ -624,7 +626,10 @@ function acceleratorGate() {
   if (!catalogRegistrationGate) {
     catalogRegistrationGate = createCatalogRegistrationGate((progress, options) => {
       if (!manager || typeof manager.downloadAndRegisterEps !== 'function') return null;
-      return registerDiscoveredExecutionProviders(manager, progress, options);
+      return registerDiscoveredExecutionProviders(manager, progress, {
+        ...options,
+        prepareCudaRuntime: options?.prepareCudaRuntime ?? prepareCudaRuntime,
+      });
     }, () => {
       const catalog = manager?.catalog;
       if (!catalog || typeof catalog.getModels !== 'function') {
@@ -2223,7 +2228,7 @@ function importModelFolder(payload) {
 /**
  * Register a model that lives elsewhere by creating a directory junction.
  *
- * Foundry 2.1.0 does not scan the cache into the public catalog. Flint registers
+ * Foundry Local does not scan the cache into the public catalog. Flint registers
  * the target on the local catalog so the model can be listed and loaded. The
  * foreign directory is not modified. Removing the model later deletes the link,
  * never the target.
@@ -3348,13 +3353,18 @@ rl.on('line', async (line) => {
           "then rebuild the installer (natives must be packaged under foundry-local-sdk/prebuilds)."
         );
       }
-      initConfig = { appName, logLevel: payload.logLevel || 'info', libraryPath };
+      initConfig = foundryManagerCreateConfig({
+        appName,
+        logLevel: payload.logLevel || 'info',
+        libraryPath,
+        useSharedHost: payload.useSharedHost === true,
+      });
       if (!LOG_LEVELS.includes(initConfig.logLevel)) {
         throw new Error(`Unsupported log level "${initConfig.logLevel}". Expected one of: ${LOG_LEVELS.join(', ')}`);
       }
       activeLogLevel = initConfig.logLevel;
       log('info', `Using Foundry native library directory: ${libraryPath}`);
-      manager = FManager.create(initConfig);
+      manager = createFoundryManager(FManager, initConfig);
       log('info', `SDK initialized for ${appName}`);
       const pinWarning = foundryRuntimePinWarning(readFoundryRuntimeVersions(libraryPath));
       if (pinWarning) log('warn', pinWarning);

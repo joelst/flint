@@ -63,6 +63,7 @@
     reconcileBenchmarkExclusive,
     getLastAppliedMemorySettingsSeq,
     refreshFoundryRuntimeAbout,
+    rememberSharedHostPreference,
     getWslStatus,
     enableWslMirroredNetworking,
     shutdownWsl,
@@ -203,6 +204,7 @@
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
   import { readRuntimeGpu, writeRuntimeGpu, runtimeGpuChoices, runtimeGpuPanelVisible, runtimeGpuRestartRequired, cudaVisibleAccelerators, isCudaVariant, planVramAdmission, vramBudgetOf } from "$lib/runtime-gpu";
+  import { readSharedHost, writeSharedHost } from "$lib/shared-host";
   import { decideChipFetchHop, detectFetchableUrls, isFetchableUrl } from "$lib/url-chips";
   import {
     conversationImagePreviewPartIndexes,
@@ -1057,6 +1059,16 @@
   function setRuntimeGpu(value: string) {
     runtimeGpu = value;
     runtimeGpuSaveFailed = !writeRuntimeGpu(localStorage, value);
+  }
+  const savedSharedHostAtLoad = readSharedHost(localStorage);
+  let sharedHost = $state(savedSharedHostAtLoad);
+  let sharedHostApplied = $state(savedSharedHostAtLoad);
+  let sharedHostSaveFailed = $state(false);
+
+  function setSharedHost(enabled: boolean) {
+    sharedHost = enabled;
+    sharedHostSaveFailed = !writeSharedHost(localStorage, enabled);
+    rememberSharedHostPreference(enabled);
   }
   let cacheInventory = $state<CacheInventory | null>(null);
   let cacheInventoryLoading = $state(false);
@@ -5576,6 +5588,8 @@ updateStateFromSdk();
     // Settings are hydrated by this point (onMount runs restoreChat before init), so the
     // service honors the user's autostart choice, port and bind address instead of a hardcoded
     // 5272 that opened a port they never configured.
+    sharedHostApplied = sharedHost;
+    rememberSharedHostPreference(sharedHost);
     const ok = await initializeSDK({
       appName: "flint",
       // Hydrated runtime policy and accelerator registration must land before HTTP startup or
@@ -5585,6 +5599,7 @@ updateStateFromSdk();
       deferCatalogRead: !autoRefreshCatalogOnStartup,
       servicePort: networkPort,
       bindAddress: networkBindAddress || undefined,
+      useSharedHost: sharedHost,
     });
     void refreshNodeAboutLine();
     void refreshFoundryAboutLine();
@@ -9710,6 +9725,27 @@ Output only the summary text, no preamble.`;
                   {/if}
                 </p>
               {/if}
+              <div class="accel-panel-row">
+                <label for="shared-host">
+                  <input
+                    id="shared-host"
+                    type="checkbox"
+                    checked={sharedHost}
+                    onchange={(e) => setSharedHost((e.currentTarget as HTMLInputElement).checked)}
+                  />
+                  Shared Foundry host
+                </label>
+              </div>
+              <p class="muted">
+                Off by default. Applies the next time this runtime starts. Flint keeps its own cache
+                and does not fall back to an in-process manager if the shared host fails.
+                {#if sharedHost !== sharedHostApplied}
+                  Restart Flint for this to take effect.
+                {/if}
+                {#if sharedHostSaveFailed}
+                  The choice could not be saved.
+                {/if}
+              </p>
             </div>
 
             {#if modelUpdateCount > 0}

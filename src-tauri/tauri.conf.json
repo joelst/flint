@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run ensure:node && npm run ensure:foundry && npm run build",
+    "beforeBuildCommand": "npm run ensure:node && npm run ensure:foundry && npm run stage:koffi && npm run build",
     "frontendDist": "../build"
   },
   "app": {
@@ -37,7 +37,9 @@
     ],
     "resources": {
       "../sidecar/": "sidecar/",
-      "../node_modules/foundry-local-sdk/": "foundry-local-sdk/"
+      "../node_modules/foundry-local-sdk/": "foundry-local-sdk/",
+      "../node_modules/koffi/": "koffi/",
+      "../runtime/koffi-stage/@koromix/": "@koromix/"
     },
     "macOS": {
       "minimumSystemVersion": "14.0"

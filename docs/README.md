@@ -54,7 +54,7 @@ or deferred plans kept for the analysis they contain, not measured data
 
 - **Operator runbook for an installed app:** [ADMIN.md](./ADMIN.md).
 - **Implementation sequencing and acceptance gates:** [PRODUCT_PLAN.md](./PRODUCT_PLAN.md).
-- **SDK 2.1.0, real BYOM, and the non-catalog ONNX model spike:** [SDK/BYOM shipping plan](./PRODUCT_PLAN.md#sdk-210-and-real-byom-shipping-plan).
+- **SDK 2.4.0, real BYOM, and the non-catalog ONNX model spike:** [SDK/BYOM shipping plan](./PRODUCT_PLAN.md#sdk-240-and-real-byom-shipping-plan).
 - **Forward plan through 1.0 and the 1.0 release bar:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).
   1.0 production is Windows; macOS Apple Silicon is evaluation-only.
 - **Release history:** [CHANGELOG.md](../CHANGELOG.md).

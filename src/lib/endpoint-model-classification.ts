@@ -24,6 +24,10 @@ function looksLikeEmbedding(name: string): boolean {
   return name.includes('embed');
 }
 
+function capabilityTokens(capabilities: string): string[] {
+  return capabilities.split(/[^a-z0-9-]+/).filter(Boolean);
+}
+
 /**
  * What a catalog model serves, from its metadata and its names, or null when nothing says.
  *
@@ -35,7 +39,7 @@ export function endpointModelKind(model: EndpointCatalogModel): EndpointModelKin
   const names = [model.alias, ...(model.variants || []).map((variant) => variant?.id)]
     .map((name) => String(name || '').trim().toLowerCase())
     .filter(Boolean);
-  const task = String(model.task || model.info?.task || '').toLowerCase();
+  const task = String(model.task || model.info?.task || '').trim().toLowerCase();
   const capabilities = String(
     model.capabilities || model.info?.capabilities || '',
   ).toLowerCase();
@@ -54,8 +58,10 @@ export function endpointModelKind(model: EndpointCatalogModel): EndpointModelKin
   if (
     task.includes('chat')
     || task.includes('text-generation')
+    || task === 'coding'
     || capabilities.includes('chat')
     || capabilities.includes('text-generation')
+    || capabilityTokens(capabilities).includes('coding')
   ) {
     return 'chat';
   }

@@ -32,6 +32,7 @@ import {
   type NodeRuntimeMode,
 } from './sidecar-paths';
 import { readRuntimeGpu } from './runtime-gpu';
+import { initPayloadForSharedHost, type SharedHostInitPayload } from './shared-host';
 import {
   createProgressStallWatchdog,
   type ProgressStallWatchdog,
@@ -194,7 +195,16 @@ export function getSidecarGeneration(): number {
 }
 let currentEndpoint: string | undefined = undefined;
 /** Init payload of the last successful init, so a crash-respawned sidecar can be re-inited. */
-let lastInitPayload: { appName: string; logLevel: string } | null = null;
+let lastInitPayload: SharedHostInitPayload | null = null;
+/** Latest shared-host choice. A toggle during init must survive the post-init payload write. */
+let sharedHostPreference = false;
+
+export function rememberSharedHostPreference(enabled: boolean): void {
+  sharedHostPreference = enabled;
+  if (lastInitPayload) {
+    lastInitPayload = initPayloadForSharedHost(lastInitPayload, sharedHostPreference);
+  }
+}
 /** Latest frontend catalog policy, preserved across sidecar crash recovery. */
 let lastInitRefreshCatalog = true;
 export function setAutomaticCatalogRefreshEnabled(enabled: boolean): void {
@@ -1495,7 +1505,7 @@ async function establishManagerReadiness(refreshCatalog: boolean): Promise<void>
 }
 
 async function performInit(
-  payload: { appName: string; logLevel: string },
+  payload: SharedHostInitPayload,
   refreshCatalog: boolean,
 ) {
   initializing = true;
@@ -1512,7 +1522,8 @@ async function performInit(
     const stillOurChild = () =>
       generation === sidecarGeneration && !!sidecarProcess && sidecarReady;
 
-    await sendInternal('init', payload);
+    const initPayload = initPayloadForSharedHost(payload, sharedHostPreference);
+    await sendInternal('init', initPayload);
     if (!stillOurChild()) {
       throw new Error('Sidecar was replaced during initialization');
     }
@@ -1520,7 +1531,8 @@ async function performInit(
     if (!stillOurChild()) {
       throw new Error('Sidecar was replaced during initialization');
     }
-    lastInitPayload = payload;
+    // Read the preference again. A checkbox change during this init belongs to the next spawn.
+    lastInitPayload = initPayloadForSharedHost(payload, sharedHostPreference);
     managerInstance = true;
     updateRuntime({ manager: 'ready', models: 'unknown' });
     // The previous child's residency is meaningless. Refresh the catalog when allowed; otherwise
@@ -1544,7 +1556,7 @@ async function performInit(
  * can all reach for recovery simultaneously, so every path must share one attempt.
  */
 function ensureInitialized(
-  payload: { appName: string; logLevel: string },
+  payload: SharedHostInitPayload,
   refreshCatalog = lastInitRefreshCatalog,
 ): Promise<void> {
   if (managerInstance && managerReady) return Promise.resolve();
@@ -1597,6 +1609,9 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
   // is already in flight. Recovery must use the latest request, not whichever call won the race.
   if (typeof config.refreshCatalog === 'boolean') {
     lastInitRefreshCatalog = config.refreshCatalog;
+  }
+  if (typeof config.useSharedHost === 'boolean') {
+    sharedHostPreference = config.useSharedHost;
   }
   if (initializeSDKPromise) return initializeSDKPromise;
   initializeSDKPromise = performInitializeSDK(config).finally(() => {
@@ -2981,6 +2996,7 @@ export function resetSDK() {
   managerInstance = null;
   managerReady = false;
   lastInitPayload = null; // a deliberate reset must not auto-re-init on the next send
+  sharedHostPreference = false;
   lastInitRefreshCatalog = true;
   currentEndpoint = undefined;
   runtimeQuitRequested = false;

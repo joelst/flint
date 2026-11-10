@@ -70,7 +70,7 @@ export type ChatResponseFormat =
 export const SIDECAR_PROTOCOL_VERSION = 1;
 
 export type SidecarCommand =
-  | { cmd: 'init'; appName: string; logLevel: string }
+  | { cmd: 'init'; appName: string; logLevel: string; useSharedHost?: boolean }
   | { cmd: 'setLogLevel'; level: string }
   | { cmd: 'startService'; port: number; alias?: string; preferredEp?: string; bindAddress?: string; gateway?: boolean; deferCatalogRead?: boolean }
   | { cmd: 'stopService' }

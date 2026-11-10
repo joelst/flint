@@ -1,15 +1,15 @@
 # Spike — Foundry Local SDK 2.1.0
 
-**Status:** Recorded 2026-10-07. Checks 1–3 and 7 passed for the Qwen 2.5 0.5B CPU folder. Checks 4 and 5 failed: Foundry's listener returned HTTP 404 for the registered id. Check 6 left the spike catalog file empty after the second 0.5B run. Listener chat was not proven. The production pin has since moved to 2.1.0.
+**Status:** Recorded 2026-10-07. Checks 1–3 and 7 passed for the Qwen 2.5 0.5B CPU folder. Checks 4 and 5 failed: Foundry's listener returned HTTP 404 for the registered id. Check 6 left the spike catalog file empty after the second 0.5B run. Listener chat was not proven. The shipping branch pins 2.4.0. This file records the 2026-10-07 SDK 2.1.0 measurement and does not qualify 2.4.0.
 **Date opened:** 2026-10-07
-**Production pin:** `foundry-local-sdk` **2.1.0** exact, in `package.json` and [SDKV2_MIGRATION.md](../SDKV2_MIGRATION.md). This file records the 2026-10-07 measurement. It does not by itself prove listener chat.
+**Measured pin:** `foundry-local-sdk` **2.1.0**. The shipping branch now pins **2.4.0** ([the SDK/BYOM shipping plan](../PRODUCT_PLAN.md#sdk-240-and-real-byom-shipping-plan)). This file records the 2026-10-07 measurement. It does not by itself prove listener chat.
 **npm:** `foundry-local-sdk@2.1.0` was published 2026-09-29. The GitHub release is [v2.1.0](https://github.com/microsoft/Foundry-Local/releases/tag/v2.1.0).
 
 ## Goal
 
 Learn whether SDK 2.1.0 is how Flint should register a local ONNX GenAI folder, chat with it, and complete one tool call. Flint's job stays the same: make local models easier to manage, discover, test, and prove.
 
-The production pin is 2.1.0. Listener chat and a tool call were not proven by this measurement.
+The shipping branch pins 2.4.0. This measurement used 2.1.0. Listener chat and a tool call were not proven by this measurement.
 
 ## What 2.1.0 claims
 
@@ -110,7 +110,7 @@ node .\scripts\spike-foundry-210.mjs --model "D:\models\some-onnx-genai-folder"
 node .\scripts\byom-gateway-live.mjs --model "D:\models\some-onnx-genai-folder"
 ```
 
-The inspect file is `%TEMP%\flint-foundry-210-spike\inspect.json`. The Result column records the measured run above; a repeat must record its own SDK, model, and listener evidence. Current implementation sequencing and release gates live in the [SDK/BYOM shipping plan](../PRODUCT_PLAN.md#sdk-210-and-real-byom-shipping-plan).
+The inspect file is `%TEMP%\flint-foundry-210-spike\inspect.json`. The Result column records the measured run above; a repeat must record its own SDK, model, and listener evidence. Current implementation sequencing and release gates live in the [SDK/BYOM shipping plan](../PRODUCT_PLAN.md#sdk-240-and-real-byom-shipping-plan).
 
 ## Follow-ups after a go
 

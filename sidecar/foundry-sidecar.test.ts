@@ -8,6 +8,7 @@ import { join } from 'path';
 import { pathToFileURL } from 'url';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { killAndWait } from './test-process.js';
+import { PINNED_FOUNDRY_CORE_VERSION, PINNED_FOUNDRY_SDK_VERSION } from './foundry-runtime-pin.js';
 import { TINY_PNG_DATA_URL } from './test-fixtures/images';
 
 function closeServer(server: Server): Promise<void> {
@@ -2975,9 +2976,9 @@ describe('foundry-sidecar error propagation and resilience', () => {
     expect(res.ok).toBe(true);
     expect(res.result.initialized).toBe(false);
     expect(res.result.modelLoaded).toBe(false);
-    expect(res.result.foundrySdkPin).toBe('2.1.0');
-    expect(res.result.foundryCorePin).toBe('2.1.0');
-    expect(res.result.foundrySdkVersion).toBe('2.1.0');
+    expect(res.result.foundrySdkPin).toBe(PINNED_FOUNDRY_SDK_VERSION);
+    expect(res.result.foundryCorePin).toBe(PINNED_FOUNDRY_CORE_VERSION);
+    expect(res.result.foundrySdkVersion).toBe(PINNED_FOUNDRY_SDK_VERSION);
   });
 
   it('getStatus reports benchmarkExclusive, reflecting setBenchmarkExclusive without requiring init', async () => {
@@ -3527,7 +3528,7 @@ describe('transcribeAudio AudioSession path', () => {
       language: 'en',
     });
     const res = await transcribed;
-    expect(res.error).toContain('Foundry Local SDK 2.1.0');
+    expect(res.error).toContain(`Foundry Local SDK ${PINNED_FOUNDRY_SDK_VERSION}`);
     expect(res.error).toContain('does not support audio processing');
     expect(events()).not.toContain('legacy-transcribe');
   }, 30000);
@@ -5615,9 +5616,11 @@ describe('accelerator registration queue', () => {
     'let calls = 0;',
     'class FakeManager {',
     '  constructor() { this.catalog = { getModel: async () => null, getModels: async () => [] }; }',
-    "  discoverEps() { return [{ name: 'CUDAExecutionProvider', isRegistered: false }]; }",
+    // WebGPU, not CUDA: this checks registration serialization. A CUDA name would
+    // enter the Windows runtime-directory preparer before downloadAndRegisterEps.
+    "  discoverEps() { return [{ name: 'WebGpuExecutionProvider', isRegistered: false }]; }",
     '  async downloadAndRegisterEps(_names, onProgress) {',
-    "    onProgress?.('CUDAExecutionProvider', undefined);",
+    "    onProgress?.('WebGpuExecutionProvider', undefined);",
     '    const call = ++calls;',
     "    note('start ' + call);",
     '    await new Promise((resolve) => setTimeout(resolve, 300));',

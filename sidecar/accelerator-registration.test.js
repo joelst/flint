@@ -326,6 +326,57 @@ describe('registerDiscoveredExecutionProviders', () => {
       failedEps: ['CUDAExecutionProvider'],
     });
   });
+
+  it('registers CUDA before TensorRT when TensorRT is discovered first', async () => {
+    const providers = [
+      { name: 'NvTensorRTRTXExecutionProvider', isRegistered: false },
+      { name: 'WebGpuExecutionProvider', isRegistered: false },
+      { name: 'CUDAExecutionProvider', isRegistered: false },
+    ];
+    const manager = {
+      discoverEps: () => providers,
+      downloadAndRegisterEps: vi.fn(async ([name]) => {
+        providers.find((provider) => provider.name === name).isRegistered = true;
+        return { success: true, registeredEps: [name], failedEps: [] };
+      }),
+    };
+
+    await registerDiscoveredExecutionProviders(manager);
+    expect(manager.downloadAndRegisterEps.mock.calls.map(([names]) => names)).toEqual([
+      ['CUDAExecutionProvider'],
+      ['WebGpuExecutionProvider'],
+      ['NvTensorRTRTXExecutionProvider'],
+    ]);
+  });
+
+  it('records a missing CUDA runtime and still registers the other providers', async () => {
+    const providers = [
+      { name: 'CUDAExecutionProvider', isRegistered: false },
+      { name: 'CPUExecutionProvider', isRegistered: false },
+    ];
+    const prepareCudaRuntime = vi.fn(async () => ({
+      ok: false,
+      reason: 'CUDA 12 runtime directory was not found',
+    }));
+    const manager = {
+      discoverEps: () => providers,
+      downloadAndRegisterEps: vi.fn(async ([name]) => {
+        providers.find((provider) => provider.name === name).isRegistered = true;
+        return { success: true, registeredEps: [name], failedEps: [] };
+      }),
+    };
+
+    const result = await registerDiscoveredExecutionProviders(manager, undefined, {
+      prepareCudaRuntime,
+    });
+    expect(prepareCudaRuntime).toHaveBeenCalledTimes(1);
+    expect(manager.downloadAndRegisterEps.mock.calls.map(([names]) => names)).toEqual([
+      ['CPUExecutionProvider'],
+    ]);
+    expect(result.registeredEps).toEqual(['CPUExecutionProvider']);
+    expect(result.failedEps).toEqual(['CUDAExecutionProvider']);
+    expect(result.status).toContain('CUDA 12 runtime directory was not found');
+  });
 });
 
 describe('native service startup', () => {

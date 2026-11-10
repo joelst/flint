@@ -1,11 +1,12 @@
 # Flint reliability execution plan
 
 **Status:** **0.10.0** is the current published stable release. **0.11.0** is
-the next release and carries the SDK 2.1.0 / real-BYOM work below. The external
+the next release and carries the SDK 2.4.0 / real-BYOM work below. The external
 Llama 3.2 3B ONNX GenAI model has passed CPU registration, IPC chat, and
-buffered/streaming gateway chat; package provenance, broader lifecycle and SDK
-qualification, and installed-app evidence remain. No 1.0 date until the
-remaining process gates in [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) are done.
+buffered/streaming gateway chat on SDK 2.1.0; that run does not qualify 2.4.0.
+Package provenance, broader lifecycle and SDK qualification, and installed-app
+evidence remain. No 1.0 date until the remaining process gates in
+[RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) are done.
 
 **Scope:** 1.0 production is Windows. macOS Apple Silicon remains evaluation-only (unsigned). Linux is deferred.
 
@@ -13,17 +14,36 @@ remaining process gates in [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) are done.
 
 ## 0.11.0 SDK/BYOM release preparation
 
-### SDK 2.1.0 and real BYOM shipping plan
+### SDK 2.4.0 and real BYOM shipping plan
 
-**Status:** The integration branch pins SDK 2.1.0 and contains local-catalog
-registration, merged frontend discovery, local load/delete handling, runtime
-version reporting, and live-probe scripts. The linked external-model spike
-demonstrates CPU inference through IPC and the session-backed OpenAI gateway.
-Unsigned Windows packaging and bundle-resource verification also pass; these
-are not installed-app qualification or full SDK compatibility. Do not publish
-the SDK/BYOM changeset until the remaining gates below pass.
+**Target:** 0.11.0 pins `foundry-local-sdk` and the matching native core at
+**2.4.0** exact. The pin is inclusive: the release qualifies the behavior
+shipped from 2.1.0 through the surfaces this package still supports. Ranking
+sessions, typed decisions, and the deprecated OpenAI client constructors stay
+out. GitHub has no `v2.4.0` release notes. The npm package, published
+2026-11-09, is the source for this pin.
 
-**Scope:** Qualify every existing Flint model operation on 2.1.0: discovery,
+**Status:** The integration branch pins SDK 2.4.0. It contains
+local-catalog registration, merged frontend discovery, local load/delete
+handling, runtime version reporting, and live-probe scripts. The linked
+external-model spike demonstrates CPU inference through IPC and the
+session-backed OpenAI gateway on 2.1.0. Unsigned Windows packaging and
+bundle-resource verification passed on that 2.1.0 pin. None of that is 2.4.0
+model qualification or installed-app qualification. Do not publish until the
+gates below pass on 2.4.0. `.changeset/foundry-sdk-2.1.0.md` describes the
+2.1.0 integration. The 2.4.0 pin, coding-task, and shared-host changes have
+their own changesets.
+
+**Implementation sequence:** The existing model paths move onto exact 2.4.0,
+including the Windows x64 CUDA runtime directory and registering CUDA before
+TensorRT. The 2.4.0 JavaScript catalog does not expose a minimum SDK version,
+so Flint does not add a second download filter. Task `coding` stays text-only
+chat, and the shared-host opt-in stays off unless the user turns it on.
+Ranking, typed decisions, and the deprecated OpenAI client constructors stay
+out. Live Llama, Whisper, Parakeet, GPU, and installed-app checks are still
+open.
+
+**Scope:** Qualify every existing Flint model operation on 2.4.0: discovery,
 download, import/link, load/unload/delete, Playground chat/vision/tools,
 embeddings, speech, gateway clients, Arena/Benchmark, cancellation, recovery, and
 packaging. SDK custom-tool payloads are a transport feature, not permission to
@@ -41,7 +61,7 @@ external-model proof. Renaming a catalog model does not satisfy this gate.
 The input package must already be ONNX GenAI; the model's original training or
 checkpoint format is not the criterion. Converting non-ONNX weights, building
 new architecture/operator support, or adopting another runtime is out of scope
-and must not block SDK 2.1.0/BYOM shipping.
+and must not block SDK 2.4.0/BYOM shipping.
 
 [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) is an example
 of a desirable model, not a named release requirement. Its published
@@ -98,11 +118,11 @@ recipe.
 
 | Order | Deliverable | Exit gate |
 |---|---|---|
-| 1 | SDK/native compatibility and startup | Exact 2.1.0 JS package and matching native assets; accelerator registration precedes the catalog snapshot/local-registration work; one manager per process; generation-owned readiness and About data; existing catalog operations still work. |
+| 1 | SDK/native compatibility and startup | Exact 2.4.0 JS package and matching native assets, replacing any earlier payload; accelerator registration precedes the catalog snapshot/local-registration work; one manager per process; generation-owned readiness and About data; existing catalog operations still work. |
 | 2 | Reliable local-model lifecycle | Durable, collision-safe registrations with explicit task/provider/device/context/capability metadata; copy/link/restart/recovery/unregister/delete matrix passes without modifying or deleting external assets. |
 | 3 | Real BYOM sessions | Control model and genuine external package produce meaningful non-streaming and streaming answers through Flint IPC, including a fresh launch and HTTP service off. |
 | 4 | BYOM OpenAI endpoint | The same registered models appear in gateway discovery and work by advertised name and alias, cold and resident, with streaming, tool results, usage, correct errors, admission, and activity accounting. Flint's gateway must handle local registrations without exposing the native listener's 404. |
-| 5 | SDK 2.1 feature adoption | Native cancellation, download cancellation, tool-call fixes, parameter/usage/output-limit handling, and audio behavior are exercised on real models; unsupported features fail explicitly. |
+| 5 | SDK 2.1.0–2.4.0 feature adoption | Native cancellation, download cancellation, tool-call fixes, parameter/usage/output-limit handling, audio behavior, and the 2.2.0–2.3.1 gates in section 5 are exercised on real 2.4.0 models; unsupported features fail explicitly. Ranking and typed decisions stay out. |
 | 6 | Installed-app qualification and release | Full automated gates plus a fresh target-specific Windows package, installed-app BYOM dogfood, source-file preservation, and updater/rollback evidence pass for the same release candidate. |
 
 Steps 1-2 precede 3; 3 precedes 4; 5 builds on the same lifecycle and inference
@@ -113,11 +133,13 @@ do not combine a runtime replacement or storage-format change with this upgrade.
 
 **1. SDK/native and startup**
 
-- Audit the installed 2.1.0 declarations and actual calls, not just release
+- Audit the installed 2.4.0 declarations and actual calls, not just release
   notes: local `Catalog`, `MutableModelInfo`, session/request APIs, cancellation,
-  download signals, and metadata getters. Prefer session paths; test that normal
-  2.1.0 operations never invoke deprecated clients. Compatibility fallbacks must
-  not hide a primary inference error or submit it a second time.
+  download signals, catalog v2 metadata, and the minimum Foundry version used
+  for model selection. Prefer session paths; test that normal 2.4.0 operations
+  never invoke deprecated clients. Compatibility fallbacks must not hide a
+  primary inference error or submit it a second time. A 2.1.0 declaration audit
+  does not close this gate.
 - Verify `deps_versions.json` and native-cache manifests on clean install and
   package staging. Report JS/core mismatches; do not reuse an incompatible
   cached native payload or describe a load smoke as inference qualification.
@@ -157,8 +179,9 @@ do not combine a runtime replacement or storage-format change with this upgrade.
 
 - `scripts/byom-gateway-live.mjs` now exercises a real model through Flint's
   sidecar and gateway; `scripts/spike-foundry-210.mjs` separately records the
-  native listener behavior. The Llama 3.2 3B CPU run passed IPC, gateway
-  discovery, buffered chat, streaming chat, and source-file integrity.
+  native listener behavior. The Llama 3.2 3B CPU run on SDK 2.1.0 passed
+  IPC, gateway discovery, buffered chat, streaming chat, and source-file
+  integrity. Repeat that run after the pin moves to 2.4.0.
 - The gateway now appends cached local registrations to `/v1/models`. Continue
   qualifying canonical alias/version resolution against frontend discovery and
   the exact loaded build; unknown or uncached remote identifiers must never
@@ -174,7 +197,54 @@ do not combine a runtime replacement or storage-format change with this upgrade.
   Stop & Unload, and terminal Quit. No finite control-plane deadline may cut
   off a successful inference stream.
 
-**5. Native 2.1 feature completion**
+**5. Native 2.1.0–2.4.0 feature completion**
+
+Exercise the 2.1.0 contracts below on the 2.4.0 pin. Passing them on the
+current 2.1.0 branch does not close the gate. Then qualify the behavior that
+landed after 2.1.0:
+
+- **2.2.0–2.2.1 catalog and cache.** Catalog v2 is the catalog Flint reads.
+  The 2.4.0 JavaScript catalog does not expose a minimum SDK version, so Flint
+  does not add a second filter. Alias download stays on `getModel` /
+  `getModelVariant`. Removing an incomplete or corrupted model cache must not delete a verified
+  cache or a provider DLL that is still loaded. Recheck Providers still
+  rebuilds a broken CUDA or WebGPU cache and leaves a registered provider in
+  place.
+- **2.2.1 Windows CUDA runtime.** The CUDA execution provider no longer
+  bundles the CUDA toolkit or cuDNN runtime. Windows x64 needs a separate
+  CUDA 12 and cuDNN 9 install. Before CUDA registration, that runtime
+  directory has to be on the DLL search path with `AddDllDirectory`; the
+  packaged sidecar includes the koffi binding that makes that call. `PATH`
+  alone does not satisfy the GenAI CUDA bridge. A missing runtime is an
+  explicit failure, not a silent CPU fallback presented as CUDA. Register
+  CUDA before TensorRT-RTX; 2.3.0 fixed out-of-memory failures from the
+  reverse order. Windows ARM64 uses CUDA 13 and does not need that extra
+  `AddDllDirectory` step. It is not the 0.11.0 production target. Linux CUDA
+  registration stays out of this release.
+- **2.2.1 tools and disconnect.** An invalid generic tool schema fails the
+  request. Flint must not report that failure as a successful tool call.
+  Where Flint already sends a parallel-tool-call disable, 2.4.0 must honor
+  it. This does not widen Playground into a tool executor. Non-streaming
+  gateway disconnect must reach native cancellation under the same honesty
+  rule as streaming: caller completion is not native completion.
+- **2.3.0 defaults, speech, and cache ownership.** An explicit Flint
+  generation setting wins over an SDK chat default. An omitted setting uses
+  the pinned SDK default and stays visible as that default. Re-probe Whisper and
+  Parakeet on 2.4.0. Keep the current Parakeet refusal until that probe
+  records a pass or a still-unsupported result. Do not claim native word
+  timestamps. 2.3.0 adds a shared model cache across Foundry Local SDKs.
+  Flint keeps `~/.flint` and does not opt into another product's cache.
+  Confirm startup does not read or write another app's model cache.
+- **2.4.0 pin.** The package keeps the 2.1.0 through 2.3.1 behavior Flint
+  already uses, and it adds ranking and typed-decision sessions that stay out
+  of this release. `deps_versions.json` records ONNX Runtime 1.31.0, ONNX
+  Runtime GenAI 0.19.0, and Windows AI Machine Learning 2.5.96. There is no
+  separate `foundry-local-core` NuGet version, so the native core pin is the
+  package version, 2.4.0. Do not assume the 2.1.0 runtime (ONNX Runtime
+  1.30.0, GenAI 0.17.1), the 2.3.1 runtime (GenAI 0.18.0, Windows ML 2.4.89),
+  or an unverified CLI pairing.
+
+The 2.1.0 contracts, re-run on 2.4.0:
 
 - Wire `Request.cancel()` for active one-shot work and the streaming
   `AbortSignal`/terminal `response` contract. Preserve completion-vs-cancel
@@ -197,8 +267,9 @@ do not combine a runtime replacement or storage-format change with this upgrade.
   imported code's silent removal of every frequency penalty: supported values
   must preserve semantics; unsupported non-neutral values need an explicit UI
   and API outcome, not a successful response that hides an ignored setting.
-- Re-probe Whisper URI and Nemotron PCM/language behavior on 2.1.0; do not infer
-  success from the old 2.0.1 shapes or claim native word timestamps. Run a real
+- Re-probe Whisper URI, Parakeet, and Nemotron PCM/language behavior on
+  2.4.0; do not infer success from the old 2.0.1 shapes or from the 2.3.0
+  release note, and do not claim native word timestamps. Run a real
   embedding package through both `embedTexts` and `/v1/embeddings` with numeric,
   finite vectors before claiming end-to-end embedding support.
 - Evaluate `ChatSession.preflightRequest` for exact structural token admission
@@ -235,10 +306,12 @@ and fresh unsigned Windows packaging with bundle verification pass. CI passes
 on Windows and macOS. The Llama 3.2 3B CPU run proves real external-model
 registration, IPC chat, gateway discovery, and buffered/streaming gateway chat;
 all eight source-file hashes remained unchanged. This does not establish full
-SDK/BYOM qualification. Package revision/license provenance, broader lifecycle
-and provider checks, tool-capable-model behavior, and installed-app qualification
-remain open. Flash-Next conversion or architecture enablement is not a release
-gate.
+SDK/BYOM qualification on 2.1.0, and it does not qualify SDK 2.4.0. Repeat
+the automated, live-runner, packaging, and Llama checks after the pin moves.
+Package revision/license provenance, broader lifecycle and provider checks,
+tool-capable-model behavior, the 2.2.0–2.3.1 gates on this pin, and installed-app
+qualification remain open. Flash-Next conversion or architecture enablement
+is not a release gate.
 
 Do not publish 0.11.0 until the qualification gates above pass. Keep completed
 work in reviewed changesets; do not merge unrelated accumulated changesets as
@@ -320,7 +393,7 @@ Rubber-duck: this is not a security product. The boundary already exists; 1.0 re
 - Prune unused grants: opener plugin (renderer never imported it); `$RESOURCE` read scope (sidecar paths are native `trusted_runtime_paths`); redundant `core:tray:default` / `core:menu:default` (already in `core:default`). Keep `$RESOURCE` write deny. Comment each survivor.
 - Dedicated `src/lib/security-boundary.test.ts` that fails CI if opener/spawn/kill return, `$RESOURCE` reads return, shell execute is more than `node -v`, IPC allowlists drift, or BYOM `isInsideRoot` accepts a traversal.
 - Cache `runtime/foundry-native-cache` in CI/release. CI runs `npm run ci:deps` (extract packages, restore cache, `npm rebuild`) so the SDK `skipIfPresent` installer sees the cores. There is no root `preinstall` restore; that hook cannot run before the SDK installer.
-- Pin `foundry-local-sdk` to `2.1.0`. Warn (do not fail) at sidecar `init` when loaded SDK/core versions differ from that pin.
+- Sidecar `init` warns (does not fail) when the loaded SDK or core version differs from the pin. The 0.11.0 pin is `2.4.0`, owned by the SDK/BYOM shipping plan above. Published 0.10.0 still carries the previous pin until that release.
 
 ### Wave 2 — Native lifecycle and conversation integrity
 
@@ -332,10 +405,11 @@ Rubber-duck: a Svelte tray created on first close is not renderer-independent. N
 
 ### Wave 3 — Cancellation and timeout certainty
 
-SDK 2.1.0 exposes native request and streaming cancellation. Flint's current
-transport still suppresses output and drains the native operation; adoption and
-confirmation are gated by the SDK shipping plan above. Stop must remain honest
-until native completion or cancellation is established.
+SDK 2.1.0 through 2.4.0 expose native request and streaming cancellation.
+2.2.1 also cancels non-streaming chat when the client disconnects. Flint's
+current transport still suppresses output and drains the native operation;
+adoption and confirmation are gated by the SDK shipping plan above. Stop must
+remain honest until native completion or cancellation is established.
 
 - Chat streaming: Stop settles the caller; native loop keeps consuming until stream end or child exit; UI already says the background may finish.
 - Compare: no Stop control. The running state says the run cannot be cancelled — wait for slots.
@@ -407,7 +481,9 @@ constructors while keeping the existing IPC and gateway contracts.
   models and raw 16 kHz mono PCM through `ItemQueue` for Nemotron. Refuse
   Parakeet when its unsupported family is determinable before loading, defer
   ambiguous aliases to the runtime-selected variant, and never retry through
-  deprecated `AudioClient` or HTTP.
+  deprecated `AudioClient` or HTTP. 2.3.0 claims Parakeet and Whisper fixes.
+  Re-probe both on the 2.4.0 pin before dropping the Parakeet refusal or
+  treating the 2.0.1 URI shape as still valid.
 - **Prompt metadata:** keep Flint's BYOM template validation independent of SDK
   `PromptTemplate` types.
 
@@ -459,7 +535,7 @@ qualification. Extra audio-decoder work has no 1.0 gate.
 | Would rewriting the backend fix conversation loss? | No. Correct hydration, storage identity, and asynchronous ownership in the frontend first. |
 | Should the emergency fix introduce a new database? | No. Stop destructive writes immediately; give the subsequent storage migration its own compatibility gate. |
 | Does keeping old storage make every downgrade safe? | No. Define a supported rollback version that understands the new format, including conversations created after migration. |
-| Does a timeout or Stop acknowledgement mean inference stopped? | No. Separate caller completion from native-operation completion. SDK 2.1.0 cancellation is cooperative and can race completion; retain resource protection until the terminal native outcome is established or the owning process is gone. |
+| Does a timeout or Stop acknowledgement mean inference stopped? | No. Separate caller completion from native-operation completion. SDK 2.1.0–2.4.0 cancellation is cooperative and can race completion; 2.2.1 also cancels non-streaming chat on client disconnect. Retain resource protection until the terminal native outcome is established or the owning process is gone. |
 | Can a missing heartbeat prove the sidecar crashed? | Not while synchronous native work can block its event loop. Distinguish unresponsive from exited; avoid restart loops and duplicate work. |
 | Would moving inference into Tauri prevent all windows disappearing? | It can do the opposite: a native fault would enter the desktop process. Keep inference in a supervised process even if its implementation later becomes Rust. |
 | Can a worker thread initialize another Foundry manager? | Not safely as a workaround for the process-global native core. Keep one manager owner; do not duplicate ownership across Node workers. |

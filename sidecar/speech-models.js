@@ -1,5 +1,10 @@
-/** Request shapes below were probed on Foundry Local SDK 2.0.1. This label tracks the pinned package. */
-export const SPEECH_SDK_VERSION = '2.1.0';
+/**
+ * Request shapes below were probed on Foundry Local SDK 2.0.1. Parakeet stays
+ * refused until a probe on this pin records a pass. The label tracks the pin.
+ */
+import { PINNED_FOUNDRY_SDK_VERSION } from './foundry-runtime-pin.js';
+
+export const SPEECH_SDK_VERSION = PINNED_FOUNDRY_SDK_VERSION;
 
 const FAMILY_RULES = [
   {

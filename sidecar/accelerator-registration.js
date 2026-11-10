@@ -12,6 +12,30 @@ function providerName(provider) {
   return String(provider?.name || '').trim();
 }
 
+function isCudaExecutionProvider(name) {
+  const normalized = name.toLowerCase();
+  return normalized.includes('cuda') && !normalized.includes('tensor');
+}
+
+// CUDA before everything else, TensorRT last. SDK 2.3.0 fixed out-of-memory
+// failures when TensorRT-RTX was registered before CUDA.
+function executionProviderRegistrationRank(name) {
+  if (isCudaExecutionProvider(name)) return 0;
+  if (name.toLowerCase().includes('tensor')) return 2;
+  return 1;
+}
+
+function sortProvidersForRegistration(providers) {
+  return providers
+    .map((provider, index) => ({ provider, index }))
+    .sort((left, right) => {
+      const rank = executionProviderRegistrationRank(providerName(left.provider))
+        - executionProviderRegistrationRank(providerName(right.provider));
+      return rank || left.index - right.index;
+    })
+    .map((entry) => entry.provider);
+}
+
 // Module-private and non-enumerable so callers receive the SDK-shaped result while
 // the gate can distinguish an empty-discovery fallback failure from other retries.
 // The register callback must return this result object unchanged.
@@ -69,18 +93,43 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
 
   const failures = new Map();
   const attempted = new Set();
+  let cudaRuntimePromise = null;
+  async function cudaRuntimeFailure() {
+    if (!cudaRuntimePromise) {
+      cudaRuntimePromise = (async () => {
+        if (typeof options.prepareCudaRuntime !== 'function') return null;
+        try {
+          const prepared = await options.prepareCudaRuntime();
+          if (prepared && prepared.ok === false) {
+            return prepared.reason || 'CUDA runtime directory is unavailable';
+          }
+          return null;
+        } catch (error) {
+          return errorMessage(error);
+        }
+      })();
+    }
+    return cudaRuntimePromise;
+  }
   // Bounded so a discovery list that keeps growing cannot register forever.
   // Eight covers the providers this machine can surface (CPU, CUDA, WebGPU,
   // TensorRT, DML, QNN, OpenVINO) with one spare pass.
   for (let pass = 0; pass < 8; pass++) {
-    const pending = discoveredProviders(manager).filter((provider) => {
+    const pending = sortProvidersForRegistration(discoveredProviders(manager).filter((provider) => {
       const name = providerName(provider);
       return name && !provider.isRegistered && !attempted.has(name);
-    });
+    }));
     if (pending.length === 0) break;
     for (const provider of pending) {
       const name = providerName(provider);
       attempted.add(name);
+      if (isCudaExecutionProvider(name)) {
+        const reason = await cudaRuntimeFailure();
+        if (reason) {
+          failures.set(name, reason);
+          continue;
+        }
+      }
       try {
         await manager.downloadAndRegisterEps([name], onProgress);
       } catch (error) {
