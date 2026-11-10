@@ -29,6 +29,40 @@ function parseOpenAiJson (text, description) {
   }
 }
 
+function abortError () {
+  const error = new Error('The operation was aborted.');
+  error.name = 'AbortError';
+  return error;
+}
+
+async function preflightNativeRequest (session, request, signal) {
+  if (typeof session?.preflightRequest !== 'function' || signal?.aborted) return;
+  let result;
+  try {
+    result = await session.preflightRequest(request);
+  } catch (error) {
+    if (signal?.aborted) throw abortError();
+    throw error;
+  }
+  if (signal?.aborted) throw abortError();
+  const tokenCounts = [
+    result?.promptTokens,
+    result?.outputReserveTokens,
+    result?.requiredTokens,
+    result?.contextLimitTokens,
+    result?.deficitTokens,
+  ];
+  if (!result || typeof result.fits !== 'boolean'
+    || !tokenCounts.every((value) => Number.isSafeInteger(value) && value >= 0)) {
+    throw new Error('Foundry Local returned an invalid request preflight result.');
+  }
+  if (!result.fits) {
+    throw new Error(
+      `Request exceeds the model's structural context limit by ${result.deficitTokens} tokens (requires ${result.requiredTokens}, limit ${result.contextLimitTokens}).`,
+    );
+  }
+}
+
 // Cleanup must never erase why the primary operation failed. If disposal itself throws,
 // combine ordinary failures into one error that still exposes the primary failure as
 // `cause`. AbortError identity is preserved because cancellation classification may
@@ -315,6 +349,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
           ? buildNativeRequest(messages, tools, options)
           : new Request().addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
         session = new ChatSession(chatModel);
+        await preflightNativeRequest(session, request, options.signal);
         const response = await session.processRequest(
           request,
           options.signal ? { signal: options.signal } : undefined,
@@ -364,6 +399,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
               ? buildNativeRequest(messages, tools, options)
               : new Request().addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
             session = new ChatSession(chatModel);
+            await preflightNativeRequest(session, request, options.signal);
             const stream = session.processStreamingRequest(
               request,
               options.signal ? { signal: options.signal } : undefined,

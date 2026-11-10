@@ -280,9 +280,11 @@ The 2.1.0 contracts, re-run on 2.4.0:
   release note, and do not claim native word timestamps. Run a real
   embedding package through both `embedTexts` and `/v1/embeddings` with numeric,
   finite vectors before claiming end-to-end embedding support.
-- Evaluate `ChatSession.preflightRequest` for exact structural token admission
-  on native session paths. Preserve whole-turn packing, reply reserve and
-  untrusted-envelope rules; structural fit does not reserve runtime memory.
+- Native ChatSession paths use `preflightRequest` when the SDK exposes it and
+  refuse requests that exceed the structural token limit before inference.
+  Qualify the result against real models. Preserve whole-turn packing,
+  reply reserve and untrusted-envelope rules; structural fit does not reserve
+  runtime memory.
 
 #### Required evidence and release decision
 

@@ -509,6 +509,143 @@ describe('createSessionChatClient buffered chat', () => {
     },
   );
 
+  it.each(['completeChat', 'completeStreamingChat'])(
+    'preflights the native request before %s dispatch',
+    async (method) => {
+      const events: string[] = [];
+      let preflightRequest: unknown;
+      let dispatchedRequest: unknown;
+      const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+      class Request {
+        addItem () { return this; }
+      }
+      class ChatSession {
+        async preflightRequest (request: unknown) {
+          events.push('preflight');
+          preflightRequest = request;
+          return {
+            promptTokens: 10,
+            outputReserveTokens: 20,
+            requiredTokens: 30,
+            contextLimitTokens: 40,
+            fits: true,
+            deficitTokens: 0,
+          };
+        }
+        async processRequest (request: unknown) {
+          events.push('dispatch');
+          dispatchedRequest = request;
+          return { output: [Item.text(JSON.stringify({ choices: [] }), 'openai-json')] };
+        }
+        processStreamingRequest (request: unknown) {
+          events.push('dispatch');
+          dispatchedRequest = request;
+          return {
+            response: Promise.resolve({ output: [] }),
+            [Symbol.asyncIterator]: async function* () {
+              yield Item.text(JSON.stringify({ choices: [] }), 'openai-json');
+            },
+          };
+        }
+        dispose () {}
+      }
+      const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+      if (method === 'completeChat') {
+        await client.completeChat([{ role: 'user', content: 'hi' }]);
+      } else {
+        for await (const _ of client.completeStreamingChat([{ role: 'user', content: 'hi' }])) {}
+      }
+      expect(events).toEqual(['preflight', 'dispatch']);
+      expect(dispatchedRequest).toBe(preflightRequest);
+    },
+  );
+
+  it.each(['completeChat', 'completeStreamingChat'])(
+    'rejects a request over the native structural context limit before %s dispatch',
+    async (method) => {
+      let dispatched = false;
+      const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+      class Request {
+        addItem () { return this; }
+      }
+      class ChatSession {
+        async preflightRequest () {
+          return {
+            promptTokens: 110,
+            outputReserveTokens: 20,
+            requiredTokens: 130,
+            contextLimitTokens: 128,
+            fits: false,
+            deficitTokens: 2,
+          };
+        }
+        async processRequest () {
+          dispatched = true;
+          return { output: [] };
+        }
+        processStreamingRequest () {
+          dispatched = true;
+          return { response: Promise.resolve({ output: [] }), [Symbol.asyncIterator]: async function* () {} };
+        }
+        dispose () {}
+      }
+      const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+      const message = 'structural context limit by 2 tokens';
+      if (method === 'completeChat') {
+        await expect(client.completeChat([{ role: 'user', content: 'hi' }]))
+          .rejects.toThrow(message);
+      } else {
+        await expect((async () => {
+          for await (const _ of client.completeStreamingChat([{ role: 'user', content: 'hi' }])) {}
+        })()).rejects.toThrow(message);
+      }
+      expect(dispatched).toBe(false);
+    },
+  );
+
+  it('does not dispatch inference if cancellation arrives during preflight', async () => {
+    let preflightStartedResolve: (() => void) | null = null;
+    let releasePreflight: (() => void) | null = null;
+    let dispatched = false;
+    const preflightStarted = new Promise<void>((resolve) => { preflightStartedResolve = resolve; });
+    const preflightBlocked = new Promise<void>((resolve) => { releasePreflight = resolve; });
+    const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+    class Request {
+      addItem () { return this; }
+    }
+    class ChatSession {
+      async preflightRequest () {
+        preflightStartedResolve?.();
+        await preflightBlocked;
+        return {
+          promptTokens: 10,
+          outputReserveTokens: 20,
+          requiredTokens: 30,
+          contextLimitTokens: 40,
+          fits: true,
+          deficitTokens: 0,
+        };
+      }
+      async processRequest () {
+        dispatched = true;
+        return { output: [] };
+      }
+      dispose () {}
+    }
+    const controller = new AbortController();
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    const completion = client.completeChat(
+      [{ role: 'user', content: 'hi' }],
+      undefined,
+      { signal: controller.signal },
+    );
+    await preflightStarted;
+    controller.abort();
+    releasePreflight?.();
+    await expect(completion).rejects.toMatchObject({ name: 'AbortError' });
+    expect(dispatched).toBe(false);
+  });
+
   it('omits neutral penalties while preserving other zero-valued settings', async () => {
     // Frequency penalty is never sent. 2.0.1 misapplies an explicit 0, and 2.1.0 rejects
     // a nonzero value. Omission of a zero presence penalty is semantically identical.
