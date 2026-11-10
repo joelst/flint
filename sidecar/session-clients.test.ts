@@ -78,6 +78,35 @@ function fakeSdk({ disposeThrows = false, processRequestThrows = false, processR
 }
 
 describe('createSessionChatClient buffered chat', () => {
+  it('passes the owning request AbortSignal to one-shot SDK processing', async () => {
+    const controller = new AbortController();
+    let capturedOptions: unknown;
+    class Request { addItem() { return this; } }
+    const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+    class ChatSession {
+      async processRequest(_request: unknown, options?: unknown) {
+        capturedOptions = options;
+        return { output: [Item.text(JSON.stringify({ choices: [] }), 'openai-json')] };
+      }
+      dispose() {}
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    await client.completeChat([{ role: 'user', content: 'hi' }], undefined, { signal: controller.signal });
+    expect(capturedOptions).toEqual({ signal: controller.signal });
+  });
+
+  it('preserves the SDK AbortError identity after one-shot cancellation', async () => {
+    const abortError = Object.assign(new Error('native request cancelled'), { name: 'AbortError' });
+    class Request { addItem() { return this; } }
+    const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+    class ChatSession {
+      async processRequest() { throw abortError; }
+      dispose() {}
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    await expect(client.completeChat([{ role: 'user', content: 'hi' }])).rejects.toBe(abortError);
+  });
+
   it('sends multipart messages as native text and decoded image items', async () => {
     let capturedRequest: any;
     class Request {
@@ -538,6 +567,74 @@ describe('createSessionChatClient fallback', () => {
 });
 
 describe('createSessionChatClient streaming disposal', () => {
+  it('passes the owning request AbortSignal to SDK streaming processing', async () => {
+    const controller = new AbortController();
+    let capturedOptions: unknown;
+    class Request { addItem() { return this; } }
+    const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+    class ChatSession {
+      processStreamingRequest(_request: unknown, options?: unknown) {
+        capturedOptions = options;
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield Item.text(JSON.stringify({ choices: [{ delta: { content: 'hi' } }] }), 'openai-json');
+          },
+          response: Promise.resolve({ output: [] }),
+        };
+      }
+      dispose() {}
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    for await (const _chunk of client.completeStreamingChat(
+      [{ role: 'user', content: 'hi' }],
+      undefined,
+      { signal: controller.signal },
+    )) {}
+    expect(capturedOptions).toEqual({ signal: controller.signal });
+  });
+
+  it('holds session disposal until the terminal response settles after stream cancellation', async () => {
+    const controller = new AbortController();
+    const abortError = Object.assign(new Error('native stream cancelled'), { name: 'AbortError' });
+    let settleTerminal!: (response: unknown) => void;
+    let disposeCalls = 0;
+    class Request { addItem() { return this; } }
+    const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+    class ChatSession {
+      processStreamingRequest(_request: unknown, options?: { signal?: AbortSignal }) {
+        return {
+          async *[Symbol.asyncIterator]() {
+            await new Promise<void>((resolve) => {
+              options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+            });
+            throw abortError;
+          },
+          response: new Promise((resolve) => { settleTerminal = resolve; }),
+        };
+      }
+      dispose() { disposeCalls += 1; }
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    const iterator = client.completeStreamingChat(
+      [{ role: 'user', content: 'hi' }],
+      undefined,
+      { signal: controller.signal },
+    )[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    const outcome = pending.then(
+      () => ({ error: null }),
+      (error) => ({ error }),
+    );
+    await vi.waitFor(() => expect(settleTerminal).toBeTypeOf('function'));
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(disposeCalls).toBe(0);
+
+    settleTerminal({ finishReason: 'stop' });
+    await expect(outcome).resolves.toEqual({ error: abortError });
+    expect(disposeCalls).toBe(1);
+  });
+
   it('adapts native multimodal deltas and terminal metadata to OpenAI-shaped chunks', async () => {
     class Request {
       items: any[] = [];

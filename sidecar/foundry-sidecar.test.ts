@@ -3799,7 +3799,7 @@ describe('chatCompletion ChatSession path', () => {
   //                           already are. Gating on the signal file (rather than a fixed
   //                           delay) makes the ordering deterministic instead of depending on
   //                           IPC round-trip speed on a loaded CI runner.
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-only-text-parts' | 'legacy-buffered-fixture' | 'legacy-buffered-only-fixture' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-finish-error' | 'session-stream-empty' | 'session-stream-finish-error' | 'session-stream-fixture' | 'session-stream-fixture-dispose-error' | 'session-stream-provider-cancel' | 'session-buffered-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-only-text-parts' | 'legacy-buffered-fixture' | 'legacy-buffered-only-fixture' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-finish-error' | 'session-stream-empty' | 'session-stream-finish-error' | 'session-stream-fixture' | 'session-stream-fixture-dispose-error' | 'session-stream-provider-cancel' | 'session-buffered-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel' | 'session-buffered-cancel' | 'session-stream-cancel';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only' || sdkMode === 'legacy-only-text-parts' || sdkMode === 'legacy-buffered-fixture' || sdkMode === 'legacy-buffered-only-fixture' || sdkMode === 'legacy-stream-only-fixture' || sdkMode === 'session-error-with-legacy';
     const legacyStreamOnly = sdkMode === 'legacy-stream-only-fixture';
@@ -3810,6 +3810,7 @@ describe('chatCompletion ChatSession path', () => {
       'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
       "const streamSteps = () => JSON.parse(fs.readFileSync(process.env.FLINT_TEST_STREAM_FIXTURE, 'utf8'));",
       "const awaitSignal = async () => { while (!fs.existsSync(process.env.FLINT_TEST_CANCEL_SIGNAL)) await new Promise((resolve) => setTimeout(resolve, 5)); };",
+      "const awaitAbort = async (signal) => { if (signal?.aborted) return; await new Promise((resolve) => signal?.addEventListener('abort', resolve, { once: true })); };",
       'class FakeModel {',
       "  constructor() { this.id = 'fake-variant'; this.loaded = false; }",
       "  async load() { const failure = streamSteps()[0]?.loadError; if (failure) { note('model-load-failed'); throw new Error(failure); } this.loaded = true; }",
@@ -3837,8 +3838,9 @@ describe('chatCompletion ChatSession path', () => {
       '    this.model = model;',
       '  }',
       `  dispose() { note('session-chat-disposed'); if (['session-dispose-error', 'session-error-dispose', 'session-stream-fixture-dispose-error'].includes(${JSON.stringify(sdkMode)})) throw new Error('native ChatSession disposal failed'); }`,
-      '  async processRequest(req) {',
+      '  async processRequest(req, options) {',
       "    note('session-chat');",
+      `    if (${JSON.stringify(sdkMode)} === 'session-buffered-cancel') { await awaitAbort(options?.signal); note('native-cancel-requested'); await awaitSignal(); note('native-cancel-settled'); const error = new Error('native request cancelled'); error.name = 'AbortError'; throw error; }`,
       `    if (['session-error', 'session-error-with-legacy', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native processRequest failed');`,
       `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
       `    if (${JSON.stringify(sdkMode)} === 'session-finish-error' && req.items[0]?.type === 'message') return { output: [{ type: 'message', role: 'assistant', content: 'partial native answer' }], finishReason: 'error' };`,
@@ -3858,7 +3860,8 @@ describe('chatCompletion ChatSession path', () => {
       '      }],',
       '    };',
       '  }',
-      '  processStreamingRequest(req) {',
+      '  processStreamingRequest(req, options) {',
+      `    if (${JSON.stringify(sdkMode)} === 'session-stream-cancel') return { async *[Symbol.asyncIterator]() { note('session-chat'); yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'partial native answer' } }] }) }; await awaitAbort(options?.signal); note('native-cancel-requested'); await awaitSignal(); note('native-cancel-settled'); const error = new Error('native stream cancelled'); error.name = 'AbortError'; throw error; }, response: Promise.resolve({ output: [] }) };`,
       `    if (req.items[0]?.type === 'message') return { async *[Symbol.asyncIterator]() { note('session-chat'); yield { type: 'text', textType: 'default', text: 'native ' }; yield { type: 'text', textType: 'default', text: 'vision reply' }; }, response: Promise.resolve({ output: [], usage: { promptTokens: 9, completionTokens: 3, totalTokens: 12 }, finishReason: ${JSON.stringify(sdkMode === 'session-stream-finish-error' ? 'error' : 'stop')} }) };`,
       '    const requestJson = JSON.parse(req.items[0].text);',
       '    note(`request:${JSON.stringify(requestJson)}`);',
@@ -3910,6 +3913,13 @@ describe('chatCompletion ChatSession path', () => {
   const send = (msg: object) => proc.stdin.write(`${JSON.stringify(msg)}\n`);
   const reply = (id: number) => waitForLine(proc, (msg) => msg.id === id, 10000);
   const setStreamSteps = (steps: object[]) => writeFileSync(streamFixturePath, JSON.stringify(steps));
+  const waitForChatEvent = async (event: string) => {
+    const deadline = Date.now() + 5000;
+    while (!events().includes(event)) {
+      if (Date.now() > deadline) throw new Error(`Timed out waiting for ${event}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
 
   async function startSidecar(sdkMode: ChatFakeSdkMode) {
     homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-chatsession-'));
@@ -4723,6 +4733,88 @@ describe('chatCompletion ChatSession path', () => {
     expect(res.result.choices[0].message.tool_calls).toBeUndefined();
     expect(res.result.choices[0].finish_reason).toBeNull();
     expect(events()).toContain('cancel-drained');
+  }, 30000);
+
+  it('cancels native one-shot chat and holds admission until the native request settles', async () => {
+    await startSidecar('session-buffered-cancel');
+    const chatted = reply(60);
+    send({
+      id: 60,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'cancel this request' }],
+    });
+    await waitForChatEvent('session-chat');
+
+    const cancelled = reply(61);
+    send({ id: 61, cmd: 'cancelChatRequest', requestId: 60 });
+    expect((await cancelled).ok).toBe(true);
+    await waitForChatEvent('native-cancel-requested');
+
+    let exclusiveSettled = false;
+    const exclusive = reply(62).then((value) => {
+      exclusiveSettled = true;
+      return value;
+    });
+    send({ id: 62, cmd: 'setBenchmarkExclusive', exclusive: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(exclusiveSettled).toBe(false);
+    expect(events()).not.toContain('native-cancel-settled');
+
+    writeFileSync(cancelSignalPath, '');
+    await expect(chatted).resolves.toMatchObject({
+      certainty: 'cancelled',
+      error: expect.stringMatching(/native request has settled/),
+    });
+    expect(events()).toContain('native-cancel-settled');
+    expect(events()).toContain('session-chat-disposed');
+    expect(await exclusive).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+
+    const released = reply(63);
+    send({ id: 63, cmd: 'setBenchmarkExclusive', exclusive: false });
+    expect((await released).ok).toBe(true);
+  }, 30000);
+
+  it('cancels native streaming chat and retains its activity lease through native settlement', async () => {
+    await startSidecar('session-stream-cancel');
+    const streamed = waitForLine(proc, (msg) => msg.id === 64 && msg.stream === true, 10000);
+    const chatted = waitForLine(proc, (msg) => msg.id === 64 && !msg.stream, 10000);
+    send({
+      id: 64,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'cancel this stream' }],
+      stream: true,
+    });
+    await streamed;
+
+    const cancelled = reply(65);
+    send({ id: 65, cmd: 'cancelChatRequest', requestId: 64 });
+    expect((await cancelled).ok).toBe(true);
+    await waitForChatEvent('native-cancel-requested');
+
+    let exclusiveSettled = false;
+    const exclusive = reply(66).then((value) => {
+      exclusiveSettled = true;
+      return value;
+    });
+    send({ id: 66, cmd: 'setBenchmarkExclusive', exclusive: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(exclusiveSettled).toBe(false);
+    expect(events()).not.toContain('native-cancel-settled');
+
+    writeFileSync(cancelSignalPath, '');
+    const result = await chatted;
+    expect(result).toMatchObject({ ok: true });
+    expect(result.result.choices[0].message.content).toBe('partial native answer');
+    expect(result.result.choices[0].finish_reason).toBeNull();
+    expect(events()).toContain('native-cancel-settled');
+    expect(events()).toContain('session-chat-disposed');
+    expect(await exclusive).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+
+    const released = reply(67);
+    send({ id: 67, cmd: 'setBenchmarkExclusive', exclusive: false });
+    expect((await released).ok).toBe(true);
   }, 30000);
 
   it('rechecks cancellation after provider detection before publishing the terminal stream result', async () => {

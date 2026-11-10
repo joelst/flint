@@ -250,11 +250,12 @@ landed after 2.1.0:
 
 The 2.1.0 contracts, re-run on 2.4.0:
 
-- Wire `Request.cancel()` for active one-shot work and the streaming
-  `AbortSignal`/terminal `response` contract. Preserve completion-vs-cancel
-  races and queued-request semantics; retain residency protection until native
-  completion/confirmed cancellation or child exit, not until iterator break or
-  the UI Stop acknowledgement. Exercise gateway disconnect independently.
+- IPC ChatSession one-shot and streaming paths now forward the request-owned
+  `AbortSignal`; streaming retains its activity lease through the terminal
+  `response`. Automated tests cover that fence. Still qualify real-model
+  completion/cancel races, queued requests, legacy-client fallback, and gateway
+  disconnect independently. The UI Stop acknowledgement is not proof of native
+  completion.
 - Wire cooperative download `AbortSignal` cancellation and retain partial-file
   cleanup/reporting. A checkpoint delay is not proof cancellation failed; an
   acknowledgement alone is not proof the download stopped.
@@ -412,12 +413,14 @@ Rubber-duck: a Svelte tray created on first close is not renderer-independent. N
 ### Wave 3 — Cancellation and timeout certainty
 
 SDK 2.1.0 through 2.4.0 expose native request and streaming cancellation.
-2.2.1 also cancels non-streaming chat when the client disconnects. Flint's
-current transport still suppresses output and drains the native operation;
-adoption and confirmation are gated by the SDK shipping plan above. Stop must
-remain honest until native completion or cancellation is established.
+2.2.1 also cancels non-streaming chat when the client disconnects. IPC
+ChatSession calls now pass an AbortSignal and hold their activity lease through
+the terminal SDK response; real-model race qualification remains open. Legacy
+clients and gateway disconnects still suppress output and drain without
+establishing native cancellation. Stop must remain honest until native
+completion or cancellation is established.
 
-- Chat streaming: Stop settles the caller; native loop keeps consuming until stream end or child exit; UI already says the background may finish.
+- Chat streaming: Stop sends IPC cancellation; the SDK stream's terminal response is awaited before the sidecar releases its activity lease. The UI remains honest that completion can win the cancellation race.
 - Compare: no Stop control. The running state says the run cannot be cancelled — wait for slots.
 - Audio: transcription cannot be stopped once started; Voice says so beside Transcribe while it is in flight.
 - Gateway disconnect already destroys upstream. The embeddings **path** is present

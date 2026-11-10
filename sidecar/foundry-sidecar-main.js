@@ -720,6 +720,7 @@ let cachedSdkModule = null;
 let initConfig = null; // { appName, logLevel } — kept so startService can re-create manager with webServiceUrls
 let nativeServiceStartAttempted = false;
 const canceledRequests = new Set();
+const activeChatRequests = new Map();
 const acquireServiceTransition = createServiceTransitionLock();
 
 // Model pool: Map<alias, { catModel, variantId }>
@@ -4050,6 +4051,8 @@ rl.on('line', async (line) => {
       if (!chatBooking) {
         throw new Error(`Cannot use ${modelAlias} while it is being unloaded or deleted. Retry shortly.`);
       }
+      const chatAbortController = new AbortController();
+      activeChatRequests.set(id, chatAbortController);
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'chat', modelAlias, startedAt: chatAccessTs };
       try {
@@ -4070,6 +4073,13 @@ rl.on('line', async (line) => {
         const sdkMessages = toSdkMessages(payload.messages);
         if (!sdkMessages.length) {
           throw new Error('No valid messages supplied');
+        }
+        if (canceledRequests.has(id)) {
+          reply({
+            error: 'Chat request cancelled before native inference; model loading may have completed.',
+            certainty: 'cancelled',
+          });
+          return;
         }
 
         // Prefer direct SDK inference to avoid web-service schema/version mismatch issues.
@@ -4116,6 +4126,11 @@ rl.on('line', async (line) => {
           : normalizeTextPartsForLegacyClient(sdkMessages);
         if (transport === 'sdk') {
           const client = sessionChatClient || chatModel.createChatClient();
+          const requestOptions = {
+            toolChoice: payload.toolChoice,
+            responseFormat: payload.responseFormat,
+            ...(client === sessionChatClient ? { signal: chatAbortController.signal } : {}),
+          };
           // SDK reads generation params from client.settings, not completeChat args.
           // Omit unset fields so the model's own defaults are not overwritten.
           if (client?.settings && Number.isFinite(payload.temperature)) {
@@ -4148,7 +4163,7 @@ rl.on('line', async (line) => {
               for await (const chunk of client.completeStreamingChat(
                 sdkInferenceMessages,
                 payload.tools,
-                { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+                requestOptions,
               )) {
                 const usage = chunk?.usage;
                 chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
@@ -4195,7 +4210,11 @@ rl.on('line', async (line) => {
               streamFailure = error;
             }
             const latchedFailure = firstToolCallFailure(toolCallsByChoice);
-            const combinedFailure = mergeStreamFailure(latchedFailure, streamFailure);
+            const cancelledNatively = canceledRequests.has(id) && streamFailure?.name === 'AbortError';
+            const combinedFailure = mergeStreamFailure(
+              latchedFailure,
+              cancelledNatively ? null : streamFailure,
+            );
             if (combinedFailure) throw combinedFailure;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
             const wasCanceled = canceledRequests.has(id);
@@ -4239,14 +4258,20 @@ rl.on('line', async (line) => {
               }
             });
           } else if (typeof client?.completeChat === 'function') {
-            const result = await client.completeChat(
-              sdkInferenceMessages,
-              payload.tools,
-              { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
-            );
+            let result;
+            try {
+              result = await client.completeChat(sdkInferenceMessages, payload.tools, requestOptions);
+            } catch (error) {
+              if (!canceledRequests.has(id) || error?.name !== 'AbortError') throw error;
+              reply({
+                error: 'The chat response was discarded after cancellation; the native request has settled.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
             if (canceledRequests.has(id)) {
               reply({
-                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                error: 'The chat response was discarded after cancellation; the native request has settled.',
                 certainty: 'cancelled',
               });
               return;
@@ -4302,7 +4327,7 @@ rl.on('line', async (line) => {
               for await (const chunk of client.completeStreamingChat(
                 sdkInferenceMessages,
                 payload.tools,
-                { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+                requestOptions,
               )) {
                 const usage = chunk?.usage;
                 chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
@@ -4337,7 +4362,11 @@ rl.on('line', async (line) => {
               streamFailure = error;
             }
             const latchedFailure = firstToolCallFailure(toolCallsByChoice);
-            const combinedFailure = mergeStreamFailure(latchedFailure, streamFailure);
+            const cancelledNatively = canceledRequests.has(id) && streamFailure?.name === 'AbortError';
+            const combinedFailure = mergeStreamFailure(
+              latchedFailure,
+              cancelledNatively ? null : streamFailure,
+            );
             if (combinedFailure) throw combinedFailure;
             if (canceledRequests.has(id)) {
               reply({
@@ -4488,6 +4517,7 @@ rl.on('line', async (line) => {
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
         noteActivity(modelAlias, 'end', chatBooking);
+        activeChatRequests.delete(id);
         canceledRequests.delete(id);
         appendAccessLog({
           ts: chatAccessTs,
@@ -4511,7 +4541,11 @@ rl.on('line', async (line) => {
     } else if (cmd === 'cancelChatRequest') {
       const requestId = Number(payload.requestId);
       if (Number.isFinite(requestId)) {
-        canceledRequests.add(requestId);
+        const controller = activeChatRequests.get(requestId);
+        if (controller) {
+          canceledRequests.add(requestId);
+          controller.abort();
+        }
         reply({ ok: true });
       } else {
         throw new Error('cancelChatRequest requires numeric requestId');

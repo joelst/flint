@@ -26,8 +26,10 @@ Flint already has compatibility adapters for the text paths:
 
 The adapters preserve Flint's existing OpenAI-shaped request and response
 contracts. They create a fresh session for each operation, so the migration does
-not implicitly change Flint's conversation-history ownership or streaming
-cancellation behavior.
+not change Flint's conversation-history ownership. IPC ChatSession one-shot and
+streaming calls now receive an operation-owned AbortSignal; the native operation
+must settle before its activity lease is released. Legacy-client and HTTP
+gateway disconnect cancellation remain separate qualification gates.
 
 Completed assistant tool calls are structurally validated on every chat
 transport before Flint reports success or emits a synthetic buffered delta.
@@ -88,14 +90,17 @@ behavior remain release gates until the complete qualification matrix passes.
 
 ## SDK 2.1.0 session features
 
-The installed package declares `Request.cancel()` for active one-shot
-inference and `processStreamingRequest(request, { signal })` for queued/active
-stream cancellation. The stream's terminal `response` settles after native
-completion and queued callbacks. Cancellation can lose a race to completion;
-calling `cancel()` on an idle/queued one-shot request has no effect.
+The installed package accepts an `AbortSignal` for both
+`processRequest(request, { signal })` and
+`processStreamingRequest(request, { signal })`; cancellation rejects with
+`AbortError`, but a completed native response can win the race. A stream's
+terminal `response` settles after native completion and queued callbacks.
 `IModel.download(..., signal)` observes cooperative cancellation at download
-checkpoints. Flint has not yet wired these contracts end to end and must retain
-its current drain/uncertainty semantics until it does.
+checkpoints. The IPC ChatSession adapter forwards an operation-owned signal for
+one-shot and streaming chat, and waits for the terminal stream response before
+disposing the session or releasing its activity lease. Download cancellation
+and gateway-disconnect cancellation remain unqualified; an early Stop
+acknowledgement alone is not treated as native completion.
 
 `ChatSession` also exposes exact structural `preflightRequest`, function-tool
 definitions, custom raw-text tool definitions, and explicit tool removal.

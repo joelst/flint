@@ -309,7 +309,10 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
           ? buildNativeRequest(messages, tools, options)
           : new Request().addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
         session = new ChatSession(chatModel);
-        const response = await session.processRequest(request);
+        const response = await session.processRequest(
+          request,
+          options.signal ? { signal: options.signal } : undefined,
+        );
         if (multipart) {
           result = nativeResult(response);
         } else {
@@ -320,10 +323,12 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
           result = parseOpenAiJson(text, `Chat completion for model '${chatModel.id}'`);
         }
       } catch (err) {
-        failure = new Error(
-          `Chat completion failed for model '${chatModel.id}': ${err?.message || err}`,
-          { cause: err },
-        );
+        failure = err?.name === 'AbortError'
+          ? err
+          : new Error(
+            `Chat completion failed for model '${chatModel.id}': ${err?.message || err}`,
+            { cause: err },
+          );
       }
       failure = disposeSession(session, failure);
       if (failure) throw failure;
@@ -345,17 +350,21 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
           let session;
           let failure = null;
           let receivedOutput = false;
+          let iterationCompleted = false;
+          let responsePromise = null;
           try {
             const request = multipart
               ? buildNativeRequest(messages, tools, options)
               : new Request().addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
             session = new ChatSession(chatModel);
-            const stream = session.processStreamingRequest(request);
-            const responsePromise = multipart ? Promise.resolve(stream.response) : null;
-            // A consumer may stop iteration at a yield. Attach a rejection handler immediately
-            // so the SDK's terminal response cannot become an unhandled rejection while the
-            // generator unwinds and disposes the session.
-            responsePromise?.catch(() => {});
+            const stream = session.processStreamingRequest(
+              request,
+              options.signal ? { signal: options.signal } : undefined,
+            );
+            responsePromise = Promise.resolve(stream.response);
+            // Handle rejection immediately; finally awaits this terminal response even after
+            // cancellation or an early consumer return before disposing the session.
+            responsePromise.catch(() => {});
             for await (const item of stream) {
               if (item?.type !== 'text' || item.textType === 'reasoning' || !item.text) continue;
               if (multipart) {
@@ -372,6 +381,9 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
                 yield parseOpenAiJson(item.text, `Streaming chat completion for model '${chatModel.id}'`);
               }
             }
+            iterationCompleted = true;
+            const response = await responsePromise;
+            assertNativeResponseSucceeded(response);
             if (!receivedOutput) {
               throw new Error(
                 multipart
@@ -380,8 +392,6 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
               );
             }
             if (multipart) {
-              const response = await responsePromise;
-              assertNativeResponseSucceeded(response);
               const usage = nativeUsage(response?.usage);
               yield {
                 choices: [{
@@ -407,6 +417,20 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
             // try/catch but still runs `finally`, so cleanup - and surfacing a cleanup
             // failure - only happens reliably from inside it, not just on normal
             // completion or a thrown error.
+            if (responsePromise) {
+              try {
+                await responsePromise;
+              } catch (responseError) {
+                if (!failure && iterationCompleted) {
+                  failure = responseError?.name === 'AbortError'
+                    ? responseError
+                    : new Error(
+                        `Streaming chat completion failed for model '${chatModel.id}': ${responseError?.message || responseError}`,
+                        { cause: responseError },
+                      );
+                }
+              }
+            }
             failure = disposeSession(session, failure, {
               onDiagnostic,
               abortDiagnosticCode: 'chat-session-dispose-after-abort',
