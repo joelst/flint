@@ -114,11 +114,12 @@ Chat, streaming, the enum tool call, the tool-result turn, the unknown-model err
 
 ```powershell
 node .\scripts\openai-live.mjs --base http://127.0.0.1:5272/v1 --model <id>
+node .\scripts\openai-live.mjs --base http://127.0.0.1:5272/v1 --model <tool-capable-id> --require-tools
 ```
 
 `--embed-model` and `--speech-model` add `POST /v1/embeddings` and `POST /v1/audio/transcriptions`. `POST /v1/responses` is recorded and does not decide the required result. The tool is `pick_color` with enum `red` or `blue` and `tool_choice` `auto`. When the streamed call carries an id, the next request includes the assistant tool call and the tool result. If the listener is unavailable or its required HTTP checks fail, the runner also attempts a `ChatSession` `openai-json` request and records the HTTP and in-process outcomes separately.
 
-`inspect.json` records the model id, execution provider when the object exposes one, token usage, whether the enum arguments parsed, and whether the second request finished. Exit code 2 means the SDK was not 2.1.0, the manager failed, registration did not return a model, or a required live check failed. Required checks are `GET /v1/models`, non-streaming chat, streaming chat, the tool request itself, the OpenAI error envelope, and stream abort. A model that returns HTTP 200 with no well-formed `pick_color` call still exits 0 so the report can be read; that result remains a no-go until the enum call is well-formed. `--keep` leaves the alias registered. Check 7 stays a person opening installed Flint after the process exits.
+`inspect.json` records the model id, execution provider when the object exposes one, token usage, whether the enum arguments parsed, and whether the second request finished. Exit code 2 means the SDK was not 2.1.0, the manager failed, registration did not return a model, or a required live check failed. The runner requires `GET /v1/models`, presence of the requested model, non-streaming chat with complete usage counts, streaming chat, the OpenAI error envelope, and stream abort. Use `--require-tools` with a tool-capable control to make the enum call and its tool-result follow-up required; a missing or malformed call, absent tool-result turn, or non-tool-free final answer then fails the gate. Without that flag, tool checks are diagnostic only and do not qualify SDK tool support. `--keep` leaves the alias registered. Check 7 stays a person opening installed Flint after the process exits.
 
 ## Run
 

@@ -68,6 +68,19 @@ export function judgeToolCall(call) {
   };
 }
 
+export function judgeRequiredToolCall(calls) {
+  const call = Array.isArray(calls) ? calls[0] ?? null : null;
+  const judgment = judgeToolCall(call);
+  return {
+    call,
+    judgment,
+    ok: Array.isArray(calls)
+      && calls.length === 1
+      && judgment.wellFormed
+      && Boolean(call?.id),
+  };
+}
+
 export function secondTurnMessages(call, judgment, userText = TOOL_PROMPT) {
   if (!call?.id) return null;
   const content = judgment.wellFormed
@@ -88,6 +101,22 @@ export function secondTurnMessages(call, judgment, userText = TOOL_PROMPT) {
   ];
 }
 
+export function hasToolResultTurn(messages, callId) {
+  if (!Array.isArray(messages)) return false;
+  const assistantIndex = messages.findIndex((message) =>
+    message?.role === 'assistant'
+    && Array.isArray(message.tool_calls)
+    && message.tool_calls.some((call) => call?.id === callId),
+  );
+  return assistantIndex >= 0
+    && messages.slice(assistantIndex + 1).some((message) =>
+      message?.role === 'tool'
+      && message.tool_call_id === callId
+      && typeof message.content === 'string'
+      && message.content.trim().length > 0,
+    );
+}
+
 function mapUsage(usage) {
   if (!usage || typeof usage !== 'object') return null;
   return {
@@ -95,6 +124,13 @@ function mapUsage(usage) {
     completionTokens: usage.completion_tokens ?? usage.completionTokens ?? null,
     totalTokens: usage.total_tokens ?? usage.totalTokens ?? null,
   };
+}
+
+export function hasRequiredUsage(usage) {
+  return ['promptTokens', 'completionTokens', 'totalTokens'].every((field) =>
+    Number.isInteger(usage?.[field])
+    && usage[field] >= 0,
+  );
 }
 
 function textOf(value) {
@@ -182,6 +218,7 @@ function assistantText(json) {
     content: textOf(message?.content),
     reasoning: textOf(message?.reasoning) || textOf(message?.reasoning_content),
     finishReason: json?.choices?.[0]?.finish_reason ?? null,
+    toolCallCount: Array.isArray(message?.tool_calls) ? message.tool_calls.length : 0,
     model: typeof json?.model === 'string' ? json.model : null,
     usage: mapUsage(json?.usage),
   };
@@ -362,7 +399,7 @@ export async function runOpenAiLive(options) {
   if (model) {
     checks.push(check(
       'model-listed',
-      false,
+      true,
       listedModel(models.json, model),
       listedModel(models.json, model)
         ? `${model} is in GET /v1/models.`
@@ -414,9 +451,11 @@ export async function runOpenAiLive(options) {
   ));
   checks.push(check(
     'usage',
-    false,
-    Boolean(chatJudgment.usage && (chatJudgment.usage.promptTokens != null || chatJudgment.usage.completionTokens != null)),
-    chatJudgment.usage ? 'Completion included usage.' : 'Completion omitted usage.',
+    true,
+    hasRequiredUsage(chatJudgment.usage),
+    hasRequiredUsage(chatJudgment.usage)
+      ? 'Completion included finite, non-negative prompt, completion, and total token counts.'
+      : 'Completion omitted required finite, non-negative prompt, completion, or total token counts.',
     { usage: chatJudgment.usage },
   ));
 
@@ -445,40 +484,54 @@ export async function runOpenAiLive(options) {
     ),
   }, timeoutMs);
   const parsedTools = parseSse(toolStream.text);
-  const call = parsedTools.toolCalls[0] ?? null;
-  const judgment = judgeToolCall(call);
+  const { call, judgment, ok: toolCallOk } = judgeRequiredToolCall(parsedTools.toolCalls);
   const toolHttpOk = toolStream.status === 200 && parsedTools.done;
   checks.push(check(
     'tools',
-    true,
-    toolHttpOk && (!requireTools || judgment.wellFormed),
+    requireTools,
+    toolHttpOk && (!requireTools || toolCallOk),
     toolHttpOk
-      ? (judgment.wellFormed
+      ? (toolCallOk
         ? `Streamed tool call ${judgment.name} color=${judgment.color}.`
-        : 'Stream finished with no well-formed pick_color call.')
+        : 'Stream finished with no well-formed pick_color call with an id.')
       : `Tool stream HTTP ${toolStream.status}; done=${parsedTools.done}.`,
     { judgment, finishReason: parsedTools.finishReason },
   ));
 
-  const followUp = secondTurnMessages(call, judgment);
+  const followUp = toolHttpOk && (!requireTools || toolCallOk)
+    ? secondTurnMessages(call, judgment)
+    : null;
   if (followUp) {
-    const second = await readResponse(`${base}/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: chatBody(model, followUp),
-    }, timeoutMs);
+    const toolResultPresent = hasToolResultTurn(followUp, call.id);
+    const second = toolResultPresent
+      ? await readResponse(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: chatBody(model, followUp),
+      }, timeoutMs)
+      : { status: 0, json: null };
     const secondJudgment = judgeChat(second.status, second.json);
+    const finalAnswerOk = second.status === 200
+      && Boolean(secondJudgment.content.trim())
+      && secondJudgment.toolCallCount === 0;
     checks.push(check(
       'tool-boundary',
-      requireTools || toolHttpOk,
-      second.status === 200 && (secondJudgment.ok || secondJudgment.finishReason),
-      second.status === 200
-        ? `Second turn finished (${secondJudgment.finishReason ?? 'no finish_reason'}): ${secondJudgment.text}`
-        : `Second turn HTTP ${second.status}.`,
+      requireTools,
+      toolResultPresent && finalAnswerOk,
+      `tool-result=${toolResultPresent}; HTTP ${second.status}; final-answer=${finalAnswerOk}; tool-calls=${secondJudgment.toolCallCount}.`,
       { finishReason: secondJudgment.finishReason, usage: secondJudgment.usage },
     ));
   } else {
-    checks.push(check('tool-boundary', false, false, call ? 'Tool call had no id.' : 'No tool call to continue.'));
+    checks.push(check(
+      'tool-boundary',
+      requireTools,
+      false,
+      !call
+        ? 'No tool call to continue; no tool-result turn was sent.'
+        : !call.id
+          ? 'Tool call had no id; no tool-result turn was sent.'
+          : 'Tool stream or call was invalid; no tool-result turn was sent.',
+    ));
   }
 
   const disconnected = await disconnectStream(base, model, timeoutMs);
@@ -571,6 +624,13 @@ function runSelfTest() {
   const judgment = judgeToolCall(merged[0]);
   assert.equal(judgment.wellFormed, true);
   assert.equal(judgment.color, 'blue');
+  assert.equal(judgeRequiredToolCall(merged).ok, true);
+  assert.equal(judgeRequiredToolCall([]).ok, false);
+  assert.equal(judgeRequiredToolCall([{ id: '', name: 'pick_color', arguments: '{"color":"blue"}' }]).ok, false);
+  assert.equal(judgeRequiredToolCall([...merged, ...merged]).ok, false);
+  assert.equal(hasRequiredUsage({ promptTokens: 3, completionTokens: 1, totalTokens: 4 }), true);
+  assert.equal(hasRequiredUsage({ promptTokens: 3, completionTokens: 1 }), false);
+  assert.equal(hasRequiredUsage({ promptTokens: 3, completionTokens: Number.NaN, totalTokens: 4 }), false);
   const sse = [
     'data: {"choices":[{"delta":{"content":"rea"}}]}',
     'data: {"choices":[{"delta":{"content":"dy"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}',
@@ -594,6 +654,23 @@ function runSelfTest() {
   const messages = secondTurnMessages(merged[0], judgment);
   assert.equal(messages[2].role, 'tool');
   assert.equal(messages[2].content, '{"color":"blue"}');
+  assert.equal(hasToolResultTurn(messages, 'call_1'), true);
+  assert.equal(hasToolResultTurn(messages, 'missing-call'), false);
+  assert.equal(hasToolResultTurn([{ role: 'tool', tool_call_id: 'call_1', content: 'ok' }], 'call_1'), false);
+  assert.equal(hasToolResultTurn([
+    messages[2],
+    messages[1],
+  ], 'call_1'), false);
+  assert.equal(hasToolResultTurn([
+    messages[1],
+    { role: 'tool', tool_call_id: 'call_1', content: '' },
+  ], 'call_1'), false);
+  assert.equal(
+    judgeChat(200, {
+      choices: [{ message: { content: 'done', tool_calls: [{ id: 'another-call' }] } }],
+    }).toolCallCount,
+    1,
+  );
   console.log('openai-live self-test ok');
 }
 
