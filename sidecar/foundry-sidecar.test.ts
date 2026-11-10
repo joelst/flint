@@ -1019,7 +1019,7 @@ describe('foundry-sidecar protocol basics', () => {
         maxTokens: 123,
         topP: 0.6,
         topK: 30,
-        frequencyPenalty: 0.4,
+        frequencyPenalty: 0,
         presencePenalty: -0.4,
         randomSeed: 12,
       })}\n`);
@@ -1030,7 +1030,6 @@ describe('foundry-sidecar protocol basics', () => {
         maxTokens: 123,
         topP: 0.6,
         topK: 30,
-        frequencyPenalty: 0.4,
         presencePenalty: -0.4,
         randomSeed: 12,
       });
@@ -1061,7 +1060,7 @@ describe('foundry-sidecar protocol basics', () => {
         maxTokens: 55,
         topP: 0.5,
         topK: 10,
-        frequencyPenalty: -0.5,
+        frequencyPenalty: 0,
         presencePenalty: 0.5,
         randomSeed: 3,
       })}\n`);
@@ -1074,7 +1073,6 @@ describe('foundry-sidecar protocol basics', () => {
         maxTokens: 55,
         topP: 0.5,
         topK: 10,
-        frequencyPenalty: -0.5,
         presencePenalty: 0.5,
         randomSeed: 3,
       });
@@ -2655,6 +2653,19 @@ describe('foundry-sidecar command schema validation', () => {
     }
   });
 
+  it('rejects unsupported nonzero frequency penalties before initialization', async () => {
+    proc.stdin.write(`${JSON.stringify({
+      id: 4650,
+      cmd: 'chatCompletion',
+      model: 'm',
+      messages: [],
+      frequencyPenalty: 0.4,
+    })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === 4650);
+    expect(String(res.error)).toContain('does not support a nonzero frequency penalty');
+    expect(String(res.error)).toContain('Set it to 0');
+  });
+
   it('rejects chatCompletion generation parameters outside their documented ranges', async () => {
     const cases: [Record<string, unknown>, RegExp][] = [
       [{ temperature: -0.1 }, /temperature.*between 0 and 2/],
@@ -4071,7 +4082,7 @@ describe('chatCompletion ChatSession path', () => {
       cmd: 'chatCompletion',
       model: 'fake-model',
       messages: [{ role: 'user', content: 'use the tool' }],
-      frequencyPenalty: 0.25,
+      frequencyPenalty: 0,
       presencePenalty: -0.5,
       topP: 0.8,
       topK: 12,

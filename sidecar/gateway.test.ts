@@ -162,14 +162,14 @@ describe('gateway pass-through', () => {
     expect(res.body).toBe('pong');
   });
 
-  it('omits frequency penalty and a neutral presence penalty before forwarding to Foundry', async () => {
+  it('omits neutral penalties before forwarding to Foundry', async () => {
     const model = 'already-loaded';
     upstream.state.loaded.add(model);
     gateway = await startGateway();
     const body = JSON.stringify({
       model,
       messages: [{ role: 'user', content: 'hello' }],
-      frequency_penalty: 0.4,
+      frequency_penalty: 0,
       presence_penalty: 0,
       temperature: 0,
     });
@@ -188,6 +188,42 @@ describe('gateway pass-through', () => {
     expect(forwarded.temperature).toBe(0);
     expect(Number(upstream.state.hits[0].headers['content-length']))
       .toBe(Buffer.byteLength(upstream.state.hits[0].body));
+  });
+
+  it('continues omitting nonnumeric frequency penalty values', async () => {
+    upstream.state.loaded.add('already-loaded');
+    gateway = await startGateway();
+    const body = JSON.stringify({
+      model: 'already-loaded',
+      messages: [{ role: 'user', content: 'hello' }],
+      frequency_penalty: '0.5',
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(upstream.state.hits[0].body).frequency_penalty).toBeUndefined();
+  });
+
+  it('rejects nonzero frequency penalty without loading or forwarding the request', async () => {
+    let called = false;
+    gateway = await startGateway({ load: async () => { called = true; } });
+    const body = JSON.stringify({
+      model: 'qwen3-0.6b',
+      messages: [{ role: 'user', content: 'hello' }],
+      frequency_penalty: 0.4,
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error.message).toContain('does not support a nonzero frequency penalty');
+    expect(called).toBe(false);
+    expect(upstream.state.hits).toEqual([]);
   });
 
   it('rewrites the Host header so upstream never sees the client value', async () => {

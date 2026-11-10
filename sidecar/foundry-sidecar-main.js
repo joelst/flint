@@ -23,6 +23,7 @@ import { annotateVariantUpdates } from './model-updates.js';
 import { loadModelWithDiagnostic } from './model-load-diagnostic.js';
 import { mergeAcceleratorDevices, vendorFromName } from './accelerator-merge.js';
 import { normalizeTextPartsForLegacyClient, selectChatTransport } from './chat-transport.js';
+import { unsupportedFrequencyPenaltyMessage } from './chat-parameter-policy.js';
 import {
   createSessionChatClient,
   createSessionEmbeddingClient,
@@ -532,6 +533,8 @@ function validateCommand(cmd, payload) {
     if (typeof payload.frequencyPenalty === 'number' && (!Number.isFinite(payload.frequencyPenalty) || payload.frequencyPenalty < -2 || payload.frequencyPenalty > 2)) {
       return `Command "chatCompletion" field "frequencyPenalty" must be between -2 and 2`;
     }
+    const frequencyPenaltyError = unsupportedFrequencyPenaltyMessage(payload.frequencyPenalty);
+    if (frequencyPenaltyError) return frequencyPenaltyError;
     if (typeof payload.presencePenalty === 'number' && (!Number.isFinite(payload.presencePenalty) || payload.presencePenalty < -2 || payload.presencePenalty > 2)) {
       return `Command "chatCompletion" field "presencePenalty" must be between -2 and 2`;
     }

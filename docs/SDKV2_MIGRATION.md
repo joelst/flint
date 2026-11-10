@@ -112,11 +112,12 @@ Those declarations do not make raw tools part of Flint's existing
 function-only IPC contracts or authorize a tool executor. Adoption and explicit
 unsupported outcomes are owned by the shipping plan.
 
-The imported adapters omit every frequency penalty, while presence penalty
-retains neutral-value normalization. This avoids the previously observed
-converter failure but does not preserve non-neutral frequency-penalty
-semantics. Resolve the UI/API contract and verify sampling/usage/finish reasons
-against real 2.4.0 sessions before shipping.
+The imported adapters omit frequency penalties because nonzero values are
+unsupported by the runtime. Flint rejects a nonzero value in the Playground,
+IPC, and gateway before dispatch; neutral zero is omitted to avoid the
+previously observed converter failure. This does not claim non-neutral
+frequency-penalty semantics. Verify the remaining sampling/usage/finish
+reasons against real 2.4.0 sessions before shipping.
 
 ## Migration boundary
 

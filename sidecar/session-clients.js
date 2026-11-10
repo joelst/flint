@@ -7,6 +7,7 @@
 // Node or the native runtime, matching its siblings.
 
 import { MAX_REQUEST_IMAGES, parseImageDataUrl } from './image-dimensions.js';
+import { unsupportedFrequencyPenaltyMessage } from './chat-parameter-policy.js';
 
 // Model output is untrusted for logging purposes: it carries generated text, tool-call
 // arguments and echoed prompt content. V8's JSON.parse errors quote an excerpt of the
@@ -194,6 +195,10 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
   const supportsMultipart = typeof Item.message === 'function'
     && typeof Item.imageFromData === 'function';
   const settings = {};
+  const assertFrequencyPenaltySupported = () => {
+    const error = unsupportedFrequencyPenaltyMessage(settings.frequencyPenalty);
+    if (error) throw new Error(error);
+  };
   const serializeSettings = () => {
     const out = {};
     const presencePenalty = normalizeChatPenalty(settings.presencePenalty);
@@ -292,6 +297,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
     settings,
     supportsMultipart,
     async completeChat (messages, tools, options = {}) {
+      assertFrequencyPenaltySupported();
       const multipart = hasMultipartMessages(messages);
       const requestJson = {
         model: chatModel.id,
@@ -335,6 +341,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
       return result;
     },
     completeStreamingChat (messages, tools, options = {}) {
+      assertFrequencyPenaltySupported();
       const multipart = hasMultipartMessages(messages);
       const requestJson = {
         model: chatModel.id,

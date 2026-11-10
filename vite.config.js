@@ -134,6 +134,7 @@ export default defineConfig(() => ({
         'src/lib/token-estimate.ts',
         'sidecar/protocol-stdout.js',
         'sidecar/sdk-import-diagnosis.js',
+        'sidecar/chat-parameter-policy.js',
         'sidecar/chat-transport.js',
         'sidecar/session-clients.js',
         'sidecar/image-dimensions.js',

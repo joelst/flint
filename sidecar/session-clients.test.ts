@@ -447,7 +447,7 @@ describe('createSessionChatClient buffered chat', () => {
     expect(result.choices[0].message.content).toBe('hi');
   });
 
-  it('serializes every optional sampling setting onto the wire request', async () => {
+  it('serializes every supported optional sampling setting onto the wire request', async () => {
     let capturedItem: { text: string } | undefined;
     class Request {
       addItem (item: { text: string }) { capturedItem = item; return this; }
@@ -461,7 +461,7 @@ describe('createSessionChatClient buffered chat', () => {
     }
     const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
     Object.assign(client.settings, {
-      frequencyPenalty: 0.1,
+      frequencyPenalty: 0,
       maxTokens: 128,
       presencePenalty: 0.2,
       temperature: 0.7,
@@ -478,6 +478,36 @@ describe('createSessionChatClient buffered chat', () => {
     expect(wire.top_p).toBe(0.9);
     expect(wire.metadata).toEqual({ top_k: '40', random_seed: '7' });
   });
+
+  it.each(['completeChat', 'completeStreamingChat'])(
+    'rejects nonzero frequency penalty before %s dispatch',
+    async (method) => {
+      let dispatched = false;
+      class Request {}
+      const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+      class ChatSession {
+        async processRequest () {
+          dispatched = true;
+          return { output: [] };
+        }
+        processStreamingRequest () {
+          dispatched = true;
+          return { response: Promise.resolve({ output: [] }), [Symbol.asyncIterator]: async function* () {} };
+        }
+        dispose () {}
+      }
+      const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+      client.settings.frequencyPenalty = 0.5;
+      if (method === 'completeChat') {
+        await expect(client.completeChat([{ role: 'user', content: 'hi' }]))
+          .rejects.toThrow('does not support a nonzero frequency penalty');
+      } else {
+        expect(() => client.completeStreamingChat([{ role: 'user', content: 'hi' }]))
+          .toThrow('does not support a nonzero frequency penalty');
+      }
+      expect(dispatched).toBe(false);
+    },
+  );
 
   it('omits neutral penalties while preserving other zero-valued settings', async () => {
     // Frequency penalty is never sent. 2.0.1 misapplies an explicit 0, and 2.1.0 rejects

@@ -101,12 +101,12 @@ checkKoffiAt(
   path.join(root, 'runtime', 'koffi-stage', '@koromix'),
 );
 
-const webToolSources = ['web-tool.js', 'web-address-policy.js'];
-for (const file of webToolSources) {
+const requiredSidecarSources = ['web-tool.js', 'web-address-policy.js', 'chat-parameter-policy.js'];
+for (const file of requiredSidecarSources) {
   if (!fs.existsSync(path.join(root, 'sidecar', file))) {
     bad(`missing sidecar/${file}`);
   } else {
-    ok(`isolated web helper source: sidecar/${file}`);
+    ok(`sidecar runtime source: sidecar/${file}`);
   }
 }
 
@@ -164,7 +164,7 @@ const stagedSdk = path.join(releaseDir, 'foundry-local-sdk');
 if (fs.existsSync(releaseDir)) {
   console.log(`Checking release resource staging (${path.relative(root, releaseDir)})...`);
   checkKoffiAt('staged resources', path.join(releaseDir, 'koffi'), path.join(releaseDir, '@koromix'));
-  for (const file of webToolSources) {
+  for (const file of requiredSidecarSources) {
     if (!fs.existsSync(path.join(releaseDir, 'sidecar', file))) {
       bad(`staged resources missing sidecar/${file}`);
     } else {
@@ -197,7 +197,7 @@ if (fs.existsSync(releaseDir)) {
   const nsiPath = path.join(releaseDir, 'nsis', 'x64', 'installer.nsi');
   if (fs.existsSync(nsiPath)) {
     const nsi = fs.readFileSync(nsiPath, 'utf8');
-    for (const file of webToolSources) {
+    for (const file of requiredSidecarSources) {
       if (nsi.includes(file)) {
         ok(`NSIS script includes ${file}`);
       } else {

@@ -8,6 +8,7 @@
   import Icon from "$lib/Icon.svelte";
   import TranscriptViewToggle from "$lib/TranscriptViewToggle.svelte";
   import TranscriptSegmentTime from "$lib/TranscriptSegmentTime.svelte";
+  import { unsupportedFrequencyPenaltyMessage } from "../../sidecar/chat-parameter-policy.js";
   import type { Conversation } from "$lib/ConversationSidebar.svelte";
   import {
     initializeSDK,
@@ -7304,6 +7305,11 @@ updateStateFromSdk();
       statusMessage = "Web tools require Flint's supervised runtime transport.";
       return;
     }
+    const frequencyPenaltyError = unsupportedFrequencyPenaltyMessage(frequencyPenalty);
+    if (frequencyPenaltyError) {
+      statusMessage = frequencyPenaltyError;
+      return;
+    }
 
     const text = chatInput.trim();
     const allowWebTools = webToolsEnabled;
@@ -7318,10 +7324,6 @@ updateStateFromSdk();
       presencePenalty,
       randomSeed: randomSeed ?? undefined,
     };
-    if (frequencyPenalty !== 0) {
-      statusMessage = "Foundry Local does not apply frequency penalty, so this send omitted it.";
-    }
-
     const nextMessages = [...chatMessages];
     const userCreatedAt = Date.now();
 
@@ -11056,7 +11058,7 @@ Output only the summary text, no preamble.`;
                       disabled={isStreaming}
                     />
 
-                    <label for="genparams-freqpenalty" title="Foundry Local does not apply frequency penalty. A nonzero value is omitted so the reply can run.">Frequency penalty</label>
+                    <label for="genparams-freqpenalty" title="Foundry Local does not support nonzero frequency penalties; set this to 0 before sending.">Frequency penalty</label>
                     <input
                       type="range"
                       id="genparams-freqpenalty"

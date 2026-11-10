@@ -108,6 +108,7 @@ not currently exposed.
 - Persona is beside the message controls. The gear beside Send opens and closes the
   **Generation settings** drawer. The conversation list starts collapsed. The panel button
   opens it (tooltip **Expand conversations**) and closes it (tooltip **Collapse conversations**).
+  Foundry Local does not support nonzero Frequency penalty; set it to 0 before sending.
   **Export conversations** is the download icon and stays available while the list is collapsed.
   **New conversation** is the plus icon.
   Qwen3 and QwQ start a reply inside reasoning. Playground keeps that text under **Thinking**

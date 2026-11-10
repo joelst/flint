@@ -27,6 +27,7 @@ import http from 'node:http';
 import { Transform, pipeline } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { normalizeChatResponse } from './chat-response.js';
+import { unsupportedFrequencyPenaltyMessage } from './chat-parameter-policy.js';
 import { buildInferenceMetrics } from './inference-metrics.js';
 import {
   stripHopByHopHeaders,
@@ -283,7 +284,16 @@ export function createGateway (options) {
     const mayAutoload = autoload && autoloadAllowedFor(req);
     let buffered = await maybeBufferBody(req, res, mayAutoload);
     if (buffered === ABORTED) return;
-    if (buffered !== null) buffered = normalizeChatRequestPenalties(req.url, buffered);
+    if (buffered !== null) {
+      const normalized = normalizeChatRequestPenalties(req.url, buffered);
+      if (normalized.error) {
+        res.writeHead(400, { 'content-type': 'application/json', connection: 'close' });
+        res.end(openAiError(normalized.error, 'invalid_request_error'));
+        req.resume();
+        return;
+      }
+      buffered = normalized.body;
+    }
 
     // Populated only for chat completions, streamed or not, by parsing the response the
     // proxy is already decoding for SSE/JSON normalization — never a separate buffering pass.
@@ -569,13 +579,14 @@ export function createGateway (options) {
   }
 
   function normalizeChatRequestPenalties (url, body) {
-    if (!isChatCompletionPath(url) || typeof body !== 'string') return body;
+    if (!isChatCompletionPath(url) || typeof body !== 'string') return { body, error: null };
     try {
       const parsed = JSON.parse(body);
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return body;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { body, error: null };
       let changed = false;
-      // 2.1.0 rejects a nonzero frequency_penalty, and 2.0.1 misapplies an explicit 0.
       if (Object.prototype.hasOwnProperty.call(parsed, 'frequency_penalty')) {
+        const frequencyPenaltyError = unsupportedFrequencyPenaltyMessage(parsed.frequency_penalty);
+        if (frequencyPenaltyError) return { body, error: frequencyPenaltyError };
         delete parsed.frequency_penalty;
         changed = true;
       }
@@ -583,9 +594,9 @@ export function createGateway (options) {
         delete parsed.presence_penalty;
         changed = true;
       }
-      return changed ? JSON.stringify(parsed) : body;
+      return { body: changed ? JSON.stringify(parsed) : body, error: null };
     } catch {
-      return body;
+      return { body, error: null };
     }
   }
 

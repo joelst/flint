@@ -271,10 +271,10 @@ The 2.1.0 contracts, re-run on 2.4.0:
   rejection on each transport. Never JSON-parse a custom payload as a function
   argument or add an executor to Playground.
 - Verify sampling, reasoning, tool-choice, structured output, usage and
-  output-limit/finish reasons across IPC, fallback, and gateway. Resolve the
-  imported code's silent removal of every frequency penalty: supported values
-  must preserve semantics; unsupported non-neutral values need an explicit UI
-  and API outcome, not a successful response that hides an ignored setting.
+  output-limit/finish reasons across IPC, fallback, and gateway. The SDK
+  adapter does not support nonzero frequency penalties; Flint now rejects them
+  before inference in the UI, IPC, and gateway, while omitting neutral zero.
+  Do not claim that nonzero frequency-penalty semantics are supported.
 - Re-probe Whisper URI, Parakeet, and Nemotron PCM/language behavior on
   2.4.0; do not infer success from the old 2.0.1 shapes or from the 2.3.0
   release note, and do not claim native word timestamps. Run a real
