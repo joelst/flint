@@ -88,7 +88,7 @@ evidence. Source hashes and graceful child closure are verified.
 Tool/usage parity, other providers, and installed-app
 behavior remain release gates until the complete qualification matrix passes.
 
-## SDK 2.1.0 session features
+## SDK session and cancellation features
 
 The installed package accepts an `AbortSignal` for both
 `processRequest(request, { signal })` and
@@ -96,11 +96,15 @@ The installed package accepts an `AbortSignal` for both
 `AbortError`, but a completed native response can win the race. A stream's
 terminal `response` settles after native completion and queued callbacks.
 `IModel.download(..., signal)` observes cooperative cancellation at download
-checkpoints. The IPC ChatSession adapter forwards an operation-owned signal for
-one-shot and streaming chat, and waits for the terminal stream response before
-disposing the session or releasing its activity lease. Download cancellation
-and gateway-disconnect cancellation remain unqualified; an early Stop
-acknowledgement alone is not treated as native completion.
+checkpoints. Flint's `cancelDownload` IPC aborts the matching download and
+waits for its native promise to settle before reporting cancellation; a
+completion race can still report success. The cache view is refreshed after a
+confirmed cancellation, but real-model partial-file cleanup remains unqualified.
+The IPC ChatSession adapter forwards an operation-owned signal for one-shot and
+streaming chat, and waits for the terminal stream response before disposing the
+session or releasing its activity lease. Gateway-disconnect cancellation
+remains unqualified; an early Stop acknowledgement alone is not treated as
+native completion.
 
 `ChatSession` also exposes exact structural `preflightRequest`, function-tool
 definitions, custom raw-text tool definitions, and explicit tool removal.

@@ -159,6 +159,10 @@ describe('foundry-sidecar protocol basics', () => {
       const cancel = await waitForLine(proc, (msg) => msg.id === 1);
       expect(cancel.ok).toBe(true);
 
+      proc.stdin.write(`${JSON.stringify({ id: 8, cmd: 'cancelDownload', requestId: 123 })}\n`);
+      const cancelDownload = await waitForLine(proc, (msg) => msg.id === 8);
+      expect(cancelDownload).toMatchObject({ ok: true, result: { accepted: false } });
+
       proc.stdin.write(`${JSON.stringify({ id: 2, cmd: 'unknownCommand' })}\n`);
       const unknown = await waitForLine(proc, (msg) => msg.id === 2);
       expect(String(unknown.error)).toContain('Unknown command');
@@ -1241,9 +1245,9 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
           }
           isLoaded() { return this.loaded; }
           get isCached() { return true; }
-          async download() {
+          async download(_progressCallback, signal) {
             if (${JSON.stringify(holdDownload)}) {
-              await fetch('http://127.0.0.1:${upstreamPort}/hold-download');
+              await fetch('http://127.0.0.1:${upstreamPort}/hold-download', { signal });
             }
           }
           async unload() {
@@ -1556,6 +1560,58 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
       expect(exclusiveSettledAt).toBeGreaterThanOrEqual(inFlightSettledAt);
     } finally {
+      if (proc) await killAndWait(proc);
+      await closeServer(upstream);
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it('cancels a native model download and settles only after the SDK operation aborts', async () => {
+    let downloadStartedResolve: (() => void) | null = null;
+    const downloadStarted = new Promise<void>((resolve) => { downloadStartedResolve = resolve; });
+    let releaseUpstream: (() => void) | null = null;
+    const upstreamHeld = new Promise<void>((resolve) => { releaseUpstream = resolve; });
+    const upstream = createServer((req, res) => {
+      if (req.url !== '/hold-download') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      downloadStartedResolve?.();
+      void upstreamHeld.then(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+      });
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort, 200, [], false, null, true);
+      proc = started.proc;
+      homeDir = started.homeDir;
+
+      const downloadDone = waitForLine(proc, (msg) => msg.id === 75, 3000);
+      proc.stdin.write(`${JSON.stringify({ id: 75, cmd: 'download', alias: 'fake-model' })}\n`);
+      await downloadStarted;
+
+      proc.stdin.write(`${JSON.stringify({ id: 76, cmd: 'cancelDownload', requestId: 75 })}\n`);
+      const cancel = await waitForLine(proc, (msg) => msg.id === 76, 3000);
+      expect(cancel).toMatchObject({ ok: true, result: { accepted: true } });
+      const downloadResult = await downloadDone;
+      expect(downloadResult).toMatchObject({
+        error: 'Model download was cancelled after native work settled.',
+        certainty: 'cancelled',
+      });
+
+      proc.stdin.write(`${JSON.stringify({ id: 77, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+      expect(await waitForLine(proc, (msg) => msg.id === 77, 3000)).toMatchObject({
+        ok: true,
+        result: { exclusive: true, drained: true },
+      });
+    } finally {
+      releaseUpstream?.();
       if (proc) await killAndWait(proc);
       await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });

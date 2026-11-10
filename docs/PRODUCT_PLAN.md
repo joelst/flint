@@ -256,9 +256,12 @@ The 2.1.0 contracts, re-run on 2.4.0:
   completion/cancel races, queued requests, legacy-client fallback, and gateway
   disconnect independently. The UI Stop acknowledgement is not proof of native
   completion.
-- Wire cooperative download `AbortSignal` cancellation and retain partial-file
-  cleanup/reporting. A checkpoint delay is not proof cancellation failed; an
-  acknowledgement alone is not proof the download stopped.
+- Model downloads now pass an AbortSignal to `IModel.download` and expose
+  `cancelDownload` through the UI/sidecar. Flint waits for native settlement and
+  refreshes cache state; automated tests cover cancellation and admission
+  release. Still qualify real-model races and partial-file cleanup/reporting. A
+  checkpoint delay or cancellation acknowledgement alone is not proof the
+  download stopped.
 - Prove Qwen enum arguments, fragmented/cumulative tool calls, malformed-call
   recovery, a tool-result follow-up, unique ids, and a tool-free final answer.
   Keep Llama text-call compatibility model-scoped and subject to the existing

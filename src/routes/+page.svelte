@@ -30,6 +30,7 @@
     subscribeQuitFlush,
     withServiceTransition,
     downloadModel,
+    cancelDownload,
     loadModel as sdkLoadModel,
     getSidecarGeneration,
     unloadModel as sdkUnloadModel,
@@ -1081,6 +1082,8 @@
   let startupModels = $state<Record<string, string | null>>({});
   let downloadingModelAliases = $state<Record<string, boolean>>({});
   let downloadingVariantIds = $state<Record<string, boolean>>({});
+  let downloadingModelRequestIds = $state<Record<string, number>>({});
+  let downloadingVariantRequestIds = $state<Record<string, number>>({});
   let monitorLog = $state<any[]>([]);
   let monitorLogPaused = $state(false);
 
@@ -6474,6 +6477,17 @@ updateStateFromSdk();
     untrack(() => saveConversations());
   });
 
+  async function requestDownloadCancellation(requestId: number) {
+    try {
+      const accepted = await cancelDownload(requestId);
+      statusMessage = accepted
+        ? "Cancellation requested. Waiting for the runtime to settle the download…"
+        : "The download already settled; checking its final result…";
+    } catch (e: any) {
+      statusMessage = `Could not request download cancellation: ${e?.message || e}`;
+    }
+  }
+
   async function downloadAndTrack(model: any) {
     const blocked = blockedByExclusivePoolRun();
     if (blocked) {
@@ -6486,6 +6500,7 @@ updateStateFromSdk();
     // visible to `otherInferenceInFlight()` (checked by benchmark admission) exactly like those
     // other pool-affecting operations already are.
     const release = beginPoolMutation();
+    let requestId: number | null = null;
     try {
       statusMessage = `Downloading ${model.alias}...`;
       await downloadModel(
@@ -6497,18 +6512,29 @@ updateStateFromSdk();
         () => {
           statusMessage = `Downloading ${model.alias}: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.`;
         },
+        (id: number) => {
+          requestId = id;
+          downloadingModelRequestIds = { ...downloadingModelRequestIds, [model.alias]: id };
+        },
       );
       setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
       statusMessage = `${model.alias} downloaded`;
       await refreshCatalogModels();
     } catch (e: any) {
-      statusMessage = `Download failed: ${e?.message || e}`;
+      statusMessage = e?.certainty === "cancelled"
+        ? `Download cancelled: ${e?.message || "the native download settled."}`
+        : `Download failed: ${e?.message || e}`;
       throw e;
     } finally {
       release();
       const next = { ...downloadingModelAliases };
       delete next[model.alias];
       downloadingModelAliases = next;
+      if (downloadingModelRequestIds[model.alias] === requestId) {
+        const requestIds = { ...downloadingModelRequestIds };
+        delete requestIds[model.alias];
+        downloadingModelRequestIds = requestIds;
+      }
     }
   }
 
@@ -6751,6 +6777,7 @@ updateStateFromSdk();
     }
     downloadingVariantIds = { ...downloadingVariantIds, [variantId]: true };
     const release = beginPoolMutation();
+    let requestId: number | null = null;
     try {
       statusMessage = `Downloading ${model.alias} variant...`;
       await downloadModel(
@@ -6762,17 +6789,28 @@ updateStateFromSdk();
         () => {
           statusMessage = `Downloading ${model.alias}: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.`;
         },
+        (id: number) => {
+          requestId = id;
+          downloadingVariantRequestIds = { ...downloadingVariantRequestIds, [variantId]: id };
+        },
       );
       setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
       statusMessage = `${model.alias} variant downloaded`;
       await refreshCatalogModels();
     } catch (e: any) {
-      statusMessage = `Download failed: ${e?.message || e}`;
+      statusMessage = e?.certainty === "cancelled"
+        ? `Download cancelled: ${e?.message || "the native download settled."}`
+        : `Download failed: ${e?.message || e}`;
     } finally {
       release();
       const next = { ...downloadingVariantIds };
       delete next[variantId];
       downloadingVariantIds = next;
+      if (downloadingVariantRequestIds[variantId] === requestId) {
+        const requestIds = { ...downloadingVariantRequestIds };
+        delete requestIds[variantId];
+        downloadingVariantRequestIds = requestIds;
+      }
     }
   }
 
@@ -9995,19 +10033,37 @@ Output only the summary text, no preamble.`;
                                   {#if variant.update}
                                     <button
                                       class="small update-btn"
-                                      onclick={() => downloadVariant(model, variant.update.latestVariantId)}
-                                      disabled={downloadingVariantIds[variant.update.latestVariantId] || benchmarkRunInFlight}
+                                      onclick={() => {
+                                        const requestId = downloadingVariantRequestIds[variant.update.latestVariantId];
+                                        if (requestId) void requestDownloadCancellation(requestId);
+                                        else void downloadVariant(model, variant.update.latestVariantId);
+                                      }}
+                                      disabled={benchmarkRunInFlight || (
+                                        downloadingVariantIds[variant.update.latestVariantId]
+                                        && !downloadingVariantRequestIds[variant.update.latestVariantId]
+                                      )}
                                     >
-                                      {downloadingVariantIds[variant.update.latestVariantId] ? 'Downloading…' : 'Download update'}
+                                      {downloadingVariantIds[variant.update.latestVariantId]
+                                        ? (downloadingVariantRequestIds[variant.update.latestVariantId] ? 'Cancel download' : 'Starting…')
+                                        : 'Download update'}
                                     </button>
                                   {/if}
                                   {#if !variant.cached}
                                     <button
                                       class="small"
-                                      onclick={() => downloadVariant(model, variant.id)}
-                                      disabled={downloadingVariantIds[variant.id] || benchmarkRunInFlight}
+                                      onclick={() => {
+                                        const requestId = downloadingVariantRequestIds[variant.id];
+                                        if (requestId) void requestDownloadCancellation(requestId);
+                                        else void downloadVariant(model, variant.id);
+                                      }}
+                                      disabled={benchmarkRunInFlight || (
+                                        downloadingVariantIds[variant.id]
+                                        && !downloadingVariantRequestIds[variant.id]
+                                      )}
                                     >
-                                      {downloadingVariantIds[variant.id] ? 'Downloading…' : 'Download'}
+                                      {downloadingVariantIds[variant.id]
+                                        ? (downloadingVariantRequestIds[variant.id] ? 'Cancel download' : 'Starting…')
+                                        : 'Download'}
                                     </button>
                                   {:else}
                                     {#if !isCurrentlyLoaded}
@@ -10044,10 +10100,24 @@ Output only the summary text, no preamble.`;
 
                       {#if !model.isCached}
                         <button
-                          onclick={() => { void downloadAndTrack(model).catch((e: any) => { statusMessage = `Download failed: ${e?.message || e}`; }); }}
-                          disabled={downloadingModelAliases[model.alias] || benchmarkRunInFlight}
+                          onclick={() => {
+                            const requestId = downloadingModelRequestIds[model.alias];
+                            if (requestId) void requestDownloadCancellation(requestId);
+                            else {
+                              void downloadAndTrack(model).catch((e: any) => {
+                                statusMessage = e?.certainty === "cancelled"
+                                  ? `Download cancelled: ${e?.message || "the native download settled."}`
+                                  : `Download failed: ${e?.message || e}`;
+                              });
+                            }
+                          }}
+                          disabled={benchmarkRunInFlight || (
+                            downloadingModelAliases[model.alias] && !downloadingModelRequestIds[model.alias]
+                          )}
                         >
-                          {downloadingModelAliases[model.alias] ? 'Downloading…' : 'Download'}
+                          {downloadingModelAliases[model.alias]
+                            ? (downloadingModelRequestIds[model.alias] ? 'Cancel download' : 'Starting…')
+                            : 'Download'}
                         </button>
                       {/if}
 

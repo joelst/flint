@@ -1824,19 +1824,42 @@ export async function downloadModel(
   onProgress?: (p: number) => void,
   variantId?: string,
   onStall?: () => void,
+  onAssignedRequestId?: (id: number) => void,
 ) {
   const payload: any = { alias: model.alias };
   if (variantId) payload.variantId = variantId;
-  await sendInternal('download', payload, undefined, (id: number) => {
-    registerProgressHandler(
-      id,
-      onProgress,
-      onStall ?? (() => reportRuntimeProgressStall('download')),
-    );
-  });
+  try {
+    await sendInternal('download', payload, undefined, (id: number) => {
+      registerProgressHandler(
+        id,
+        onProgress,
+        onStall ?? (() => reportRuntimeProgressStall('download')),
+      );
+      onAssignedRequestId?.(id);
+    });
+  } catch (error) {
+    if (error instanceof SidecarOperationError && error.certainty === 'cancelled') {
+      try {
+        await refreshModels();
+      } catch (refreshError) {
+        throw new SidecarOperationError(
+          'download',
+          'cancelled',
+          'The download was cancelled, but Flint could not refresh the model cache state.',
+          new AggregateError([error, refreshError]),
+        );
+      }
+    }
+    throw error;
+  }
   // Sidecar sends progress messages via stdout; onAssignedId registers the handler above.
   // The pending promise resolves only on the final reply (see stdout processing).
   await refreshModels();
+}
+
+export async function cancelDownload(requestId: number): Promise<boolean> {
+  const response = await send('cancelDownload', { requestId });
+  return response.result?.accepted === true;
 }
 
 export async function loadModel(

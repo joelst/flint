@@ -228,7 +228,7 @@ let activeLogLevel = 'info';
 const KNOWN_COMMANDS = new Set([
   'init', 'setLogLevel', 'startService', 'stopService', 'stopAndUnload', 'shutdownRuntime', 'getStatus',
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
-  'chatCompletion', 'cancelChatRequest', 'transcribeAudio', 'embedTexts',
+  'chatCompletion', 'cancelDownload', 'cancelChatRequest', 'transcribeAudio', 'embedTexts',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
   'poolStatus', 'getAccessLog', 'getHealthRing',
   'getCacheInventory',
@@ -248,6 +248,7 @@ const FIELD_TYPES = {
   stopAndUnload:     { drainTimeoutMs: 'number' },
   shutdownRuntime:   { drainTimeoutMs: 'number' },
   download:          { alias: 'non-empty-string', variantId: 'non-empty-string' },
+  cancelDownload:    { requestId: 'number' },
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
   unload:            { alias: 'non-empty-string', ifIdle: 'boolean' },
   deleteModel:       { alias: 'non-empty-string', variantId: 'non-empty-string' },
@@ -296,6 +297,7 @@ const COMMAND_SCHEMA = {
   getStatus:          { required: [], optional: [] },
   listModels:         { required: [], optional: [] },
   download:           { required: ['alias'], optional: ['variantId'] },
+  cancelDownload:     { required: ['requestId'], optional: [] },
   load:               { required: ['alias'], optional: ['lane', 'variantId'] },
   unload:             { required: ['alias'], optional: ['lane', 'ifIdle'] },
   deleteModel:        { required: ['alias'], optional: ['variantId'] },
@@ -721,6 +723,7 @@ let initConfig = null; // { appName, logLevel } — kept so startService can re-
 let nativeServiceStartAttempted = false;
 const canceledRequests = new Set();
 const activeChatRequests = new Map();
+const activeDownloads = new Map();
 const acquireServiceTransition = createServiceTransitionLock();
 
 // Model pool: Map<alias, { catModel, variantId }>
@@ -3478,33 +3481,54 @@ rl.on('line', async (line) => {
       );
       reply({ ok: true, result: vision });
     } else if (cmd === 'download') {
-      await serializeModelOperation(payload.alias, ['cache'], async () => {
-        await beforeCatalogRead(reportCatalogProgress, { commit: true });
-        const model = await readUnconfirmedCatalog(
-          async () => {
-            if (payload.variantId) {
-              try {
-                return await manager.catalog.getModelVariant(payload.variantId);
-              } catch (publicError) {
-                return modelAfterPublicMiss('variant', payload.variantId, publicError);
+      const controller = new AbortController();
+      activeDownloads.set(id, controller);
+      try {
+        await serializeModelOperation(payload.alias, ['cache'], async () => {
+          await beforeCatalogRead(reportCatalogProgress, { commit: true });
+          const model = await readUnconfirmedCatalog(
+            async () => {
+              if (payload.variantId) {
+                try {
+                  return await manager.catalog.getModelVariant(payload.variantId);
+                } catch (publicError) {
+                  return modelAfterPublicMiss('variant', payload.variantId, publicError);
+                }
               }
+              try {
+                return await manager.catalog.getModel(payload.alias);
+              } catch (publicError) {
+                return modelAfterPublicMiss('alias', payload.alias, publicError);
+              }
+            },
+            reportCatalogProgress,
+          );
+          if (controller.signal.aborted) {
+            const error = new Error('Model download was cancelled before native download began.');
+            error.name = 'AbortError';
+            throw error;
+          }
+          audit('download.start', { alias: payload.alias, variantId: payload.variantId ?? null });
+          try {
+            await model.download((p) => send({ id, progress: p, alias: payload.alias }), controller.signal);
+          } catch (error) {
+            if (controller.signal.aborted && error?.name === 'AbortError') {
+              const cancelled = new Error('Model download was cancelled after native work settled.');
+              cancelled.name = 'AbortError';
+              throw cancelled;
             }
-            try {
-              return await manager.catalog.getModel(payload.alias);
-            } catch (publicError) {
-              return modelAfterPublicMiss('alias', payload.alias, publicError);
-            }
-          },
-          reportCatalogProgress,
-        );
-        audit('download.start', { alias: payload.alias, variantId: payload.variantId ?? null });
-        await model.download((p) => send({ id, progress: p, alias: payload.alias }));
-        // Force next catalog access to re-read model list metadata (info.cached, etc.).
-        try { manager.catalog.invalidateCache?.(); } catch {}
-        invalidateModelIndex();
-        audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
-      });
-      reply({ ok: true });
+            throw error;
+          } finally {
+            activeDownloads.delete(id);
+            try { manager.catalog.invalidateCache?.(); } catch {}
+            invalidateModelIndex();
+          }
+          audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
+        });
+        reply({ ok: true });
+      } finally {
+        activeDownloads.delete(id);
+      }
     } else if (cmd === 'load') {
       const entry = await ensureModel(payload.alias, payload.variantId, reportCatalogProgress);
       const acceleration = {
@@ -4538,6 +4562,14 @@ rl.on('line', async (line) => {
           ok: chatOk,
         });
       }
+    } else if (cmd === 'cancelDownload') {
+      const requestId = Number(payload.requestId);
+      if (!Number.isFinite(requestId)) {
+        throw new Error('cancelDownload requires numeric requestId');
+      }
+      const controller = activeDownloads.get(requestId);
+      if (controller && !controller.signal.aborted) controller.abort();
+      reply({ ok: true, result: { accepted: Boolean(controller) } });
     } else if (cmd === 'cancelChatRequest') {
       const requestId = Number(payload.requestId);
       if (Number.isFinite(requestId)) {
@@ -4906,7 +4938,11 @@ rl.on('line', async (line) => {
       reply({ error: `Unknown command: ${cmd}` });
     }
   } catch (e) {
-    reply({ error: e.message || String(e) });
+    if (cmd === 'download' && e?.name === 'AbortError') {
+      reply({ error: e.message || 'Model download was cancelled.', certainty: 'cancelled' });
+    } else {
+      reply({ error: e.message || String(e) });
+    }
   } finally {
     if (operationAdmitted) operationAdmission.complete(id);
     releaseServiceTransition?.();
