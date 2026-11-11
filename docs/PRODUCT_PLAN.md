@@ -405,6 +405,11 @@ tool call; its optional `/v1/responses` check returned HTTP 500 with a CUDA
 `invalid argument` diagnostic, whose cause was not isolated. The friendly alias
 also passed inference/tool checks but was not a `/v1/models` row; SDK 2.4.0
 returned full versioned variant ids without a `parent` alias in this probe.
+On the Qwen2.5 0.5B CUDA variant, the direct gateway also returned valid JSON
+for `response_format.type=json_object`, honored `tool_choice=required`, and
+reported `finish_reason: length` at `max_tokens: 1` with one completion token.
+The request accepted temperature, top-p, top-k, and seed values; this confirms
+the gateway/native request path, not sampling semantics, IPC, or fallback.
 Package revision/license provenance, broader lifecycle and provider checks,
 additional tool-capable model families beyond Qwen2.5/Qwen3, the 2.2.0–2.3.1
 gates on this pin, and installed-app qualification remain open. Flash-Next
