@@ -148,8 +148,16 @@ all judged test queries, gateway embedding retrieval reached **Recall@10
 0.83489** and **nDCG@10 0.70395**. The source hashes were unchanged; removal
 and graceful sidecar shutdown were confirmed. The run did not restart the
 sidecar: a separate copy/restart attempt exited with native Windows access
-violation `3221225477` during accelerator registration after restart. The
-active execution provider was still not reported, and this result does not
+violation `3221225477` during accelerator registration after restart. A
+follow-up on the same portable export used
+`--model <portable-build-output> --copy --restart --embeddings` with GPU 1
+selected by UUID. Two fresh-process runs passed restart, IPC/gateway
+agreement, source-hash preservation, removal, and confirmed shutdown; one
+additional run exited with the same access violation while the restarted
+sidecar was handling `ensureAccelerators`, before model load. It emitted no
+diagnostic stderr or Windows Application fault event. The intermittent native
+crash remains unexplained; successful runs do not establish restart stability.
+The active execution provider was still not reported, and these results do not
 establish the provenance or quality of the separately cached catalog artifact,
 cross-host reproducibility, or full MTEB performance.
 
