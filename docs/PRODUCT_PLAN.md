@@ -349,6 +349,13 @@ registration, IPC chat with HTTP off, gateway discovery, buffered/streaming chat
 unload/delete, and confirmed graceful shutdown. All seven original source files
 and all eight metadata-bearing source files retained their hashes. PR CI still
 needs a fresh run; local Windows results do not prove the Linux/macOS jobs pass.
+Fresh-process restart with the same isolated app home passed link and copy
+re-discovery, IPC and gateway chat/streaming, removal, source-hash comparison,
+and confirmed shutdown without re-import. One earlier copy/restart attempt
+exited with native Windows access-violation code `3221225477` before the
+sidecar returned a command reply; two subsequent copy/restart runs passed.
+That failure's phase and cause were not captured, so restart stability remains
+an open gate rather than a clean qualification.
 An isolated sidecar with GPU visibility restricted to the RTX 4080 on physical
 GPU 1 completed normal, unfiltered provider registration: TensorRT-RTX, CUDA,
 and WebGPU registered with no failed providers. Cached Qwen2.5 0.5B and

@@ -79,8 +79,10 @@ link source is the existing eight-file imported folder with Flint-authored metad
 |---|---|---|
 | Original folder, copy | `node .\scripts\byom-gateway-live.mjs --model <original-onnx-folder> --copy` | Passed registration, load, IPC chat with HTTP off, gateway discovery, buffered chat, streaming chat with `[DONE]`, unload/delete, all seven source hashes, and graceful child close without forced termination. |
 | Metadata-bearing folder, link | `node .\scripts\byom-gateway-live.mjs --model <metadata-bearing-onnx-folder>` | Passed the same matrix; all eight source hashes unchanged, isolated junction removed, graceful close confirmed. |
+| Original folder, copy after restart | Add `--restart` to the copy command | Two runs passed fresh-process re-discovery, IPC/gateway chat and streaming, removal, unchanged seven-file source, and confirmed shutdown without re-import. An earlier run exited with native Windows access-violation code `3221225477` before a command reply; its phase was not captured. Restart stability is not yet qualified. |
+| Metadata-bearing link after restart | Add `--restart` to the link command | Passed the same fresh-process inference and removal checks, with eight source hashes unchanged and confirmed shutdown. |
 
-Both runs served `flint-byom-live:1` through IPC, advertised
+Successful copy and link runs served `flint-byom-live:1` through IPC, advertised
 `flint-byom-live` through gateway discovery, and answered `6 times 7 equals 42.`
 through IPC and both gateway modes. Neither source folder was changed.
 The runner uses a short isolated cache path: placing the CUDA EP bundle under
@@ -100,7 +102,7 @@ Source repository/revision/license provenance remains open.
 
 `scripts/spike-foundry-210.mjs` is research tooling. It is not wired into the app. `node .\scripts\spike-foundry-210.mjs --self-test` checks folder diffs, tool-call assembly, and the work-directory guard. That command does not load Foundry. When listener checks fail, the runner also attempts a direct `ChatSession` probe so an HTTP 404 does not hide whether the model can run in process.
 
-`scripts/byom-gateway-live.mjs --model <onnx-genai-folder>` qualifies a real folder through Flint's sidecar and gateway. It refuses to run while `Flint.exe` is open, links the source under a short isolated temporary app home, records SHA-256 for every source file, tests IPC and buffered/streaming gateway chat, unloads and deletes the isolated registration, verifies source hashes, waits for child `close`, and removes the temporary home only after closure is confirmed. `--copy` instead exercises import, including sources without inference metadata. Neither mode edits the external folder.
+`scripts/byom-gateway-live.mjs --model <onnx-genai-folder>` qualifies a real folder through Flint's sidecar and gateway. It refuses to run while `Flint.exe` is open, links the source under a short isolated temporary app home, records SHA-256 for every source file, tests IPC and buffered/streaming gateway chat, unloads and deletes the isolated registration, verifies source hashes, waits for child `close`, and removes the temporary home only after closure is confirmed. `--copy` instead exercises import, including sources without inference metadata. `--restart` shuts down the first sidecar after registration and starts another against the same app home before discovery and inference, without importing again. Cleanup is qualified only when the runtime confirms it and the child closes without forced termination. Neither mode edits the external folder.
 
 `--install` puts the package in the work directory and can run while Flint is open. Every other command, except `--self-test`, creates a manager and refuses to start while `Flint.exe` is running unless `--force` is passed.
 

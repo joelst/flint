@@ -18,10 +18,11 @@ const ALIAS = 'flint-byom-live';
 const PROMPT = 'What is 6 times 7? Reply with one short sentence.';
 
 function parseArgs(argv) {
-  const args = { model: null, selfTest: false, copy: false };
+  const args = { model: null, selfTest: false, copy: false, restart: false };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
     else if (argv[i] === '--copy') args.copy = true;
+    else if (argv[i] === '--restart') args.restart = true;
     else if (argv[i] === '--model') {
       const model = argv[++i];
       if (!model || model.startsWith('--')) throw new Error('--model requires a folder path.');
@@ -245,7 +246,7 @@ async function complete(endpoint, body, stream = false) {
   return { text, done };
 }
 
-async function run(modelPath, { copy = false } = {}) {
+async function run(modelPath, { copy = false, restart = false } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
   }
@@ -264,7 +265,9 @@ async function run(modelPath, { copy = false } = {}) {
   const report = {
     modelPath,
     mode: copy ? 'copy' : 'link',
-    sourceUnchanged: false,
+    restarted: false,
+    phase: 'source snapshot',
+    sourceUnchanged: null,
     sourceFileCount: 0,
     ipc: null,
     gateway: null,
@@ -280,9 +283,12 @@ async function run(modelPath, { copy = false } = {}) {
     report.sourceFileCount = sourceBefore.length;
     sidecar = startSidecar(home, appName, stderrLines);
     await sidecar.ready;
+    report.phase = 'first init';
     assertReply(await sidecar.send('init', { appName, logLevel: 'error' }), 'init');
+    report.phase = 'first accelerator registration';
     assertReply(await sidecar.send('ensureAccelerators'), 'ensureAccelerators');
     const addCommand = copy ? 'importModelFolder' : 'linkModelFolder';
+    report.phase = addCommand;
     const added = assertReply(await sidecar.send(addCommand, {
       folderPath: modelPath,
       name: ALIAS,
@@ -292,11 +298,26 @@ async function run(modelPath, { copy = false } = {}) {
     }
     linkedPath = copy ? added.path : added.linkPath;
 
+    if (restart) {
+      report.phase = 'pre-restart shutdown';
+      const cleanup = await stopSidecar(sidecar);
+      if (cleanup.error) throw new Error(`Pre-restart sidecar shutdown failed: ${cleanup.error}`);
+      sidecar = startSidecar(home, appName, stderrLines);
+      await sidecar.ready;
+      report.phase = 'restart init';
+      assertReply(await sidecar.send('init', { appName, logLevel: 'error' }), 'restart init');
+      report.phase = 'restart accelerator registration';
+      assertReply(await sidecar.send('ensureAccelerators'), 'restart ensureAccelerators');
+      report.restarted = true;
+    }
+
+    report.phase = 'post-registration discovery';
     const listed = assertReply(await sidecar.send('listModels'), 'listModels').result;
     const local = listed.find((model) => model.alias === ALIAS);
     if (!local || local.info?.uri !== `local://${ALIAS}`) {
       throw new Error('The registered model was not visible in Flint model discovery.');
     }
+    report.phase = 'model load and IPC';
     const loaded = assertReply(await sidecar.send('load', { alias: ALIAS }), 'load').result;
     const prompt = [{ role: 'user', content: PROMPT }];
     const ipc = assertReply(await sidecar.send('chatCompletion', {
@@ -310,6 +331,7 @@ async function run(modelPath, { copy = false } = {}) {
     }
     report.ipc = { variantId: loaded.variantId, text: ipcText.slice(0, 240) };
 
+    report.phase = 'gateway';
     const port = await listenOnFreePort();
     assertReply(await sidecar.send('startService', {
       port,
@@ -346,6 +368,7 @@ async function run(modelPath, { copy = false } = {}) {
       streamDone: streamed.done,
     };
 
+    report.phase = 'model removal';
     assertReply(await sidecar.send('unload', { alias: ALIAS }), 'unload');
     assertReply(await sidecar.send('deleteModel', { alias: ALIAS }), 'deleteModel');
     const finalFiles = await snapshotFolder(modelPath);
@@ -354,6 +377,7 @@ async function run(modelPath, { copy = false } = {}) {
     if (linkedPath && fs.existsSync(linkedPath)) {
       throw new Error('Flint did not remove the isolated model assets during cleanup.');
     }
+    report.phase = 'completed';
   } catch (error) {
     report.error = error?.message || String(error);
     if (stderrLines.length) report.sidecarStderr = stderrLines.join('').slice(-8000);
@@ -376,13 +400,14 @@ async function main() {
   if (args.selfTest) {
     assert.equal(parseArgs(['--model', 'model']).model, path.resolve('model'));
     assert.equal(parseArgs(['--model', 'model', '--copy']).copy, true);
+    assert.equal(parseArgs(['--model', 'model', '--restart']).restart, true);
     assert.throws(() => parseArgs(['--model']), /requires a folder/);
     assert.throws(() => parseArgs(['--unexpected']), /Unknown argument/);
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy]');
-  const report = await run(args.model, { copy: args.copy });
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart]');
+  const report = await run(args.model, { copy: args.copy, restart: args.restart });
   console.log(JSON.stringify(report, null, 2));
   if (report.error) process.exitCode = 2;
 }

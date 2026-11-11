@@ -95,4 +95,11 @@ describe('BYOM runner copy selection', () => {
     expect(() => parseArgs(['--model'])).toThrow(/requires a folder/);
     expect(() => parseArgs(['--model', '--copy'])).toThrow(/requires a folder/);
   });
+
+  it('accepts a restart qualification mode without changing copy selection', () => {
+    expect(parseArgs(['--restart', '--model', 'model'])).toMatchObject({
+      restart: true,
+      copy: false,
+    });
+  });
 });
