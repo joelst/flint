@@ -154,9 +154,16 @@ follow-up on the same portable export used
 selected by UUID. Two fresh-process runs passed restart, IPC/gateway
 agreement, source-hash preservation, removal, and confirmed shutdown; one
 additional run exited with the same access violation while the restarted
-sidecar was handling `ensureAccelerators`, before model load. It emitted no
-diagnostic stderr or Windows Application fault event. The intermittent native
-crash remains unexplained; successful runs do not establish restart stability.
+sidecar was handling `ensureAccelerators`, before model load. That untraced run
+emitted no diagnostic stderr or Windows Application fault event. The
+intermittent native crash remains unexplained; successful runs do not establish
+restart stability.
+In a traced reproduction, CUDA, WebGPU, and TensorRT registration calls all
+returned success in the restarted sidecar before the access violation; it
+exited before replying to `ensureAccelerators`. Six subsequent runs with
+additional catalog tracing passed. The crash could be in provider-state
+discovery or local-model re-registration after those calls; neither operation
+has been isolated as the cause.
 The active execution provider was still not reported, and these results do not
 establish the provenance or quality of the separately cached catalog artifact,
 cross-host reproducibility, or full MTEB performance.

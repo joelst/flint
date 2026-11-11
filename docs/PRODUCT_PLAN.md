@@ -535,9 +535,13 @@ retrieval phase. A follow-up on the same portable export with GPU 1 selected by
 UUID passed two additional copy/restart embedding probes but reproduced the
 same access violation on a third, again during post-restart `ensureAccelerators`, before
 model load. No diagnostic stderr or Windows Application fault event was
-recorded; the native crash's cause and restart stability remain open. The
-active provider remains unidentified. The BYOM gate remains open for cached
-catalog-artifact provenance.
+recorded for that untraced run; the native crash's cause and restart stability
+remain open. The traced failure returned success from all three provider
+registration calls before the restarted sidecar exited without an
+`ensureAccelerators` reply.
+Six further catalog-traced runs passed; the exact failing native operation is
+still unidentified. The active provider remains unidentified. The BYOM gate
+remains open for cached catalog-artifact provenance.
 Qwen2.5
 0.5B CPU rejected a real 38,708-word request during structural preflight (39,249
 estimated tokens against a 32,768 limit), before any stream event or in-flight
