@@ -240,7 +240,9 @@ landed after 2.1.0:
   still-unsupported result. Do not claim native word timestamps. 2.3.0 adds a
   shared model cache across Foundry Local SDKs.
   Flint keeps `~/.flint` and does not opt into another product's cache.
-  Confirm startup does not read or write another app's model cache.
+  An isolated sidecar init and cache-inventory probe with a seeded
+  `~/.foundry/cache/models` marker left it unchanged and reported no Flint
+  entries; this does not establish cross-app model loading.
 - **2.4.0 pin.** The package keeps the 2.1.0 through 2.3.1 behavior Flint
   already uses, and it adds ranking and typed-decision sessions that stay out
   of this release. `deps_versions.json` records ONNX Runtime 1.31.0, ONNX
