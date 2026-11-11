@@ -309,7 +309,9 @@ The 2.1.0 contracts, re-run on 2.4.0:
   A pinned Qwen3 0.6B CUDA INT4 candidate recipe is recorded in
   [the Olive recipe note](./spikes/qwen3-embedding-olive-recipe.md); fresh
   build/output replay passed with both the prior and a newly provisioned
-  pinned environment. Retrieval-quality evaluation remains open. The
+  pinned environment. Its separately replayed BYOM export reached SciFact
+  Recall@10 0.83489 and nDCG@10 0.70395 through the Flint gateway on GPU 1;
+  that score does not apply to the separately cached catalog artifact. The
   native router's unquoted 2.4.0 `Model not found: X` alias rejection is
   recognized by the gateway classifier.
 - Native ChatSession paths use `preflightRequest` when the SDK exposes it and
@@ -457,6 +459,14 @@ maps the response vectors without dimension slicing or a `dimensions` request
 field. This does not explain the earlier 256-component cache observation versus
 the separate 1,024-dimensional gateway response; no paired request/response and
 persisted-row capture exists, so do not claim dimensional compatibility yet.
+The portable BYOM embedding export was tested separately with Continue 2.0.0:
+the client requested `encoding_format: base64`, which the local-model gateway
+previously rejected with HTTP 400. After adding float32 little-endian base64
+responses, an isolated two-document index received two 1,024-component vectors
+over HTTP and persisted two 1,024-component `lance_db_cache` rows. Both stored
+float32 hashes exactly matched the paired HTTP response bytes and the index
+lock was released. This closes the BYOM-side dimension question, not the
+unpaired 256-component observation from the cached catalog variant.
 The SDK/core 2.4.0 catalog also exposes `qwen3-embedding-0.6b` and
 `qwen3-embedding-8b`; their cached variants are CUDA-only. CUDA EP assets exist
 in the local cache. Explicit CUDA registration succeeded; the cached Qwen3
@@ -513,8 +523,16 @@ shutdowns were confirmed. A second replay in a newly provisioned Python
 produced the same 12 portable file hashes. Its separate isolated import,
 fresh-process restart, IPC/gateway embeddings on GPU 1, source-hash check,
 removal, and confirmed shutdown also passed. Wheel hashes and host driver
-remain unpinned. The active provider remains unidentified. The BYOM gate
-remains open for catalog-artifact provenance and retrieval-quality evidence.
+remain unpinned. A full-corpus SciFact test of the portable BYOM export
+embedded 5,183 documents and 300 judged test queries through Flint's gateway
+on physical GPU 1, with 1,024-component vectors, 339 relevance judgments,
+Recall@10 0.83489, and nDCG@10 0.70395. Two documents exceeded Flint's
+8,192-character admission limit and were explicitly truncated. Source hashes
+remained unchanged, removal succeeded, and graceful shutdown was confirmed.
+A separate copy/restart attempt exited with native Windows access violation
+`3221225477` during accelerator registration after restart, before the
+retrieval phase; restart stability remains open. The active provider remains
+unidentified. The BYOM gate remains open for cached catalog-artifact provenance.
 Qwen2.5
 0.5B CPU rejected a real 38,708-word request during structural preflight (39,249
 estimated tokens against a 32,768 limit), before any stream event or in-flight

@@ -158,6 +158,7 @@ export default defineConfig(() => ({
         'sidecar/gateway-http.js',
         'sidecar/model-registry.js',
         'sidecar/activity-booking.js',
+        'sidecar/embedding-encoding.js',
         'sidecar/gateway.js',
         'src/lib/memory-watchdog.ts',
         'sidecar/pool-eviction.js',

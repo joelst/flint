@@ -101,7 +101,7 @@ checkKoffiAt(
   path.join(root, 'runtime', 'koffi-stage', '@koromix'),
 );
 
-const requiredSidecarSources = ['web-tool.js', 'web-address-policy.js', 'chat-parameter-policy.js'];
+const requiredSidecarSources = ['web-tool.js', 'web-address-policy.js', 'chat-parameter-policy.js', 'embedding-encoding.js'];
 for (const file of requiredSidecarSources) {
   if (!fs.existsSync(path.join(root, 'sidecar', file))) {
     bad(`missing sidecar/${file}`);

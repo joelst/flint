@@ -109,6 +109,14 @@ describe('BYOM runner copy selection', () => {
       copy: false,
     });
   });
+
+  it('accepts a source-pinned retrieval dataset for an embedding run', () => {
+    expect(parseArgs(['--embeddings', '--model', 'model', '--retrieval', 'dataset.json']))
+      .toMatchObject({ embeddings: true, retrieval: 'dataset.json' });
+    expect(() => parseArgs(['--retrieval'])).toThrow(/requires a JSON dataset path/);
+    expect(() => parseArgs(['--model', 'model', '--retrieval', 'dataset.json']))
+      .toThrow(/requires --embeddings/);
+  });
 });
 
 describe('BYOM embedding qualification', () => {

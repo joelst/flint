@@ -131,6 +131,7 @@ import { prepareCudaRuntime } from './cuda-runtime-path.js';
 import { createFoundryManager, foundryManagerCreateConfig } from './foundry-manager-config.js';
 import { writeProtocolLine } from './protocol-stdout.js';
 import { createModelOperationQueue } from './model-operation-queue.js';
+import { encodeEmbedding } from './embedding-encoding.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -2749,8 +2750,9 @@ async function serveLocalGatewayEmbeddings(req, res, rawBody, target) {
     respondError(400, 'The input field is required.', 'invalid_request_error');
     return;
   }
-  if (request.encoding_format !== undefined && request.encoding_format !== 'float') {
-    respondError(400, 'Only float embedding encoding is supported.', 'invalid_request_error');
+  if (request.encoding_format !== undefined &&
+      request.encoding_format !== 'float' && request.encoding_format !== 'base64') {
+    respondError(400, 'Only float and base64 embedding encodings are supported.', 'invalid_request_error');
     return;
   }
   if (request.dimensions !== undefined) {
@@ -2794,7 +2796,12 @@ async function serveLocalGatewayEmbeddings(req, res, rawBody, target) {
           || !item.embedding.every((value) => typeof value === 'number' && Number.isFinite(value))) {
         throw new Error(`Foundry Local returned an invalid embedding at index ${index}.`);
       }
-      return { ...item, object: 'embedding', index };
+      return {
+        ...item,
+        object: 'embedding',
+        index,
+        embedding: encodeEmbedding(item.embedding, request.encoding_format),
+      };
     });
     if (res.destroyed || res.writableEnded) return;
     res.writeHead(200, { 'content-type': 'application/json' });

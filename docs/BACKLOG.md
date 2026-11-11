@@ -78,8 +78,10 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       metadata does not tie the registry export to that source commit. The
       pinned candidate procedure is recorded in
       [the Olive recipe note](./spikes/qwen3-embedding-olive-recipe.md); fresh
-      pinned-environment replay and BYOM embedding smoke passed, while
-      registry-artifact provenance and retrieval-quality evidence remain open.
+      pinned-environment replay and BYOM embedding smoke passed. The portable
+      export also reached SciFact Recall@10 0.83489 and nDCG@10 0.70395 over
+      the full corpus and 300 judged test queries through Flint on GPU 1;
+      the cached registry artifact's provenance and quality remain unproven.
       A temporary build
       using the pinned model snapshot and recipe commit was imported and
       validated through sidecar 2.4.0 gateway and IPC; detailed evidence is in
@@ -113,8 +115,14 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       3,179 vector-cache rows across 782 indexed paths; pool `inFlight` returned
       to zero and the indexing lock was released. This verifies Continue
       indexing through Flint's local endpoint, not normal all-provider
-      startup, retrieval quality, or packaged-app behavior. Model-export
-      provenance of the cached catalog export and retrieval quality remain open.
+      startup, ranked-retrieval quality for the cached artifact, or packaged-app
+      behavior. The separately replayed BYOM export passed a source-pinned
+      SciFact retrieval evaluation; cached catalog-export provenance remains open.
+      An isolated Continue 2.0.0 run against that BYOM export required base64
+      embeddings. After Flint supported float32 base64 for local models,
+      the paired HTTP response and two persisted cache rows matched at 1,024
+      components and identical float32 hashes. The earlier unpaired
+      256-component observation from the cached catalog artifact is still open.
       The [onnx-community ONNX export](https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/tree/c25a394dd583836952667c12f008335071b3f43d)
       explicitly targets Transformers.js and is not a tested ONNX Runtime GenAI
       folder, so it does not close the recipe gate. The upstream

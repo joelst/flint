@@ -110,3 +110,61 @@ replay, including the ONNX graph. Its isolated Flint import, fresh-process
 restart, IPC and gateway embedding calls on GPU 1, source-hash check, removal,
 and confirmed shutdown also passed. Wheel hashes and the host driver are not
 pinned; these runs do not establish bit-for-bit reproducibility on other hosts.
+
+## Retrieval evaluation
+
+The [SciFact](https://huggingface.co/datasets/BeIR/scifact) corpus and queries
+are pinned to revision `b3b5335604bf5ee3c4447671af975ea25143d4f5`;
+the [test judgments](https://huggingface.co/datasets/BeIR/scifact-qrels) are
+pinned separately to `2938d17dc3b09882fdb8c12bbbe2e2dc0e75a029`.
+Download `corpus/corpus-00000-of-00001.parquet` and
+`queries/queries-00000-of-00001.parquet` from the first revision and `test.tsv`
+from the second into an isolated directory. The downloaded SHA-256 hashes,
+respectively, are `243324b35f03d82bd6d98a5f575966876e86cad7ce16e5333a35b1b793dc4f45`,
+`1c37956c5dc8b810b60302323c24d1a9e79e26411ba8f5ad9d0888642e2a9034`,
+and `0864bb985e0ca2367ba217977e72004d549054b2b06666ed9d4825ac7c21284c`.
+
+With Python and `pyarrow` installed, convert the pinned input and run the
+portable export through Flint's isolated sidecar:
+
+```text
+python scripts\byom\prepare_scifact.py --corpus corpus.parquet --queries queries.parquet --qrels test.tsv --output dataset.json
+set "CUDA_VISIBLE_DEVICES=GPU-b48de894-88e9-a1a3-282a-223dbf11faf6"
+src-tauri\binaries\node-x86_64-pc-windows-msvc.exe scripts\byom-gateway-live.mjs --model <portable-build-output> --copy --embeddings --retrieval dataset.json
+```
+
+The runner sends the 5,183 full-corpus title-plus-abstract documents through
+Flint's gateway in batches of at most 32, truncating only the two documents
+above Flint's 8,192-character admission limit. It evaluates all 300 judged
+test queries (339 relevance judgments), each prefixed with the recorded
+retrieval instruction, against normalized document vectors using cosine
+similarity, Recall@10, and nDCG@10. Its separate IPC/gateway smoke call checks
+vector agreement before the ranking run. Neither equal dimensions nor a
+successful smoke request substitutes for a ranked-retrieval measurement.
+
+The portable 12-file replay returned 1,024-component vectors from IPC and
+gateway with cosine agreement above 0.999999. On the full SciFact corpus and
+all judged test queries, gateway embedding retrieval reached **Recall@10
+0.83489** and **nDCG@10 0.70395**. The source hashes were unchanged; removal
+and graceful sidecar shutdown were confirmed. The run did not restart the
+sidecar: a separate copy/restart attempt exited with native Windows access
+violation `3221225477` during accelerator registration after restart. The
+active execution provider was still not reported, and this result does not
+establish the provenance or quality of the separately cached catalog artifact,
+cross-host reproducibility, or full MTEB performance.
+
+Continue 2.0.0 requests `encoding_format: base64` for OpenAI embeddings. The
+local-model gateway previously rejected that request with HTTP 400, so no
+vectors were stored. With float32 little-endian base64 encoding supported,
+an isolated Continue profile indexed two synthetic documents through this
+portable BYOM model on GPU 1. The paired request returned two 1,024-component
+vectors; the two persisted `lance_db_cache` rows each held 1,024 components,
+and their float32 SHA-256 digests matched the respective HTTP response bytes
+exactly (`1778e9e7228c589241528f7638496cc43dcea88ff7394955cf3cb9d0759c930c`
+and `d43959bff22365456d21da6f9e8c28d45900d5f8fd2f65630baffafa74ca21ad`;
+the JSON request body SHA-256 was
+`7eee83d9c588912a861e18fce9fd0f86a94803734cdff1841cc20edfdb685107`).
+The index lock was released and sidecar shutdown was confirmed.
+This proves the local BYOM path, not the previously observed 256-component
+rows from the separately cached catalog variant; that discrepancy still
+needs a paired capture for the cached artifact.

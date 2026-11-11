@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { evaluateRetrieval } from './retrieval-quality.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ALIAS = 'flint-byom-live';
@@ -19,12 +20,16 @@ const PROMPT = 'What is 6 times 7? Reply with one short sentence.';
 const EMBEDDING_INPUTS = ['A cat rests on a windowsill.', 'A bicycle needs a new chain.'];
 
 function parseArgs(argv) {
-  const args = { model: null, selfTest: false, copy: false, restart: false, embeddings: false };
+  const args = { model: null, selfTest: false, copy: false, restart: false, embeddings: false, retrieval: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
     else if (argv[i] === '--copy') args.copy = true;
     else if (argv[i] === '--restart') args.restart = true;
     else if (argv[i] === '--embeddings') args.embeddings = true;
+    else if (argv[i] === '--retrieval') {
+      args.retrieval = argv[++i];
+      if (!args.retrieval || args.retrieval.startsWith('--')) throw new Error('--retrieval requires a JSON dataset path.');
+    }
     else if (argv[i] === '--model') {
       const model = argv[++i];
       if (!model || model.startsWith('--')) throw new Error('--model requires a folder path.');
@@ -32,6 +37,7 @@ function parseArgs(argv) {
     }
     else throw new Error(`Unknown argument: ${argv[i]}`);
   }
+  if (args.retrieval && !args.embeddings) throw new Error('--retrieval requires --embeddings.');
   return args;
 }
 
@@ -269,7 +275,7 @@ async function complete(endpoint, body, stream = false) {
   return { text, done };
 }
 
-async function run(modelPath, { copy = false, restart = false, embeddings = false } = {}) {
+async function run(modelPath, { copy = false, restart = false, embeddings = false, retrieval = null } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
   }
@@ -297,6 +303,7 @@ async function run(modelPath, { copy = false, restart = false, embeddings = fals
     sourceFileCount: 0,
     ipc: null,
     gateway: null,
+    retrieval: null,
     error: null,
     cleanupError: null,
     cleanupForced: false,
@@ -422,6 +429,14 @@ async function run(modelPath, { copy = false, restart = false, embeddings = fals
         dimensions: gatewayVectors[0].length,
         ipcCosine: agreement,
       };
+      if (retrieval) {
+        report.phase = 'retrieval quality';
+        report.retrieval = await evaluateRetrieval(endpoint, modelAlias, retrieval, (progress) => {
+          if (progress.completed % 320 === 0 || progress.completed === progress.total) {
+            console.error(`Retrieval ${progress.kind}: ${progress.completed}/${progress.total}`);
+          }
+        });
+      }
     } else {
       const request = { model: modelAlias, messages: prompt, max_tokens: 32 };
       const buffered = await complete(endpoint, request);
@@ -476,13 +491,15 @@ async function main() {
     assert.equal(parseArgs(['--model', 'model', '--copy']).copy, true);
     assert.equal(parseArgs(['--model', 'model', '--restart']).restart, true);
     assert.equal(parseArgs(['--model', 'model', '--embeddings']).embeddings, true);
+    assert.equal(parseArgs(['--model', 'model', '--embeddings', '--retrieval', 'dataset.json']).retrieval, 'dataset.json');
+    assert.throws(() => parseArgs(['--model', 'model', '--retrieval', 'dataset.json']), /requires --embeddings/);
     assert.throws(() => parseArgs(['--model']), /requires a folder/);
     assert.throws(() => parseArgs(['--unexpected']), /Unknown argument/);
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings]');
-  const report = await run(args.model, { copy: args.copy, restart: args.restart, embeddings: args.embeddings });
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>]');
+  const report = await run(args.model, { copy: args.copy, restart: args.restart, embeddings: args.embeddings, retrieval: args.retrieval });
   console.log(JSON.stringify(report, null, 2));
   if (report.error) process.exitCode = 2;
 }
