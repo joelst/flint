@@ -10,6 +10,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import fs from 'node:fs';
+import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -267,7 +268,7 @@ describe('BYOM link', () => {
     expect(fs.readdirSync(src).sort()).toEqual(before);
   });
 
-  it.skipIf(!hasNativeSdk)('refuses to load a linked registration while its source is missing', async () => {
+  it.skipIf(!hasNativeSdk)('does not serve a linked registration while its source is missing', async () => {
     const src = track(makeSourceRepo({ nested: false }));
     const alias = 'temporarily-missing-link';
     fs.writeFileSync(
@@ -279,6 +280,7 @@ describe('BYOM link', () => {
 
     const moved = `${src}-hidden`;
     fs.renameSync(src, moved);
+    let serviceStarted = false;
     try {
       const listed = await send('listModels');
       expect(listed.ok, JSON.stringify(listed)).toBe(true);
@@ -290,8 +292,48 @@ describe('BYOM link', () => {
       const load = await send('load', { alias });
       expect(load.ok).toBeFalsy();
       expect(String(load.error)).toMatch(/not cached|not found|does not exist|missing|ENOENT/i);
+
+      const reservation = createServer();
+      await new Promise<void>((resolve, reject) => {
+        reservation.once('error', reject).listen(0, '127.0.0.1', resolve);
+      });
+      const address = reservation.address();
+      await new Promise<void>((resolve, reject) => {
+        reservation.close((error) => error ? reject(error) : resolve());
+      });
+      if (!address || typeof address === 'string') throw new Error('No loopback port available.');
+      const started = await send('startService', {
+        port: address.port,
+        bindAddress: '127.0.0.1',
+        gateway: true,
+      });
+      expect(started.ok, JSON.stringify(started)).toBe(true);
+      serviceStarted = true;
+      const endpoint = (await send('getEndpoint')).endpoint;
+      expect(endpoint).toBeTypeOf('string');
+      const models = await fetch(`${endpoint}/models`, { signal: AbortSignal.timeout(30000) });
+      expect(models.ok).toBe(true);
+      expect((await models.json()).data.some((row: any) => row.parent === alias)).toBe(false);
+      const chat = await fetch(`${endpoint}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: alias,
+          messages: [{ role: 'user', content: 'hello' }],
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+      expect(chat.status).toBe(404);
+      await chat.text();
     } finally {
-      fs.renameSync(moved, src);
+      try {
+        if (serviceStarted) {
+          const stopped = await send('stopService');
+          expect(stopped.ok, JSON.stringify(stopped)).toBe(true);
+        }
+      } finally {
+        fs.renameSync(moved, src);
+      }
     }
 
     const deleted = await send('deleteModel', { alias });

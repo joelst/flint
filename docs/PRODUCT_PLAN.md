@@ -358,7 +358,8 @@ That failure's phase and cause were not captured, so restart stability remains
 an open gate rather than a clean qualification.
 A real SDK local registration of a synthetic linked folder was marked uncached
 in the model list when its source was temporarily moved. Loading its alias
-returned an explicit admission error. After restoring the source,
+returned an explicit admission error; gateway discovery omitted it and an
+alias chat request returned 404 without autoload. After restoring the source,
 deletion removed the junction without deleting the source. This checks the
 missing-source admission and ownership boundary, not real-model inference.
 An isolated sidecar with GPU visibility restricted to the RTX 4080 on physical
