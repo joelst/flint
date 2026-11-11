@@ -309,18 +309,11 @@ export function silentWav() {
 
 async function disconnectStream(base, model, timeoutMs) {
   const controller = new AbortController();
-  let settled = false;
   const pending = fetch(`${base}/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: chatBody(model, [{ role: 'user', content: 'Keep writing until stopped.' }], { stream: true, max_tokens: 64 }),
     signal: controller.signal,
-  }).then((res) => {
-    settled = true;
-    return res;
-  }, (error) => {
-    settled = true;
-    throw error;
   });
   const started = await Promise.race([
     pending.then((res) => ({ kind: 'headers', res })).catch((error) => ({ kind: 'error', error })),
@@ -344,12 +337,33 @@ async function disconnectStream(base, model, timeoutMs) {
     controller.abort();
     return { ok: false, detail: 'Streaming response had no body.' };
   }
-  const read = reader.read().then(() => 'read', () => 'rejected');
-  await Promise.race([read, new Promise((resolve) => setTimeout(resolve, 2000))]);
+  const read = reader.read();
+  const first = await Promise.race([
+    read.then(
+      (result) => ({ kind: result.done ? 'ended' : 'chunk' }),
+      (error) => ({ kind: 'error', error }),
+    ),
+    new Promise((resolve) => setTimeout(() => resolve({ kind: 'pending' }), 2000)),
+  ]);
+  if (first.kind === 'ended' || first.kind === 'error') {
+    controller.abort();
+    try { await reader.cancel(); } catch { /* the body has already ended */ }
+    return {
+      ok: false,
+      detail: first.kind === 'ended'
+        ? 'Streaming response ended before the disconnect.'
+        : `Streaming response failed before the disconnect: ${first.error?.message ?? String(first.error)}`,
+    };
+  }
+  const drain = async () => {
+    let result = first.kind === 'pending' ? await read : await reader.read();
+    while (!result.done) result = await reader.read();
+  };
+  const completion = drain().then(() => 'settled', () => 'settled');
   controller.abort();
   const outcome = await Promise.race([
-    read.then(() => 'settled'),
-    new Promise((resolve) => setTimeout(() => resolve(settled ? 'settled' : 'timeout'), 5000)),
+    completion,
+    new Promise((resolve) => setTimeout(() => resolve('timeout'), 5000)),
   ]);
   try { await reader.cancel(); } catch { /* the abort already owns the body */ }
   return {
@@ -534,9 +548,6 @@ export async function runOpenAiLive(options) {
     ));
   }
 
-  const disconnected = await disconnectStream(base, model, timeoutMs);
-  checks.push(check('disconnect', true, disconnected.ok, disconnected.detail));
-
   if (options.embedModel) {
     const embedded = await readResponse(`${base}/embeddings`, {
       method: 'POST',
@@ -581,6 +592,9 @@ export async function runOpenAiLive(options) {
     responses.status === 200 && responses.json && typeof responses.json === 'object',
     `POST /v1/responses HTTP ${responses.status}.`,
   ));
+
+  const disconnected = await disconnectStream(base, model, timeoutMs);
+  checks.push(check('disconnect', true, disconnected.ok, disconnected.detail));
 
   report.requiredOk = checks.filter((item) => item.required).every((item) => item.ok);
   return report;

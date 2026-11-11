@@ -323,11 +323,11 @@ commands and results. Keep model weights and prompt bodies out of the repo.
 Store repeatable measurements with the existing spike evidence; keep this plan
 for remaining gates, not a running history.
 
-The live runner must make an absent requested model, missing required usage,
-malformed/absent tool call, or absent tool-result turn fail the relevant gate.
-Its current optional `model-listed`/`usage` checks and HTTP-only tool success
-are not sufficient. Run disconnect last, after all functional probes; a client
-abort proves neither native quiescence nor released memory.
+The live runner requires the requested model in the listing and valid usage,
+and with `--require-tools` requires a well-formed tool call and a tool-result
+turn followed by an answer without another tool call. Run disconnect last,
+after all functional probes; a client abort proves neither native quiescence
+nor released memory.
 
 | Qualification | Required checks |
 |---|---|

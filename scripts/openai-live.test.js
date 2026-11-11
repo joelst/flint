@@ -13,7 +13,7 @@ function jsonResponse(status, value) {
   };
 }
 
-function sseResponse(value) {
+function sseResponse(value, read = async () => ({ done: false, value: new Uint8Array([1]) })) {
   return {
     status: 200,
     ok: true,
@@ -21,7 +21,7 @@ function sseResponse(value) {
     text: async () => value,
     body: {
       getReader: () => ({
-        read: async () => ({ done: false, value: new Uint8Array([1]) }),
+        read,
         cancel: async () => {},
       }),
     },
@@ -62,7 +62,13 @@ function toolStream(argumentsText = '{"color":"blue"}') {
   ].join('\n');
 }
 
-function installGateway({ listed = true, usage = true, toolArguments, finalToolCalls = [] } = {}) {
+function installGateway({
+  listed = true,
+  usage = true,
+  toolArguments,
+  finalToolCalls = [],
+  disconnectRead,
+} = {}) {
   const requests = [];
   vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
     const target = String(url);
@@ -74,6 +80,8 @@ function installGateway({ listed = true, usage = true, toolArguments, finalToolC
     }
     if (target.endsWith(`/models/${MODEL}`)) return jsonResponse(404, { error: { message: 'not found' } });
     if (target.endsWith('/responses')) return jsonResponse(404, { error: { message: 'not supported' } });
+    if (target.endsWith('/embeddings')) return jsonResponse(200, { data: [{ embedding: [0.1, 0.2] }] });
+    if (target.endsWith('/audio/transcriptions')) return jsonResponse(200, { text: '' });
     if (!target.endsWith('/chat/completions')) throw new Error(`Unexpected request: ${target}`);
 
     const body = JSON.parse(init.body);
@@ -85,7 +93,16 @@ function installGateway({ listed = true, usage = true, toolArguments, finalToolC
       return sseResponse(toolStream(toolArguments));
     }
     if (body.stream && latest?.content === 'Keep writing until stopped.') {
-      return sseResponse('data: {"choices":[{"delta":{"content":"working"}}]}\n\n');
+      let reads = 0;
+      return sseResponse('data: {"choices":[{"delta":{"content":"working"}}]}\n\n', () => {
+        if (reads++ === 0) {
+          return disconnectRead?.() ?? Promise.resolve({ done: false, value: new Uint8Array([1]) });
+        }
+        return new Promise((resolve) => {
+          if (init.signal.aborted) resolve({ done: true });
+          else init.signal.addEventListener('abort', () => resolve({ done: true }), { once: true });
+        });
+      });
     }
     if (body.stream) {
       return sseResponse(`data: ${JSON.stringify({
@@ -174,6 +191,42 @@ describe('openai-live qualification gates', () => {
 
     expect(check(report, 'tools')).toMatchObject({ required: true, ok: true });
     expect(check(report, 'tool-boundary')).toMatchObject({ required: true, ok: false });
+    expect(report.requiredOk).toBe(false);
+  });
+
+  it('runs disconnect after all optional probes', async () => {
+    installGateway();
+    const report = await runOpenAiLive({
+      base: 'http://127.0.0.1:5272/v1',
+      model: MODEL,
+      embedModel: 'embed-control',
+      speechModel: 'speech-control',
+      timeoutMs: 1000,
+    });
+
+    expect(report.checks.at(-1).name).toBe('disconnect');
+    expect(report.checks.slice(-4).map((item) => item.name))
+      .toEqual(['embeddings', 'speech', 'responses', 'disconnect']);
+    const requests = vi.mocked(fetch).mock.calls;
+    expect(requests.slice(-4, -1).map(([url]) => String(url)))
+      .toEqual([
+        'http://127.0.0.1:5272/v1/embeddings',
+        'http://127.0.0.1:5272/v1/audio/transcriptions',
+        'http://127.0.0.1:5272/v1/responses',
+      ]);
+    expect(JSON.parse(requests.at(-1)[1].body).messages.at(-1).content)
+      .toBe('Keep writing until stopped.');
+  });
+
+  it('does not count an already-ended stream as a successful disconnect', async () => {
+    installGateway({ disconnectRead: async () => ({ done: true }) });
+    const report = await runOpenAiLive({
+      base: 'http://127.0.0.1:5272/v1',
+      model: MODEL,
+      timeoutMs: 1000,
+    });
+
+    expect(check(report, 'disconnect')).toMatchObject({ required: true, ok: false });
     expect(report.requiredOk).toBe(false);
   });
 });
