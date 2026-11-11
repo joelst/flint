@@ -76,8 +76,17 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       [Qwen/Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/tree/97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3)
       is pinned to that Hub revision, and Flint pins SDK/core 2.4.0. Available
       metadata does not tie the registry export to that source commit, so a
-      reproducible source-pinned BYOM recipe and Continue indexer verification
-      remain open. The public
+      reproducible source-pinned BYOM recipe remains open. Continue source
+      review at commit
+      [`5522c6f`](https://github.com/continuedev/continue/commit/5522c6f44ca0ac3528b37244818fbfa39b5af470)
+      indicates local indexing does not require a Continue account: the VS Code
+      adapter provides local IDE settings with an empty user token, and the
+      indexer builds when an embed-role model and an indexing context provider
+      are configured. The codebase provider requests embeddings, full-text, and
+      chunk indexes; remote chunk-cache lookup is optional and missing chunks
+      are computed locally. This makes a local OpenAI-compatible Flint endpoint
+      feasible in principle, but the extension is not installed and no index
+      has been built, so Continue indexer verification remains open. The public
       [onnx-community ONNX export](https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/tree/c25a394dd583836952667c12f008335071b3f43d)
       explicitly targets Transformers.js and is not a tested ONNX Runtime GenAI
       folder, so it does not close the recipe gate. The upstream
