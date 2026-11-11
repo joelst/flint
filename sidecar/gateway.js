@@ -231,6 +231,10 @@ export function createGateway (options) {
   }
 
   const server = http.createServer({ joinDuplicateHeaders: false }, (req, res) => {
+    res.once('finish', () => {
+      // The socket becomes idle after finish; shutdown's first idle sweep ran earlier.
+      if (closePromise) setImmediate(() => server.closeIdleConnections?.());
+    });
     handleRequest(req, res).catch(err => {
       log('warn', `Gateway request error: ${err?.message ?? err}`);
       if (!res.headersSent) {
