@@ -77,7 +77,10 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       is pinned to that Hub revision, and Flint pins SDK/core 2.4.0. Available
       metadata does not tie the registry export to that source commit, so a
       reproducible source-pinned BYOM recipe and Continue indexer verification
-      remain open.
+      remain open. The public
+      [onnx-community ONNX export](https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/tree/c25a394dd583836952667c12f008335071b3f43d)
+      explicitly targets Transformers.js and is not a tested ONNX Runtime GenAI
+      folder, so it does not close the recipe gate.
 
 ## Dependencies
 
