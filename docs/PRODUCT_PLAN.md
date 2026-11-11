@@ -431,7 +431,9 @@ closing markers. On cached `Phi-4-mini-instruct-cuda-gpu:5`, the same direct
 adapter returned the enum-constrained `pick_color({"color":"blue"})` call in
 both streaming and non-streaming requests, with `finish_reason: tool_calls` and
 a call ID; the non-streaming response included usage. A tool-result follow-up
-returned "The tool confirmed the color blue." These direct sessions do not
+returned "The tool confirmed the color blue." On that same model, JSON-object
+response format returned `{"ok": true}`, and `max_tokens: 1` returned
+`finish_reason: length` with one completion token. These direct sessions do not
 establish sidecar IPC or gateway behavior. A direct
 `createSessionChatClient` probe on
 `qwen3-vl-2b-instruct-cuda-gpu:2`, with the CUDA runtime prepared and inference
