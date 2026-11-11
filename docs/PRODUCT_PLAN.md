@@ -352,8 +352,8 @@ include cancellation certainty. The uncached 131-MB
 `openai-whisper-tiny-generic-cpu:4` download was cancelled after positive native
 progress; cancellation settled, its partial marker and metadata files were
 removed, the inventory no longer reports the entry, and the variant remained
-uncached. Its now-empty variant directory remains. No complete model weights
-were downloaded.
+uncached. The now-empty variant directory was removed during probe cleanup.
+No complete model weights were downloaded.
 The SDK/core 2.4.0 catalog also exposes `qwen3-embedding-0.6b` and
 `qwen3-embedding-8b`; their cached variants are CUDA-only. CUDA EP assets exist
 in the local cache. Explicit CUDA registration succeeded; the cached Qwen3
