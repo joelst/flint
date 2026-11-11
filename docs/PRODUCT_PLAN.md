@@ -416,7 +416,8 @@ than a success-shaped response. With `parallel_tool_calls: false` and
 `tool_choice: required`, a prompt requesting two distinct functions returned
 one tool call, not two.
 The same variant returned a `completed` `/v1/responses` result with string
-`output_text`, and a separate required-tool request returned one
+`output_text`; a streaming request returned `text/event-stream` and a
+`response.completed` event. A separate required-tool request returned one
 `function_call` for `pick_color` with JSON arguments.
 Package revision/license provenance, broader lifecycle and provider checks,
 additional tool-capable model families beyond Qwen2.5/Qwen3, the 2.2.0–2.3.1
