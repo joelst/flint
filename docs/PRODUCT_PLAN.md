@@ -43,8 +43,9 @@ TensorRT. The 2.4.0 JavaScript catalog does not expose a minimum SDK version,
 so Flint does not add a second download filter. Task `coding` stays text-only
 chat, and the shared-host opt-in stays off unless the user turns it on.
 Ranking, typed decisions, and the deprecated OpenAI client constructors stay
-out. Llama CPU copy/link chat is qualified; Whisper, Parakeet, GPU inference,
-broader lifecycle, and installed-app checks are still open.
+out. Llama CPU copy/link chat is qualified. Whisper URI transcription and the
+expected Parakeet pre-load refusal are probed on 2.4.0; normal all-provider GPU
+startup, broader lifecycle, and installed-app checks remain open.
 
 **Scope:** Qualify every existing Flint model operation on 2.4.0: discovery,
 download, import/link, load/unload/delete, Playground chat/vision/tools,
@@ -235,10 +236,10 @@ landed after 2.1.0:
 - **2.3.0 defaults, speech, and cache ownership.** An explicit Flint
   generation setting wins over an SDK chat default. An omitted setting uses
   the pinned SDK default and stays visible as that default. The cached Whisper
-  Tiny CUDA variant passed a real `transcribeAudio` sidecar request on 2.4.0;
-  keep the current Parakeet refusal until its probe records a pass or a
-  still-unsupported result. Do not claim native word timestamps. 2.3.0 adds a
-  shared model cache across Foundry Local SDKs.
+  Tiny CUDA variant passed a real `transcribeAudio` sidecar request on 2.4.0.
+  Parakeet was refused before loading on this pin and remains unsupported.
+  Do not claim native word timestamps. 2.3.0 adds a shared model cache across
+  Foundry Local SDKs.
   Flint keeps `~/.flint` and does not opt into another product's cache.
   An isolated sidecar init and cache-inventory probe with a seeded
   `~/.foundry/cache/models` marker left it unchanged and reported no Flint
@@ -399,6 +400,21 @@ streaming request emitted no text frames; its completed tool call arrived in
 the terminal result. The pool reported `inFlight: 0`, and the model was
 unloaded before shutdown. This qualifies the real sidecar ChatSession IPC path
 for this model, not normal all-provider startup or native cancellation.
+A real SDK 2.4.0 sidecar run on cached
+`qwen3-vl-2b-instruct-cuda-gpu:2`, using the same CUDA-only discovery filter and
+physical GPU 1, passed a synthetic PNG containing a green square through the
+ChatSession image path over IPC; the response identified it as “green” with
+valid usage. The pool reported `inFlight: 0`; the model was unloaded and the
+sidecar exited cleanly. This qualifies IPC vision for this model, not gateway
+vision, packaged-app behavior, or normal all-provider startup.
+A Continue 2.0.0 codebase-indexing run against the real SDK/core 2.4.0 gateway
+used cached `qwen3-embedding-0.6b` variant
+`qwen3-embedding-0.6b-cuda-gpu:1` on physical GPU 1. It completed 101
+`/v1/embeddings` requests, populated 3,179 vector-cache rows for 782 indexed
+paths, and ended with pool `inFlight: 0` and no indexing lock. This verifies
+Continue's configured `embed` role and `codebase` provider against Flint's real
+local endpoint; it does not qualify normal all-provider startup, retrieval
+quality, packaged-app behavior, or a source-pinned BYOM recipe.
 The SDK/core 2.4.0 catalog also exposes `qwen3-embedding-0.6b` and
 `qwen3-embedding-8b`; their cached variants are CUDA-only. CUDA EP assets exist
 in the local cache. Explicit CUDA registration succeeded; the cached Qwen3
@@ -636,7 +652,17 @@ Embedding-model path, not RAG.
 - BYOM import detects embedding folders and does not require a chat prompt template.
 - Sidecar `embedTexts` uses the `EmbeddingsSession` adapter (falling back to `createEmbeddingClient()` on SDK builds without it) with the same pool inFlight fencing as chat. Batches are bounded (32 strings, 8k chars each).
 - Diagnostics self-test **blocks** embeddings when no embedding model is present; **passes** when `POST /v1/embeddings` returns a numeric vector.
-- One recorded BYOM recipe is still a spike: do not fake a Continue indexer verification.
+- Continue 2.0.0 indexing works without an account when its VS Code adapter
+  supplies local IDE settings and an `embed`-role model plus an indexing
+  context provider are configured. A synthetic-vector mock run sent 2,167
+  inputs in 18 batches and persisted 2,167 embedding-cache rows. A separate
+  run against Flint's real SDK/core 2.4.0 gateway used cached
+  `qwen3-embedding-0.6b-cuda-gpu:1` on physical GPU 1; it completed 101
+  `/v1/embeddings` requests, populated 3,179 vector-cache rows across 782
+  indexed paths, and ended with `inFlight: 0`. The real run used a CUDA-only
+  provider filter and an isolated VS Code profile. This verifies actual
+  Continue codebase indexing through Flint, not normal all-provider startup,
+  retrieval quality, packaged-app behavior, or a source-pinned BYOM recipe.
 
 ### SDK 2.x session migration
 
@@ -655,9 +681,9 @@ constructors while keeping the existing IPC and gateway contracts.
   models and raw 16 kHz mono PCM through `ItemQueue` for Nemotron. Refuse
   Parakeet when its unsupported family is determinable before loading, defer
   ambiguous aliases to the runtime-selected variant, and never retry through
-  deprecated `AudioClient` or HTTP. 2.3.0 claims Parakeet and Whisper fixes.
-  Re-probe both on the 2.4.0 pin before dropping the Parakeet refusal or
-  treating the 2.0.1 URI shape as still valid.
+  deprecated `AudioClient` or HTTP. The Whisper URI path passed and Parakeet
+  was refused before loading on the 2.4.0 pin; keep the refusal until a
+  supported Parakeet path passes on a later pin.
 - **Prompt metadata:** keep Flint's BYOM template validation independent of SDK
   `PromptTemplate` types.
 

@@ -92,12 +92,18 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       indexer builds when an embed-role model and an indexing context provider
       are configured. The codebase provider requests embeddings, full-text, and
       chunk indexes; remote chunk-cache lookup is optional and missing chunks
-      are computed locally. This makes a local OpenAI-compatible Flint endpoint
-      feasible in principle. A temporary VS Code Insiders profile installed
-      Continue 2.0.0, but the extension host activated only built-ins and the
-      loopback embeddings endpoint received no requests; no codebase index has
-      been built, so Continue indexer verification remains open. The public
-      [onnx-community ONNX export](https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/tree/c25a394dd583836952667c12f008335071b3f43d)
+      are computed locally. An isolated VS Code Insiders profile running
+      Continue 2.0.0 completed a codebase index through Flint's real SDK/core
+      2.4.0 gateway using the `codebase` context provider and an explicit
+      `embed`-role model. With cached
+      `qwen3-embedding-0.6b-cuda-gpu:1` on physical GPU 1 and a CUDA-only
+      provider filter, it sent 101 `/v1/embeddings` requests and populated
+      3,179 vector-cache rows across 782 indexed paths; pool `inFlight` returned
+      to zero and the indexing lock was released. This verifies Continue
+      indexing through Flint's local endpoint, not normal all-provider
+      startup, retrieval quality, or packaged-app behavior. Model-export
+      provenance and a reproducible source-pinned BYOM recipe remain open.
+      The [onnx-community ONNX export](https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/tree/c25a394dd583836952667c12f008335071b3f43d)
       explicitly targets Transformers.js and is not a tested ONNX Runtime GenAI
       folder, so it does not close the recipe gate. The upstream
       [0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/discussions/18)
