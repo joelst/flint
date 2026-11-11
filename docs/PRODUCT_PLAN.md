@@ -320,10 +320,24 @@ registration, IPC chat with HTTP off, gateway discovery, buffered/streaming chat
 unload/delete, and confirmed graceful shutdown. All seven original source files
 and all eight metadata-bearing source files retained their hashes. PR CI still
 needs a fresh run; local Windows results do not prove the Linux/macOS jobs pass.
-Package revision/license provenance, broader lifecycle and provider checks,
-tool-capable-model behavior, the 2.2.0–2.3.1 gates on this pin, and installed-app
-qualification remain open. Flash-Next conversion or architecture enablement
-is not a release gate.
+On the cached Qwen2.5 0.5B CPU variant, SDK and core 2.4.0 real-model probes
+settled IPC stream cancellation 23 ms after acknowledgement with no later
+deltas; a concurrent canceled request emitted no deltas while the first had
+emitted 36. A buffered gateway request aborted while pending (540 ms) returned
+`AbortError`; the first pool snapshot, 10.1 seconds later, showed `inFlight: 0`.
+A separate 256-token gateway request completed in 21.6 seconds. These are
+caller/lease observations, not proof of native quiescence; IPC replies did not
+include cancellation certainty. No model weights were downloaded, so native
+download cancellation and partial-cache cleanup remain unqualified.
+The same model declares tool support, and strict `openai-live --require-tools`
+passed all required checks when given its exact listed variant id, including
+usage, streamed tool call, tool-result follow-up, tool-free final answer, and
+disconnect. The friendly alias also passed inference/tool checks but was not a
+`/v1/models` row; SDK 2.4.0 returned full versioned variant ids without a
+`parent` alias in this probe. Package revision/license provenance, broader
+lifecycle and provider checks, additional tool-capable models, the 2.2.0–2.3.1
+gates on this pin, and installed-app qualification remain open. Flash-Next
+conversion or architecture enablement is not a release gate.
 
 Do not publish 0.11.0 until the qualification gates above pass. Keep completed
 work in reviewed changesets; do not merge unrelated accumulated changesets as
