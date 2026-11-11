@@ -422,7 +422,12 @@ Strict `openai-live --require-tools` CUDA probes for SmolLM3 3B, Ministral 3
 3B, and OLMo 3 7B also passed ordinary chat, usage, streaming, and disconnect,
 but each lacked `[DONE]` and a completed tool call; the cause was not isolated.
 OLMo 3's optional `/v1/responses` check returned HTTP 500 with a CUDA `Zero`
-invalid-argument diagnostic. A direct `createSessionChatClient` probe on
+invalid-argument diagnostic. A direct SDK 2.4.0 `createSessionChatClient` probe
+on cached `smollm3-3b-cuda-gpu:1`, with only CUDA requested for registration and
+inference restricted to the RTX 4080 by UUID, failed before generation:
+`ChatSession` requires model-published structured-tool opening and closing
+markers. No tool call or follow-up was produced. A direct
+`createSessionChatClient` probe on
 `qwen3-vl-2b-instruct-cuda-gpu:2`, with the CUDA runtime prepared and inference
 restricted to physical GPU 1, passed native ChatSession image input: an
 in-memory synthetic PNG containing a green square was identified as `Green`.
