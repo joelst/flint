@@ -405,6 +405,14 @@ tool call; its optional `/v1/responses` check returned HTTP 500 with a CUDA
 `invalid argument` diagnostic, whose cause was not isolated. The friendly alias
 also passed inference/tool checks but was not a `/v1/models` row; SDK 2.4.0
 returned full versioned variant ids without a `parent` alias in this probe.
+Gemma 4 E2B CUDA (`gemma-4-e2b-it-cuda-gpu:3`) passed ordinary chat, usage,
+streaming, disconnect, and `/v1/responses`; although catalog metadata declares
+tool support, a required function call was rejected because structured tools
+need model-published opening and closing markers. Mistral Nemo 12B CUDA passed
+ordinary chat, usage, streaming, and disconnect, but its strict tool stream
+ended without `[DONE]`; its optional `/v1/responses` check returned HTTP 500
+with a CUDA `Zero` invalid-argument diagnostic. Neither is positive evidence
+for structured tool calling outside the Qwen variants.
 On the Qwen2.5 0.5B CUDA variant, the direct gateway also returned valid JSON
 for `response_format.type=json_object`, honored `tool_choice=required`, and
 reported `finish_reason: length` at `max_tokens: 1` with one completion token.
