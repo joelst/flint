@@ -1,5 +1,12 @@
 # Flint Changelog
 
+## 0.10.1
+
+### Patch Changes
+
+- 327492c: Explain CUDA allocator load failures with recovery guidance while preserving the original runtime error.
+- 3c16b8e: Add a CUDA GPU setting that limits CUDA to one NVIDIA GPU, working around CUDA allocator failures on multi-GPU machines.
+
 ## 0.10.0
 
 ### Minor Changes
