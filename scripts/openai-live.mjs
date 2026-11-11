@@ -507,7 +507,7 @@ export async function runOpenAiLive(options) {
     body: chatBody(
       model,
       [{ role: 'user', content: TOOL_PROMPT }],
-      { stream: true, tools: COLOR_TOOL, tool_choice: 'auto' },
+      { stream: true, tools: COLOR_TOOL, tool_choice: requireTools ? 'required' : 'auto' },
     ),
   }, timeoutMs);
   const parsedTools = parseSse(toolStream.text);

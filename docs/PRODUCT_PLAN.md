@@ -325,9 +325,10 @@ for remaining gates, not a running history.
 
 The live runner requires the requested model in the listing and valid usage,
 and with `--require-tools` requires a well-formed tool call and a tool-result
-turn followed by an answer without another tool call. Run disconnect last,
-after all functional probes; a client abort proves neither native quiescence
-nor released memory.
+turn followed by an answer without another tool call. The required tool probe
+uses `tool_choice: required` rather than leaving the call to model discretion.
+Run disconnect last, after all functional probes; a client abort proves neither
+native quiescence nor released memory.
 
 | Qualification | Required checks |
 |---|---|
@@ -348,6 +349,21 @@ registration, IPC chat with HTTP off, gateway discovery, buffered/streaming chat
 unload/delete, and confirmed graceful shutdown. All seven original source files
 and all eight metadata-bearing source files retained their hashes. PR CI still
 needs a fresh run; local Windows results do not prove the Linux/macOS jobs pass.
+An isolated sidecar with GPU visibility restricted to the RTX 4080 on physical
+GPU 1 completed normal, unfiltered provider registration: TensorRT-RTX, CUDA,
+and WebGPU registered with no failed providers. Cached Qwen2.5 0.5B and
+Phi-4 Mini CUDA variants each returned nonempty IPC and gateway chat answers.
+Both were advertised by their exact versioned variant ids; gateway chat also
+accepted their friendly aliases. The live runner passed its required checks
+against the advertised Qwen variant without tool qualification. On Phi-4 Mini,
+it passed required discovery, errors, chat, usage, streaming, forced tool call,
+tool-result follow-up, tool-free final answer, and client-disconnect checks.
+The model was explicitly unloaded before confirmed shutdown. Load reported
+`acceleration.active: null`, so registration and the CUDA variant name do not
+prove which provider executed inference. Phi's optional `GET /v1/models/{id}`
+returned 404 and `POST /v1/responses` returned 500; neither endpoint is
+qualified. These isolated runs do not prove installed-app operation or native
+quiescence after client abort.
 On the cached Qwen2.5 0.5B CPU variant, SDK and core 2.4.0 real-model probes
 settled IPC stream cancellation 23 ms after acknowledgement with no later
 deltas; a concurrent canceled request emitted no deltas while the first had

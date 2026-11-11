@@ -68,6 +68,7 @@ function installGateway({
   toolArguments,
   finalToolCalls = [],
   disconnectRead,
+  requireToolChoice = false,
 } = {}) {
   const requests = [];
   vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
@@ -90,6 +91,9 @@ function installGateway({
     }
     const latest = body.messages?.at(-1);
     if (body.stream && latest?.content === TOOL_PROMPT) {
+      if (requireToolChoice && body.tool_choice !== 'required') {
+        return sseResponse('data: {"choices":[{"delta":{"content":"answered without calling a tool"}}]}\n\ndata: [DONE]\n\n');
+      }
       return sseResponse(toolStream(toolArguments));
     }
     if (body.stream && latest?.content === 'Keep writing until stopped.') {
@@ -192,6 +196,20 @@ describe('openai-live qualification gates', () => {
     expect(check(report, 'tools')).toMatchObject({ required: true, ok: true });
     expect(check(report, 'tool-boundary')).toMatchObject({ required: true, ok: false });
     expect(report.requiredOk).toBe(false);
+  });
+
+  it('forces a tool call when tool qualification is required', async () => {
+    installGateway({ requireToolChoice: true });
+    const report = await runOpenAiLive({
+      base: 'http://127.0.0.1:5272/v1',
+      model: MODEL,
+      requireTools: true,
+      timeoutMs: 1000,
+    });
+
+    expect(check(report, 'tools')).toMatchObject({ required: true, ok: true });
+    expect(check(report, 'tool-boundary')).toMatchObject({ required: true, ok: true });
+    expect(report.requiredOk).toBe(true);
   });
 
   it('runs disconnect after all optional probes', async () => {
