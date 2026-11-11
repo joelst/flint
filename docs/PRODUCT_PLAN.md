@@ -415,6 +415,12 @@ paths, and ended with pool `inFlight: 0` and no indexing lock. This verifies
 Continue's configured `embed` role and `codebase` provider against Flint's real
 local endpoint; it does not qualify normal all-provider startup, retrieval
 quality, packaged-app behavior, or a source-pinned BYOM recipe.
+Inspection of the exact `v2.0.0-vscode` source shows `LanceDbIndex` persists
+the vectors returned by `ILLM.embed()` unchanged, and the OpenAI embedding path
+maps the response vectors without dimension slicing or a `dimensions` request
+field. This does not explain the earlier 256-component cache observation versus
+the separate 1,024-dimensional gateway response; no paired request/response and
+persisted-row capture exists, so do not claim dimensional compatibility yet.
 The SDK/core 2.4.0 catalog also exposes `qwen3-embedding-0.6b` and
 `qwen3-embedding-8b`; their cached variants are CUDA-only. CUDA EP assets exist
 in the local cache. Explicit CUDA registration succeeded; the cached Qwen3
