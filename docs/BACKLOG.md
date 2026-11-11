@@ -80,7 +80,13 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       remain open. The public
       [onnx-community ONNX export](https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/tree/c25a394dd583836952667c12f008335071b3f43d)
       explicitly targets Transformers.js and is not a tested ONNX Runtime GenAI
-      folder, so it does not close the recipe gate.
+      folder, so it does not close the recipe gate. The upstream
+      [0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/discussions/18)
+      and [8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B/discussions/13)
+      ONNX conversion discussions likewise show SBERT/Optimum exports, not
+      ONNX Runtime GenAI folders. The separate
+      [onnx-community/Qwen3-8B-ONNX](https://huggingface.co/onnx-community/Qwen3-8B-ONNX)
+      recipe is for the Qwen3-8B chat model, not its embedding variant.
 
 ## Dependencies
 
