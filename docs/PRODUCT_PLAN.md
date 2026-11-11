@@ -422,11 +422,17 @@ Strict `openai-live --require-tools` CUDA probes for SmolLM3 3B, Ministral 3
 3B, and OLMo 3 7B also passed ordinary chat, usage, streaming, and disconnect,
 but each lacked `[DONE]` and a completed tool call; the cause was not isolated.
 OLMo 3's optional `/v1/responses` check returned HTTP 500 with a CUDA `Zero`
-invalid-argument diagnostic. A direct SDK 2.4.0 `createSessionChatClient` probe
-on cached `smollm3-3b-cuda-gpu:1`, with only CUDA requested for registration and
-inference restricted to the RTX 4080 by UUID, failed before generation:
-`ChatSession` requires model-published structured-tool opening and closing
-markers. No tool call or follow-up was produced. A direct
+invalid-argument diagnostic. Direct SDK 2.4.0 `createSessionChatClient` probes
+on cached `smollm3-3b-cuda-gpu:1` and
+`ministral-3-3b-instruct-2512-cuda-gpu:2`, with only CUDA requested for
+registration and inference restricted to the RTX 4080 by UUID, failed before
+generation: `ChatSession` requires model-published structured-tool opening and
+closing markers. On cached `Phi-4-mini-instruct-cuda-gpu:5`, the same direct
+adapter returned the enum-constrained `pick_color({"color":"blue"})` call in
+both streaming and non-streaming requests, with `finish_reason: tool_calls` and
+a call ID; the non-streaming response included usage. A tool-result follow-up
+returned "The tool confirmed the color blue." These direct sessions do not
+establish sidecar IPC or gateway behavior. A direct
 `createSessionChatClient` probe on
 `qwen3-vl-2b-instruct-cuda-gpu:2`, with the CUDA runtime prepared and inference
 restricted to physical GPU 1, passed native ChatSession image input: an
