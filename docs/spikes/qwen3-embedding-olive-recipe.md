@@ -142,6 +142,20 @@ similarity, Recall@10, and nDCG@10. Its separate IPC/gateway smoke call checks
 vector agreement before the ranking run. Neither equal dimensions nor a
 successful smoke request substitutes for a ranked-retrieval measurement.
 
+For the separately cached public catalog artifact, use the same pinned dataset
+and evaluator without importing it as BYOM:
+
+```text
+set "CUDA_VISIBLE_DEVICES=GPU-b48de894-88e9-a1a3-282a-223dbf11faf6"
+src-tauri\binaries\node-x86_64-pc-windows-msvc.exe scripts\byom-gateway-live.mjs --model "%USERPROFILE%\.flint\cache\models\Microsoft\qwen3-embedding-0.6b-cuda-gpu-1\v1" --catalog-alias qwen3-embedding-0.6b --catalog-variant qwen3-embedding-0.6b-cuda-gpu:1 --embeddings --retrieval dataset.json
+```
+
+The runner copies only that cached variant into an isolated catalog cache,
+checks public catalog discovery and the exact loaded variant, then verifies
+source hashes and sidecar shutdown. The catalog-artifact measurement and its
+limitations are recorded in the
+[SDK release plan](../PRODUCT_PLAN.md#sdk-240-and-real-byom-shipping-plan).
+
 The portable 12-file replay returned 1,024-component vectors from IPC and
 gateway with cosine agreement above 0.999999. On the full SciFact corpus and
 all judged test queries, gateway embedding retrieval reached **Recall@10

@@ -496,7 +496,20 @@ The cached `config.json` has `quantization_config.embeds: true` and an
 Their `tokenizer.json`, `vocab.json`, and `merges.txt` match byte-for-byte,
 but the graphs and GenAI configs do not.
 This proves the cached artifact is not the measured portable export; it does
-not identify the cached graph's source revision or establish its retrieval score.
+not identify the cached graph's source revision. An isolated SDK/core 2.4.0
+sidecar copied this exact cached variant into its own catalog cache (without
+registering it as BYOM), discovered and loaded the public alias and exact
+variant, and evaluated the pinned SciFact corpus through Flint's gateway on
+physical GPU 1. Across 5,183 documents and 300 judged queries (339 judgments),
+its 1,024-component vectors reached **Recall@10 0.83256** and **nDCG@10
+0.70513**. The same evaluator and pinned inputs gave the separately built
+portable export 0.83489 and 0.70395, respectively; these are measurements of
+different graphs, not interchangeable scores or evidence of provider identity.
+The source's 12 file hashes were unchanged, IPC and gateway smoke vectors
+agreed, and graceful shutdown was confirmed. The cached artifact's provenance,
+active execution provider, and post-fix Continue persisted-vector parity
+remain unverified. Reproduction inputs and commands are in the
+[embedding recipe note](./spikes/qwen3-embedding-olive-recipe.md#retrieval-evaluation).
 With physical GPU 1 selected by UUID, an isolated sidecar's normal unfiltered
 registration reported TensorRT-RTX, CUDA, and WebGPU ready with no failed
 providers. The cached Qwen3 0.6B CUDA variant then returned two

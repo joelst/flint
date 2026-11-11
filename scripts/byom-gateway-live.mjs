@@ -20,7 +20,10 @@ const PROMPT = 'What is 6 times 7? Reply with one short sentence.';
 const EMBEDDING_INPUTS = ['A cat rests on a windowsill.', 'A bicycle needs a new chain.'];
 
 function parseArgs(argv) {
-  const args = { model: null, selfTest: false, copy: false, restart: false, embeddings: false, retrieval: null };
+  const args = {
+    model: null, selfTest: false, copy: false, restart: false, embeddings: false,
+    retrieval: null, catalogAlias: null, catalogVariant: null,
+  };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
     else if (argv[i] === '--copy') args.copy = true;
@@ -35,9 +38,23 @@ function parseArgs(argv) {
       if (!model || model.startsWith('--')) throw new Error('--model requires a folder path.');
       args.model = path.resolve(model);
     }
+    else if (argv[i] === '--catalog-alias' || argv[i] === '--catalog-variant') {
+      const option = argv[i];
+      const value = argv[++i];
+      if (!value || value.startsWith('--')) throw new Error(`${option} requires a value.`);
+      args[option === '--catalog-alias' ? 'catalogAlias' : 'catalogVariant'] = value;
+    }
     else throw new Error(`Unknown argument: ${argv[i]}`);
   }
   if (args.retrieval && !args.embeddings) throw new Error('--retrieval requires --embeddings.');
+  if (args.catalogAlias || args.catalogVariant) {
+    if (!args.catalogAlias || !args.catalogVariant) {
+      throw new Error('Catalog runs require both --catalog-alias and --catalog-variant.');
+    }
+    if (args.copy || args.restart || !args.embeddings) {
+      throw new Error('Catalog runs cannot copy or restart an import and require --embeddings.');
+    }
+  }
   return args;
 }
 
@@ -275,7 +292,22 @@ async function complete(endpoint, body, stream = false) {
   return { text, done };
 }
 
-async function run(modelPath, { copy = false, restart = false, embeddings = false, retrieval = null } = {}) {
+function catalogCacheTarget(modelPath, variantId, home, appName) {
+  const versionDir = path.basename(modelPath);
+  const variantDir = path.basename(path.dirname(modelPath));
+  if (path.basename(path.dirname(path.dirname(modelPath))) !== 'Microsoft'
+      || !/^v[1-9]\d*$/.test(versionDir)
+      || !variantDir.endsWith(`-${versionDir.slice(1)}`)
+      || `${variantDir.replace(/-(\d+)$/, '')}:${versionDir.slice(1)}` !== variantId) {
+    throw new Error('The cached catalog folder does not match the requested variant id.');
+  }
+  return path.join(home, `.${appName}`, 'cache', 'models', 'Microsoft', variantDir, versionDir);
+}
+
+async function run(modelPath, {
+  copy = false, restart = false, embeddings = false, retrieval = null,
+  catalogAlias = null, catalogVariant = null,
+} = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
   }
@@ -290,11 +322,12 @@ async function run(modelPath, { copy = false, restart = false, embeddings = fals
   const home = path.join(work, 'home');
   fs.mkdirSync(home, { recursive: true });
   const appName = 'flint-live';
-  const modelAlias = embeddings ? 'flint-byom-embedding-live' : ALIAS;
+  const modelAlias = catalogAlias || (embeddings ? 'flint-byom-embedding-live' : ALIAS);
   const stderrLines = [];
   const report = {
     modelPath,
-    mode: copy ? 'copy' : 'link',
+    mode: catalogAlias ? 'catalog-cache-copy' : (copy ? 'copy' : 'link'),
+    catalogVariant,
     task: embeddings ? 'embeddings' : 'chat',
     cudaDevice: process.env.CUDA_VISIBLE_DEVICES ?? null,
     restarted: false,
@@ -314,6 +347,11 @@ async function run(modelPath, { copy = false, restart = false, embeddings = fals
   try {
     sourceBefore = await snapshotFolder(modelPath);
     report.sourceFileCount = sourceBefore.length;
+    if (catalogAlias) {
+      const isolated = catalogCacheTarget(modelPath, catalogVariant, home, appName);
+      fs.mkdirSync(path.dirname(isolated), { recursive: true });
+      fs.cpSync(modelPath, isolated, { recursive: true, errorOnExist: true, force: false });
+    }
     sidecar = startSidecar(home, appName, stderrLines);
     await sidecar.ready;
     report.phase = 'first init';
@@ -323,19 +361,21 @@ async function run(modelPath, { copy = false, restart = false, embeddings = fals
     if (embeddings && !accelerators?.registeredEps?.includes('CUDAExecutionProvider')) {
       throw new Error('CUDA provider was not registered for the embedding qualification.');
     }
-    const addCommand = copy ? 'importModelFolder' : 'linkModelFolder';
-    report.phase = addCommand;
-    const added = assertReply(await sidecar.send(addCommand, {
-      folderPath: modelPath,
-      name: modelAlias,
-    }), addCommand).result;
-    if (added.registered !== true) {
-      throw new Error(`Local registration failed: ${added.registrationError || added.registrationTask || 'unknown reason'}`);
+    if (!catalogAlias) {
+      const addCommand = copy ? 'importModelFolder' : 'linkModelFolder';
+      report.phase = addCommand;
+      const added = assertReply(await sidecar.send(addCommand, {
+        folderPath: modelPath,
+        name: modelAlias,
+      }), addCommand).result;
+      if (added.registered !== true) {
+        throw new Error(`Local registration failed: ${added.registrationError || added.registrationTask || 'unknown reason'}`);
+      }
+      if (embeddings && added.registrationTask !== 'embeddings') {
+        throw new Error(`The imported embedding was registered as '${added.registrationTask}'.`);
+      }
+      linkedPath = copy ? added.path : added.linkPath;
     }
-    if (embeddings && added.registrationTask !== 'embeddings') {
-      throw new Error(`The imported embedding was registered as '${added.registrationTask}'.`);
-    }
-    linkedPath = copy ? added.path : added.linkPath;
 
     if (restart) {
       report.phase = 'pre-restart shutdown';
@@ -353,11 +393,18 @@ async function run(modelPath, { copy = false, restart = false, embeddings = fals
     report.phase = 'post-registration discovery';
     const listed = assertReply(await sidecar.send('listModels'), 'listModels').result;
     const local = listed.find((model) => model.alias === modelAlias);
-    if (!local || local.info?.uri !== `local://${modelAlias}`) {
-      throw new Error('The registered model was not visible in Flint model discovery.');
+    if (!local || (catalogAlias
+      ? !local.variants?.some((variant) => variant.id === catalogVariant && variant.cached)
+      : local.info?.uri !== `local://${modelAlias}`)) {
+      throw new Error('The selected model was not visible as cached in Flint model discovery.');
     }
     report.phase = 'model load and IPC';
-    const loaded = assertReply(await sidecar.send('load', { alias: modelAlias }), 'load').result;
+    const loaded = assertReply(await sidecar.send('load', {
+      alias: modelAlias, ...(catalogVariant ? { variantId: catalogVariant } : {}),
+    }), 'load').result;
+    if (catalogVariant && loaded.variantId !== catalogVariant) {
+      throw new Error(`Loaded ${loaded.variantId} instead of the selected catalog variant.`);
+    }
     const prompt = [{ role: 'user', content: PROMPT }];
     let ipcVectors;
     if (embeddings) {
@@ -401,8 +448,10 @@ async function run(modelPath, { copy = false, restart = false, embeddings = fals
     const modelListing = await fetch(`${endpoint}/models`);
     if (!modelListing.ok) throw new Error(`Gateway model listing returned HTTP ${modelListing.status}.`);
     const modelRows = (await modelListing.json())?.data;
-    if (!Array.isArray(modelRows) || !modelRows.some((model) => model.parent === modelAlias)) {
-      throw new Error('The gateway model listing omitted the registered BYOM.');
+    if (!Array.isArray(modelRows) || !modelRows.some((model) => catalogAlias
+      ? model.id === catalogVariant || model.id === catalogVariant.split(':')[0]
+      : model.parent === modelAlias)) {
+      throw new Error('The gateway model listing omitted the selected model.');
     }
     if (embeddings) {
       const response = await fetch(`${endpoint}/embeddings`, {
@@ -424,7 +473,9 @@ async function run(modelPath, { copy = false, restart = false, embeddings = fals
       }
       report.gateway = {
         endpoint,
-        discoveredId: modelRows.find((model) => model.parent === modelAlias).id,
+        discoveredId: modelRows.find((model) => catalogAlias
+          ? model.id === catalogVariant || model.id === catalogVariant.split(':')[0]
+          : model.parent === modelAlias).id,
         count: gatewayVectors.length,
         dimensions: gatewayVectors[0].length,
         ipcCosine: agreement,
@@ -459,7 +510,7 @@ async function run(modelPath, { copy = false, restart = false, embeddings = fals
 
     report.phase = 'model removal';
     assertReply(await sidecar.send('unload', { alias: modelAlias }), 'unload');
-    assertReply(await sidecar.send('deleteModel', { alias: modelAlias }), 'deleteModel');
+    if (!catalogAlias) assertReply(await sidecar.send('deleteModel', { alias: modelAlias }), 'deleteModel');
     const finalFiles = await snapshotFolder(modelPath);
     report.sourceUnchanged = JSON.stringify(sourceBefore) === JSON.stringify(finalFiles);
     if (!report.sourceUnchanged) throw new Error('The source model files changed during the test.');
@@ -498,13 +549,16 @@ async function main() {
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>]');
-  const report = await run(args.model, { copy: args.copy, restart: args.restart, embeddings: args.embeddings, retrieval: args.retrieval });
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--catalog-alias <alias> --catalog-variant <id>]');
+  const report = await run(args.model, {
+    copy: args.copy, restart: args.restart, embeddings: args.embeddings,
+    retrieval: args.retrieval, catalogAlias: args.catalogAlias, catalogVariant: args.catalogVariant,
+  });
   console.log(JSON.stringify(report, null, 2));
   if (report.error) process.exitCode = 2;
 }
 
-export { parseArgs, stopSidecar, validateEmbeddings };
+export { catalogCacheTarget, parseArgs, stopSidecar, validateEmbeddings };
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {

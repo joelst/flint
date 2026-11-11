@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { parseArgs, stopSidecar, validateEmbeddings } from './byom-gateway-live.mjs';
+import { catalogCacheTarget, parseArgs, stopSidecar, validateEmbeddings } from './byom-gateway-live.mjs';
 
 afterEach(() => vi.useRealTimers());
 
@@ -116,6 +116,44 @@ describe('BYOM runner copy selection', () => {
     expect(() => parseArgs(['--retrieval'])).toThrow(/requires a JSON dataset path/);
     expect(() => parseArgs(['--model', 'model', '--retrieval', 'dataset.json']))
       .toThrow(/requires --embeddings/);
+  });
+
+  it('accepts an isolated cached catalog retrieval without treating the source as an import', () => {
+    expect(parseArgs([
+      '--model', 'catalog/v1', '--catalog-alias', 'qwen3-embedding-0.6b',
+      '--catalog-variant', 'qwen3-embedding-0.6b-cuda-gpu:1',
+      '--embeddings', '--retrieval', 'dataset.json',
+    ])).toMatchObject({
+      catalogAlias: 'qwen3-embedding-0.6b',
+      catalogVariant: 'qwen3-embedding-0.6b-cuda-gpu:1',
+      copy: false,
+      restart: false,
+    });
+    expect(() => parseArgs(['--model', 'catalog/v1', '--catalog-alias', 'a', '--embeddings']))
+      .toThrow(/catalog-variant/);
+    expect(() => parseArgs(['--model', 'catalog/v1', '--catalog-variant', 'v:1', '--embeddings']))
+      .toThrow(/catalog-alias/);
+    expect(() => parseArgs([
+      '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1', '--copy',
+      '--embeddings',
+    ])).toThrow(/cannot.*copy/i);
+    expect(() => parseArgs([
+      '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1',
+    ])).toThrow(/require --embeddings/);
+  });
+});
+
+describe('isolated catalog cache', () => {
+  it('copies only the selected variant into the temporary catalog cache layout', () => {
+    expect(catalogCacheTarget('C:\\source\\Microsoft\\qwen3-embedding-0.6b-cuda-gpu-1\\v1',
+      'qwen3-embedding-0.6b-cuda-gpu:1', 'C:\\scratch', 'flint-live'))
+      .toBe('C:\\scratch\\.flint-live\\cache\\models\\Microsoft\\qwen3-embedding-0.6b-cuda-gpu-1\\v1');
+    expect(() => catalogCacheTarget('C:\\source\\Microsoft\\qwen3-embedding-0.6b-cuda-gpu-2\\v1',
+      'qwen3-embedding-0.6b-cuda-gpu:1', 'C:\\scratch', 'flint-live'))
+      .toThrow(/does not match/);
+    expect(() => catalogCacheTarget('C:\\source\\Microsoft\\qwen3-embedding-0.6b-cuda-gpu-1\\v2',
+      'qwen3-embedding-0.6b-cuda-gpu:1', 'C:\\scratch', 'flint-live'))
+      .toThrow(/does not match/);
   });
 });
 
