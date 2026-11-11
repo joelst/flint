@@ -506,6 +506,13 @@ builds as full versioned `id` values without a `parent`. The pool stayed empty,
 `stopService` withdrew the published endpoint, and the sidecar exited 0.
 This qualifies listener/gateway start-stop and health on the filtered setup, not
 normal all-provider startup or inference.
+A fresh sidecar run on the default Flint profile then exercised normal provider
+registration: `ensureAccelerators` registered CUDA, TensorRT RTX, and WebGPU
+with no failures, and confirmed the existing Llama 3.2 3B local registration
+without replacing it. With no model loaded, the loopback gateway returned HTTP
+200 for `/status` and `/v1/models` (150 rows); `stopService` and runtime shutdown
+completed successfully. This qualifies no-model all-provider sidecar startup
+and listener lifecycle, not UI autostart, inference, or installed-app behavior.
 On the Qwen2.5 0.5B CUDA variant, the direct gateway also returned valid JSON
 for `response_format.type=json_object`, honored `tool_choice=required`, and
 reported `finish_reason: length` at `max_tokens: 1` with one completion token.
