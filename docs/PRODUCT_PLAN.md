@@ -471,10 +471,11 @@ listener passed the same required checks on the cached CUDA variant; its
 streaming client-disconnect settled, but the runner cannot establish that
 native generation stopped. This harness did not exercise sidecar startup or
 IPC. Qwen3 0.6B CUDA also passed the strict tool, follow-up, and disconnect
-checks through the direct gateway harness. Phi-4 Mini CUDA passed ordinary
-chat, streaming, and client-disconnect checks, but did not produce the required
-tool call; its optional `/v1/responses` check returned HTTP 500 with a CUDA
-`invalid argument` diagnostic, whose cause was not isolated. The friendly alias
+checks through the direct gateway harness. The direct gateway probe against
+Phi-4 Mini CUDA passed ordinary chat, streaming, and client-disconnect checks,
+but did not produce the required tool call. Its optional `/v1/responses` probe
+failed with HTTP 500 and a CUDA `invalid argument` diagnostic; the cause was
+not isolated. The friendly alias
 also passed inference/tool checks but was not a `/v1/models` row; SDK 2.4.0
 returned full versioned variant ids without a `parent` alias in this probe.
 Gemma 4 E2B CUDA (`gemma-4-e2b-it-cuda-gpu:3`) passed ordinary chat, usage,
@@ -484,7 +485,7 @@ need model-published opening and closing markers. Mistral Nemo 12B CUDA passed
 ordinary chat, usage, streaming, and disconnect, but its strict tool stream
 ended without `[DONE]`; its optional `/v1/responses` check returned HTTP 500
 with a CUDA `Zero` invalid-argument diagnostic. Neither is positive evidence
-for structured tool calling outside the Qwen variants.
+for structured tool calling on Gemma 4 or Mistral Nemo.
 Strict `openai-live --require-tools` CUDA probes for SmolLM3 3B, Ministral 3
 3B, and OLMo 3 7B also passed ordinary chat, usage, streaming, and disconnect,
 but each lacked `[DONE]` and a completed tool call; the cause was not isolated.
@@ -501,8 +502,13 @@ a call ID; the non-streaming response included usage. A tool-result follow-up
 returned "The tool confirmed the color blue." On that same model, JSON-object
 response format returned `{"ok": true}`, and `max_tokens: 1` returned
 `finish_reason: length` with one completion token. These direct sessions do not
-establish sidecar IPC or gateway behavior. A direct
-`createSessionChatClient` probe on
+establish sidecar IPC or gateway behavior. A real SDK/core 2.4.0 sidecar IPC
+probe on the same cached Phi-4 Mini variant, restricted by CUDA device UUID to
+physical GPU 1, returned the required `pick_color({"color":"blue"})` call and
+a successful tool-result follow-up. The load reply reported
+`acceleration.active: null`, so actual execution-provider activation is not
+independently attested; GPU 0 utilization was 0% in the before/after snapshots.
+A direct `createSessionChatClient` probe on
 `qwen3-vl-2b-instruct-cuda-gpu:2`, with the CUDA runtime prepared and inference
 restricted to physical GPU 1, passed native ChatSession image input: an
 in-memory synthetic PNG containing a green square was identified as `Green`.
@@ -551,9 +557,9 @@ The same variant returned a `completed` `/v1/responses` result with string
 `response.completed` event. A separate required-tool request returned one
 `function_call` for `pick_color` with JSON arguments.
 Package revision/license provenance, broader lifecycle and provider checks,
-additional tool-capable model families beyond Qwen2.5/Qwen3, the 2.2.0–2.3.1
-gates on this pin, and installed-app qualification remain open. Flash-Next
-conversion or architecture enablement is not a release gate.
+additional tool-capable model families beyond Phi-4 Mini, Qwen2.5, and Qwen3,
+the 2.2.0–2.3.1 gates on this pin, and installed-app qualification remain open.
+Flash-Next conversion or architecture enablement is not a release gate.
 
 Do not publish 0.11.0 until the qualification gates above pass. Keep completed
 work in reviewed changesets; do not merge unrelated accumulated changesets as
