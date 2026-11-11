@@ -5,7 +5,8 @@ the next release and carries the SDK 2.4.0 / real-BYOM work below. The external
 Llama 3.2 3B ONNX GenAI model has passed CPU registration, IPC chat, and
 buffered/streaming gateway chat on SDK 2.4.0, both as a metadata-free copy and
 as a metadata-bearing link, with unchanged source hashes and confirmed shutdown.
-Package provenance, broader lifecycle and SDK qualification, and installed-app
+The seven shared artifacts match the pinned public source revision; broader
+lifecycle and SDK qualification, and installed-app
 evidence remain. No 1.0 date until the remaining process gates in
 [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) are done.
 
@@ -83,8 +84,10 @@ GenAI weights rather than synthetic fixtures or a renamed catalog download.
 
 **Measured candidate:** Llama 3.2 3B Instruct passed the isolated CPU chat spike
 and the public-catalog absence check recorded in the
-[spike evidence](./spikes/foundry-2.1.0-spike.md#go--no-go). Package provenance
-and the remaining lifecycle/provider checks still need qualification. A
+[spike evidence](./spikes/foundry-2.1.0-spike.md#go--no-go). The original
+and imported source files match the pinned upstream revision; license terms
+require review before any redistribution of weights. Remaining
+lifecycle/provider checks still need qualification. A
 smaller published ONNX GenAI package is an alternative when the target
 provider/memory budget requires it and the same selection checks pass.
 

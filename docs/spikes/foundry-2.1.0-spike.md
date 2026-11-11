@@ -74,6 +74,26 @@ Measured on Windows x64 with the exact SDK/core 2.4.0 package, ONNX Runtime
 The model is Llama 3.2 3B Instruct, CPU int4 RTN block 32 / accuracy level 4.
 The original seven-file ONNX GenAI folder has no `inference_model.json`; the
 link source is the existing eight-file imported folder with Flint-authored metadata.
+Both folders' seven shared files match the public
+[`onnx-community/Llama-3.2-3B-Instruct-GENAI-ONNX`](https://huggingface.co/onnx-community/Llama-3.2-3B-Instruct-GENAI-ONNX)
+revision `5db5cdb5b0c8c440264ca0f16f5ec3351e753add` under
+`cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4`. The original download's
+per-file Hub metadata names that revision; local Git blob ids or LFS SHA-256
+hashes matched the immutable Hub tree for every file in both folders:
+
+| File | Bytes | Upstream Git blob id or LFS SHA-256 |
+|---|---:|---|
+| `config.json` | 877 | `664031504bb1ced1927ac3e321d73cbeb83602f4` |
+| `genai_config.json` | 1,540 | `54deb981fa29bde64771581364dda66b948ba6e2` |
+| `model.onnx` | 185,824 | `b159a71e593d75290c6827b2d67430b469947bbf9b807fd4e291ac80089caa65` |
+| `model.onnx.data` | 3,651,678,208 | `0a6801080cf0bd335d1f35909b574e70f6cdc0faadb3735289dee96fcbd19ec6` |
+| `special_tokens_map.json` | 296 | `02ee80b6196926a5ad790a004d9efd6ab1ba6542` |
+| `tokenizer.json` | 9,085,657 | `5cc5f00a5b203e90a27a3bd60d1ec393b07971e8` |
+| `tokenizer_config.json` | 54,528 | `4ff488a165e900e5129cda7c20ab32d568d2a475` |
+
+The card at that revision lists both `llama3.2` and `mit` license tags and is
+not gated. These labels do not establish which terms govern model weights or
+permission to redistribute them; Flint's test packages do not bundle weights.
 
 | Probe | Command | Result |
 |---|---|---|
@@ -96,7 +116,8 @@ The real Windows CUDA DLL-search binding also loads from an isolated flattened
 resource tree without a checkout dependency; this is not GPU inference proof.
 This does not qualify a signed install, updater/rollback, GPU inference, tools,
 usage parity, speech, embeddings, cancellation, or the full restart/recovery matrix.
-Source repository/revision/license provenance remains open.
+Source revision and artifact hashes are pinned above; license obligations for
+any future redistribution still require review.
 
 ## Runner
 
