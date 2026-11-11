@@ -377,6 +377,18 @@ queued IPC chat drain, buffered and streaming cancellation, legacy `ChatClient`
 fallback, and refusal to replay a dispatched `ChatSession` failure. The suite
 uses a fake SDK, so this verifies sidecar IPC coordination, not native runtime
 behavior or quiescence.
+A real SDK 2.4.0 sidecar run on cached `qwen2.5-0.5b-instruct-cuda-gpu:4`,
+restricted to the RTX 4080 by UUID, returned `42` over IPC. A streaming IPC
+request was cancelled after its first delta; cancellation was acknowledged,
+no later deltas arrived, a concurrent request returned `42`, and the pool
+reported `inFlight: 0` after settlement. The terminal cancellation reply was
+success-shaped without a certainty field, so this is not native-quiescence
+proof. With a temporary test-only preloader restricting provider discovery to
+CUDA (the current `~/.flint/ep` cache has no TensorRT provider), sidecar service
+startup and loopback gateway chat also succeeded. `GET /v1/models` returned
+versioned variant ids without parent aliases; gateway chat by friendly alias
+returned `42`. Graceful sidecar shutdown exited cleanly. The preloader bypasses
+normal all-provider startup and does not qualify that release path.
 The SDK/core 2.4.0 catalog also exposes `qwen3-embedding-0.6b` and
 `qwen3-embedding-8b`; their cached variants are CUDA-only. CUDA EP assets exist
 in the local cache. Explicit CUDA registration succeeded; the cached Qwen3
