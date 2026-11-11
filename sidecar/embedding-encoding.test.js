@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
-import { encodeEmbedding } from './embedding-encoding.js';
+import { encodeEmbedding, encodeEmbeddingResponse } from './embedding-encoding.js';
 
 describe('local gateway embedding encoding', () => {
   it('preserves numeric vectors for omitted or float encoding', () => {
@@ -20,5 +20,15 @@ describe('local gateway embedding encoding', () => {
   it('rejects encodings or components that cannot be represented', () => {
     expect(() => encodeEmbedding([1], 'hex')).toThrow(/encoding/);
     expect(() => encodeEmbedding([1e100], 'base64')).toThrow(/float32/);
+  });
+
+  it('preserves already encoded native responses without changing their bytes', () => {
+    const body = JSON.stringify({ data: [{ embedding: 'AACAPw==' }] });
+    expect(encodeEmbeddingResponse(body)).toBe(body);
+  });
+
+  it('rejects malformed or non-finite upstream vectors rather than reporting success', () => {
+    expect(() => encodeEmbeddingResponse('{"data":null}')).toThrow(/data array/);
+    expect(() => encodeEmbeddingResponse('{"data":[{"embedding":[null]}]}')).toThrow(/invalid/);
   });
 });

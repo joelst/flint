@@ -12,3 +12,21 @@ export function encodeEmbedding(vector, encodingFormat = 'float') {
   }
   return bytes.toString('base64');
 }
+
+export function encodeEmbeddingResponse(body) {
+  const response = JSON.parse(body);
+  if (!response || !Array.isArray(response.data)) {
+    throw new Error('Upstream embedding response has no data array.');
+  }
+  let converted = false;
+  const data = response.data.map((item, index) => {
+    if (typeof item?.embedding === 'string') return item;
+    if (!Array.isArray(item?.embedding)
+        || !item.embedding.every(value => typeof value === 'number' && Number.isFinite(value))) {
+      throw new Error(`Upstream embedding at index ${index} is invalid.`);
+    }
+    converted = true;
+    return { ...item, embedding: encodeEmbedding(item.embedding, 'base64') };
+  });
+  return converted ? JSON.stringify({ ...response, data }) : body;
+}

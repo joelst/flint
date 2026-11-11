@@ -27,6 +27,7 @@ import http from 'node:http';
 import { Transform, pipeline } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { normalizeChatResponse } from './chat-response.js';
+import { encodeEmbeddingResponse } from './embedding-encoding.js';
 import { unsupportedFrequencyPenaltyMessage } from './chat-parameter-policy.js';
 import { buildInferenceMetrics } from './inference-metrics.js';
 import {
@@ -54,6 +55,7 @@ const MULTIPART_MODEL_MAX_CHARS = 256;
 // Usage is a small top-level object in OpenAI chat responses. Keep its independent
 // inspection bounded when the response itself is too large to normalize.
 const MAX_USAGE_METRICS_CHARS = 64 * 1024;
+const MAX_EMBEDDING_RESPONSE_BYTES = 32 * 1024 * 1024;
 const multipartModel = Symbol('multipartModel');
 const multipartPrefix = Symbol('multipartPrefix');
 const multipartEnded = Symbol('multipartEnded');
@@ -416,10 +418,19 @@ export function createGateway (options) {
     // rewrite was applied, not the client's own wording.
     const sentModel = known ?? requested;
     const localFallbackMayBeNeeded = isChatCompletionPath(req.url) || isEmbeddingsPath(req.url);
+    let encodeEmbeddings = false;
+    if (isEmbeddingsPath(req.url) && buffered !== null) {
+      try {
+        encodeEmbeddings = JSON.parse(buffered)?.encoding_format === 'base64';
+      } catch {
+        // The native route remains responsible for reporting invalid JSON requests.
+      }
+    }
     const attempt = await forward(req, res, outgoing, {
       captureNotLoaded: mayAutoload || localFallbackMayBeNeeded,
       sentModel,
       metrics,
+      encodeEmbeddings,
     });
     if (attempt === SENT) return;
 
@@ -502,7 +513,9 @@ export function createGateway (options) {
 
     // captureNotLoaded: false — the retry already happened, so a second rejection is the
     // real answer and belongs to the client rather than being swallowed again.
-    const second = await forward(req, res, replayBody, { captureNotLoaded: false, metrics });
+    const second = await forward(req, res, replayBody, {
+      captureNotLoaded: false, metrics, encodeEmbeddings,
+    });
     if (second !== SENT) {
       respondBuffered(res, attempt.status, attempt.headers, attempt.body);
     }
@@ -690,7 +703,9 @@ export function createGateway (options) {
    * Returns SENT when the client response has already been written; otherwise a
    * `{ status, headers, body }` record the caller may replay after loading.
    */
-  function forward (req, res, buffered, { captureNotLoaded, sentModel = null, metrics = null }) {
+  function forward (req, res, buffered, {
+    captureNotLoaded, sentModel = null, metrics = null, encodeEmbeddings = false,
+  }) {
     return new Promise(resolve2 => {
       const headers = stripHopByHopHeaders(req.headers);
       // Upstream is addressed by us, never derived from the client's Host header — that
@@ -746,7 +761,23 @@ export function createGateway (options) {
 
         const isChatJson = isChatCompletionPath(req.url) && isJsonContentType(upRes.headers['content-type']);
         const isChatStream = isChatCompletionPath(req.url) && isEventStream(upRes.headers['content-type']);
-        if (!mayRetry && !isStatus && !isChatJson && !isModelList) {
+        const base64EmbeddingSuccess = encodeEmbeddings && req.method === 'POST'
+          && status >= 200 && status < 300;
+        const convertEmbeddings = base64EmbeddingSuccess
+          && isJsonContentType(upRes.headers['content-type']);
+        if (base64EmbeddingSuccess && !convertEmbeddings) {
+          upRes.destroy();
+          res.off('close', onClientClose);
+          respondBuffered(
+            res,
+            502,
+            { 'content-type': 'application/json' },
+            openAiError('Upstream embedding response was not JSON.', 'server_error'),
+          );
+          resolve2(SENT);
+          return;
+        }
+        if (!mayRetry && !isStatus && !isChatJson && !isModelList && !convertEmbeddings) {
           if (isChatStream) {
             delete outHeaders['content-length'];
             delete outHeaders['Content-Length'];
@@ -793,7 +824,12 @@ export function createGateway (options) {
             res,
             502,
             { 'content-type': 'application/json' },
-            openAiError('Upstream control response exceeded the gateway limit.', 'server_error'),
+            openAiError(
+              convertEmbeddings
+                ? 'Upstream embedding response exceeded the gateway limit.'
+                : 'Upstream control response exceeded the gateway limit.',
+              'server_error',
+            ),
           );
           resolve2(SENT);
         });
@@ -807,7 +843,12 @@ export function createGateway (options) {
           );
           resolve2(SENT);
         });
-        captureTimer = setTimeout(failBufferedResponseTimeout, bufferedResponseTimeout);
+        if (!convertEmbeddings) {
+          captureTimer = setTimeout(failBufferedResponseTimeout, bufferedResponseTimeout);
+        }
+        const responseLimit = convertEmbeddings
+          ? MAX_EMBEDDING_RESPONSE_BYTES
+          : bufferedResponseLimit;
         const declaredLength = Number(upRes.headers['content-length']);
         const bodyAllowed = req.method !== 'HEAD'
           && status !== 204
@@ -815,13 +856,13 @@ export function createGateway (options) {
           && (status < 100 || status >= 200);
         if (bodyAllowed
             && Number.isFinite(declaredLength)
-            && declaredLength > bufferedResponseLimit) {
+            && declaredLength > responseLimit) {
           failBufferedResponse();
           return;
         }
         upRes.on('data', c => {
           size += c.length;
-          if (size > bufferedResponseLimit) {
+          if (size > responseLimit) {
             failBufferedResponse();
             return;
           }
@@ -841,6 +882,22 @@ export function createGateway (options) {
 
           if (mayRetry && rejectionNames(modelRejection(status, body), sentModel)) {
             resolve2({ status, headers: outHeaders, body });
+            return;
+          }
+
+          if (convertEmbeddings) {
+            try {
+              respondBuffered(res, status, outHeaders, encodeEmbeddingResponse(body));
+            } catch (error) {
+              log('warn', `Could not encode upstream embeddings: ${error?.message ?? error}`);
+              respondBuffered(
+                res,
+                502,
+                { 'content-type': 'application/json' },
+                openAiError('Upstream embedding response was invalid.', 'server_error'),
+              );
+            }
+            resolve2(SENT);
             return;
           }
 

@@ -456,17 +456,27 @@ the cached catalog artifact used by Continue.
 Inspection of the exact `v2.0.0-vscode` source shows `LanceDbIndex` persists
 the vectors returned by `ILLM.embed()` unchanged, and the OpenAI embedding path
 maps the response vectors without dimension slicing or a `dimensions` request
-field. This does not explain the earlier 256-component cache observation versus
-the separate 1,024-dimensional gateway response; no paired request/response and
-persisted-row capture exists, so do not claim dimensional compatibility yet.
+field. A paired GPU-1 capture on the cached catalog variant found that Continue
+requested `encoding_format: base64` for two inputs, but the native gateway
+returned HTTP 200 with two 1,024-component float arrays. Continue persisted
+two 256-component all-zero vectors instead of either returned vector. The
+bundled OpenAI client decodes the unlabelled float arrays as base64, accounting
+for the bad cache rows. The gateway now encodes native float arrays as
+little-endian float32 base64 for explicit base64 requests; float requests and
+upstream errors retain their prior paths. Focused red/green gateway tests cover
+both resident and autoloaded catalog models. A direct SDK/core 2.4.0 GPU-1
+request through the patched endpoint returned two finite 1,024-component
+base64 vectors with HTTP 200 and confirmed sidecar cleanup. The repeat
+Continue index could not launch while the VS Code Insiders updater mutex was
+held, so matching persisted hashes after this fix remain to be verified.
 The portable BYOM embedding export was tested separately with Continue 2.0.0:
 the client requested `encoding_format: base64`, which the local-model gateway
 previously rejected with HTTP 400. After adding float32 little-endian base64
 responses, an isolated two-document index received two 1,024-component vectors
 over HTTP and persisted two 1,024-component `lance_db_cache` rows. Both stored
 float32 hashes exactly matched the paired HTTP response bytes and the index
-lock was released. This closes the BYOM-side dimension question, not the
-unpaired 256-component observation from the cached catalog variant.
+lock was released. This closes the BYOM-side dimension question. The paired cached catalog
+failure and its still-pending Continue rerun are described above.
 The SDK/core 2.4.0 catalog also exposes `qwen3-embedding-0.6b` and
 `qwen3-embedding-8b`; their cached variants are CUDA-only. CUDA EP assets exist
 in the local cache. Explicit CUDA registration succeeded; the cached Qwen3

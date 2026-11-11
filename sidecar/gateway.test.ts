@@ -133,6 +133,75 @@ afterEach(async () => {
 });
 
 describe('gateway pass-through', () => {
+  it('returns base64 float32 embeddings when the native route ignores the requested format', async () => {
+    upstream.state.loaded.add('already-loaded');
+    gateway = await startGateway();
+    const body = JSON.stringify({ model: 'already-loaded', input: ['one'], encoding_format: 'base64' });
+    const res = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(200);
+    const bytes = Buffer.from(JSON.parse(res.body).data[0].embedding, 'base64');
+    expect(bytes.length).toBe(8);
+    expect(bytes.readFloatLE(0)).toBeCloseTo(0.1);
+    expect(bytes.readFloatLE(4)).toBeCloseTo(0.2);
+    expect(Number(res.headers['content-length'])).toBe(Buffer.byteLength(res.body));
+    expect(JSON.parse(upstream.state.hits[0].body).encoding_format).toBe('base64');
+  });
+
+  it('returns base64 embeddings after autoload and leaves float requests unchanged', async () => {
+    gateway = await startGateway({
+      load: async alias => { upstream.state.loaded.add(alias); return alias; },
+    });
+    const body = JSON.stringify({ model: 'cold', input: ['one'], encoding_format: 'base64' });
+    const encoded = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST', body, headers: { 'content-type': 'application/json' },
+    });
+    expect(encoded.status).toBe(200);
+    expect(Buffer.from(JSON.parse(encoded.body).data[0].embedding, 'base64')).toHaveLength(8);
+    expect(upstream.state.hits).toHaveLength(2);
+    const plain = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'cold', input: ['one'], encoding_format: 'float' }),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(JSON.parse(plain.body).data[0].embedding).toEqual([0.1, 0.2]);
+  });
+
+  it('does not return a successful base64 response for invalid native embedding data', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ embedding: [null] }] }));
+    });
+    gateway = await startGateway();
+    const res = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'already-loaded', input: 'one', encoding_format: 'base64' }),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(502);
+    expect(JSON.parse(res.body).error.message).toMatch(/invalid/i);
+  });
+
+  it('refuses a successful non-JSON native response to a base64 embeddings request', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('not an embedding');
+    });
+    gateway = await startGateway();
+    const res = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'already-loaded', input: 'one', encoding_format: 'base64' }),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(502);
+    expect(JSON.parse(res.body).error.message).toMatch(/not JSON/);
+  });
+
   it('appends cached local registrations to the native model listing', async () => {
     await new Promise(r => upstream.server.close(r));
     upstream = await startUpstream((_req, res) => {
