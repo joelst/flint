@@ -409,7 +409,10 @@ On the Qwen2.5 0.5B CUDA variant, the direct gateway also returned valid JSON
 for `response_format.type=json_object`, honored `tool_choice=required`, and
 reported `finish_reason: length` at `max_tokens: 1` with one completion token.
 The request accepted temperature, top-p, top-k, and seed values; this confirms
-the gateway/native request path, not sampling semantics, IPC, or fallback.
+the gateway/native request path, not sampling semantics, IPC, or fallback. A
+malformed function schema with an unsupported JSON Schema type was rejected on
+this variant with HTTP 400 `invalid_request_error` and no `choices`, rather
+than a success-shaped response.
 Package revision/license provenance, broader lifecycle and provider checks,
 additional tool-capable model families beyond Qwen2.5/Qwen3, the 2.2.0–2.3.1
 gates on this pin, and installed-app qualification remain open. Flash-Next
