@@ -127,15 +127,17 @@ export function indexableLocalModel (model) {
   const id = typeof idValue === 'string' ? idValue : '';
   const alias = typeof aliasValue === 'string' ? aliasValue : '';
   if (!id || !alias) return model;
+  const cachedState = readCachedState(model);
+  const cached = cachedState.readable ? cachedState.cached : true;
   return {
     alias,
     id,
     info: model?.info,
-    isCached: true,
+    isCached: cached,
     variants: [{
       id,
-      isCached: true,
-      info: { cached: true },
+      isCached: cached,
+      info: { cached },
     }],
   };
 }

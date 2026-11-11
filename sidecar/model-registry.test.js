@@ -83,6 +83,27 @@ describe('buildCachedModelIndex', () => {
       expect(indexableLocalModel(merged[1])).toBe(merged[1]);
     });
 
+    it('does not advertise a local registration whose source is no longer cached', () => {
+      const stale = {
+        alias: 'missing-source',
+        id: 'missing-source:1',
+        isCached: false,
+        info: { task: 'chat-completion', providerType: 'LocalRegistration', cached: true },
+      };
+      const [merged] = mergeLocalRegistrations([], [stale]);
+      expect(merged).toMatchObject({
+        isCached: false,
+        variants: [{ id: 'missing-source:1', isCached: false, info: { cached: false } }],
+      });
+      expect(resolveModelId(buildModelIndex(normalizeCatalogModels([merged]).models), 'missing-source'))
+        .toBeNull();
+      expect(indexableLocalModel({
+        alias: 'missing-source',
+        id: 'missing-source:1',
+        info: { cached: false },
+      }).variants[0].isCached).toBe(false);
+    });
+
     it('keeps a public row that already has variants and fills a taskless row', () => {
       const publicRow = { alias: 'qwen', id: 'qwen:4', info: { task: 'chat-completion' }, variants: [{ id: 'qwen:4' }] };
       const taskless = { alias: 'bare', id: 'bare:1', info: {} };
