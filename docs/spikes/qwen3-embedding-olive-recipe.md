@@ -4,8 +4,8 @@ This is a pinned candidate recipe for building a Qwen3 embedding folder that
 Foundry Local can register as an ONNX Runtime GenAI model. It records the
 successful build's source revisions, full Python package versions, modified
 Olive config, and export fixes. It does not establish that the registered
-catalog artifact came from these sources, and the checked-in procedure has not
-yet been replayed from a clean environment.
+catalog artifact came from these sources. A fresh build/output replay reused
+the pinned Python environment; rebuilding that environment remains unverified.
 
 ## Pinned inputs
 
@@ -65,8 +65,11 @@ certutil -hashfile build-output\model.onnx SHA256
 ```
 
 `prepare_export.py` copies the source `config_sentence_transformers.json` into
-the output and sets `tie_word_embeddings` to `true` in the exported
-`config.json`. Its standard-library tests run with:
+the output, sets `tie_word_embeddings` to `true` in the exported `config.json`,
+and removes Olive's `model_config.json` build manifest after checking its
+shape. That manifest contains absolute work-directory paths and is not needed
+by the registered Foundry model; leaving it in the package makes the export
+host-specific. Its standard-library tests run with:
 
 ```text
 py -3.12 -B scripts\byom\qwen3_embedding_cuda_int4\test_prepare_export.py
@@ -74,14 +77,26 @@ py -3.12 -B scripts\byom\qwen3_embedding_cuda_int4\test_prepare_export.py
 
 ## Recorded output and remaining qualification
 
-The successful export had 13 files totaling 828,305,485 bytes.
+The original successful export had 13 files totaling 828,305,485 bytes.
 `model.onnx` was 812,372,350 bytes with SHA-256
 `c329c06087fc940b48491f32d66c5c46b7d0c89f0208014cf2388d9ae3dbae61`.
 The original Olive recipe's unmodified config and unpinned requirements do not
 produce this exact build procedure.
 
-The exported model passed a sidecar 2.4.0 import and embedding smoke check on
-physical GPU 1; gateway and IPC returned matching finite vectors. GPU 0 remained
-idle. This is not a clean replay of the checked-in config, retrieval-quality
-evidence, MTEB evaluation, or proof of provenance for the catalog's cached
-artifact. Those checks remain open.
+A replay from a separate work directory, using copied pinned model inputs,
+the checked-in config, an empty build cache/output, and the prior pinned Python
+environment completed every Olive pass. Its ONNX graph and eleven other files
+matched the original output byte-for-byte; only Olive's `model_config.json`
+contained different absolute build paths. After `prepare_export.py`, the
+portable output has 12 files totaling 828,266,615 bytes and the same ONNX hash.
+No exported JSON contains the replay work-directory path.
+
+An isolated SDK/core 2.4.0 sidecar imported the 12-file replay into its own
+app home, restarted without re-importing, and returned two finite
+1,024-component vectors from both `embedTexts` IPC and gateway alias
+`/v1/embeddings` requests on physical GPU 1. Corresponding IPC/gateway vectors
+had cosine similarity above 0.999999; the source's 12 file hashes were
+unchanged, removal succeeded, and both sidecar shutdowns reported confirmed
+cleanup. The runtime still reported no active-provider identity. The replay
+does not establish a newly provisioned Python environment, retrieval quality,
+MTEB scores, or provenance of the separately cached catalog artifact.

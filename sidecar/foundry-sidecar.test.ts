@@ -6,7 +6,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { killAndWait } from './test-process.js';
 import { PINNED_FOUNDRY_CORE_VERSION, PINNED_FOUNDRY_SDK_VERSION } from './foundry-runtime-pin.js';
 import { TINY_PNG_DATA_URL } from './test-fixtures/images';
@@ -405,7 +405,10 @@ describe('foundry-sidecar protocol basics', () => {
       const logDir = join(homeDir, '.flint', 'logs');
       const logFile = readdirSync(logDir).find((name) => name.endsWith('.log'));
       expect(logFile).toBeDefined();
-      expect(readFileSync(join(logDir, logFile!), 'utf8')).toContain('"accel":"unknown"');
+      await vi.waitFor(
+        () => expect(readFileSync(join(logDir, logFile!), 'utf8')).toContain('"accel":"unknown"'),
+        { timeout: 5000 }
+      );
       nonJsonStdout.stop();
       expect(nonJsonStdout.lines).toEqual([]);
       expect(stderrText).toContain('FLINT_DIAG info fake model load console noise');

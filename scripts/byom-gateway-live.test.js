@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { parseArgs, stopSidecar } from './byom-gateway-live.mjs';
+import { parseArgs, stopSidecar, validateEmbeddings } from './byom-gateway-live.mjs';
 
 afterEach(() => vi.useRealTimers());
 
@@ -101,5 +101,30 @@ describe('BYOM runner copy selection', () => {
       restart: true,
       copy: false,
     });
+  });
+
+  it('accepts an embedding qualification mode', () => {
+    expect(parseArgs(['--embeddings', '--model', 'model'])).toMatchObject({
+      embeddings: true,
+      copy: false,
+    });
+  });
+});
+
+describe('BYOM embedding qualification', () => {
+  it('accepts two finite, nonzero vectors of matching dimensions', () => {
+    expect(validateEmbeddings({
+      data: [{ embedding: [1, 0] }, { embedding: [0, 1] }],
+    })).toEqual([[1, 0], [0, 1]]);
+  });
+
+  it.each([
+    { data: {} },
+    { data: [{ embedding: [1, 0] }] },
+    { data: [{ embedding: [1, 0] }, { embedding: [0] }] },
+    { data: [{ embedding: [1, 0] }, { embedding: [NaN, 0] }] },
+    { data: [{ embedding: [1, 0] }, { embedding: [0, 0] }] },
+  ])('refuses incomplete or invalid vectors: %j', (response) => {
+    expect(() => validateEmbeddings(response)).toThrow(/embedding/i);
   });
 });

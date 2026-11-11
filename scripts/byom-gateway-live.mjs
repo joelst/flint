@@ -16,13 +16,15 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ALIAS = 'flint-byom-live';
 const PROMPT = 'What is 6 times 7? Reply with one short sentence.';
+const EMBEDDING_INPUTS = ['A cat rests on a windowsill.', 'A bicycle needs a new chain.'];
 
 function parseArgs(argv) {
-  const args = { model: null, selfTest: false, copy: false, restart: false };
+  const args = { model: null, selfTest: false, copy: false, restart: false, embeddings: false };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
     else if (argv[i] === '--copy') args.copy = true;
     else if (argv[i] === '--restart') args.restart = true;
+    else if (argv[i] === '--embeddings') args.embeddings = true;
     else if (argv[i] === '--model') {
       const model = argv[++i];
       if (!model || model.startsWith('--')) throw new Error('--model requires a folder path.');
@@ -212,6 +214,27 @@ function assertReply(reply, command) {
   return reply;
 }
 
+function validateEmbeddings(response) {
+  const vectors = Array.isArray(response?.data)
+    ? response.data.map((row) => row?.embedding)
+    : null;
+  if (!Array.isArray(vectors) || vectors.length !== EMBEDDING_INPUTS.length ||
+    !vectors.every((vector) => Array.isArray(vector) && vector.length > 0 &&
+      vector.length === vectors[0]?.length &&
+      vector.every((component) => typeof component === 'number' && Number.isFinite(component)) &&
+      vector.some((component) => component !== 0))) {
+    throw new Error('Embedding response must contain finite, nonzero vectors of matching dimensions.');
+  }
+  return vectors;
+}
+
+function cosine(a, b) {
+  const dot = a.reduce((sum, component, index) => sum + component * b[index], 0);
+  const normA = Math.hypot(...a);
+  const normB = Math.hypot(...b);
+  return dot / (normA * normB);
+}
+
 async function complete(endpoint, body, stream = false) {
   const response = await fetch(`${endpoint}/chat/completions`, {
     method: 'POST',
@@ -246,7 +269,7 @@ async function complete(endpoint, body, stream = false) {
   return { text, done };
 }
 
-async function run(modelPath, { copy = false, restart = false } = {}) {
+async function run(modelPath, { copy = false, restart = false, embeddings = false } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
   }
@@ -261,10 +284,13 @@ async function run(modelPath, { copy = false, restart = false } = {}) {
   const home = path.join(work, 'home');
   fs.mkdirSync(home, { recursive: true });
   const appName = 'flint-live';
+  const modelAlias = embeddings ? 'flint-byom-embedding-live' : ALIAS;
   const stderrLines = [];
   const report = {
     modelPath,
     mode: copy ? 'copy' : 'link',
+    task: embeddings ? 'embeddings' : 'chat',
+    cudaDevice: process.env.CUDA_VISIBLE_DEVICES ?? null,
     restarted: false,
     phase: 'source snapshot',
     sourceUnchanged: null,
@@ -286,15 +312,21 @@ async function run(modelPath, { copy = false, restart = false } = {}) {
     report.phase = 'first init';
     assertReply(await sidecar.send('init', { appName, logLevel: 'error' }), 'init');
     report.phase = 'first accelerator registration';
-    assertReply(await sidecar.send('ensureAccelerators'), 'ensureAccelerators');
+    const accelerators = assertReply(await sidecar.send('ensureAccelerators'), 'ensureAccelerators').result;
+    if (embeddings && !accelerators?.registeredEps?.includes('CUDAExecutionProvider')) {
+      throw new Error('CUDA provider was not registered for the embedding qualification.');
+    }
     const addCommand = copy ? 'importModelFolder' : 'linkModelFolder';
     report.phase = addCommand;
     const added = assertReply(await sidecar.send(addCommand, {
       folderPath: modelPath,
-      name: ALIAS,
+      name: modelAlias,
     }), addCommand).result;
     if (added.registered !== true) {
       throw new Error(`Local registration failed: ${added.registrationError || added.registrationTask || 'unknown reason'}`);
+    }
+    if (embeddings && added.registrationTask !== 'embeddings') {
+      throw new Error(`The imported embedding was registered as '${added.registrationTask}'.`);
     }
     linkedPath = copy ? added.path : added.linkPath;
 
@@ -313,23 +345,38 @@ async function run(modelPath, { copy = false, restart = false } = {}) {
 
     report.phase = 'post-registration discovery';
     const listed = assertReply(await sidecar.send('listModels'), 'listModels').result;
-    const local = listed.find((model) => model.alias === ALIAS);
-    if (!local || local.info?.uri !== `local://${ALIAS}`) {
+    const local = listed.find((model) => model.alias === modelAlias);
+    if (!local || local.info?.uri !== `local://${modelAlias}`) {
       throw new Error('The registered model was not visible in Flint model discovery.');
     }
     report.phase = 'model load and IPC';
-    const loaded = assertReply(await sidecar.send('load', { alias: ALIAS }), 'load').result;
+    const loaded = assertReply(await sidecar.send('load', { alias: modelAlias }), 'load').result;
     const prompt = [{ role: 'user', content: PROMPT }];
-    const ipc = assertReply(await sidecar.send('chatCompletion', {
-      model: ALIAS,
-      messages: prompt,
-      maxTokens: 32,
-    }, 3 * 60 * 1000), 'chatCompletion').result;
-    const ipcText = ipc?.choices?.[0]?.message?.content;
-    if (typeof ipcText !== 'string' || !ipcText.trim()) {
-      throw new Error('Flint IPC completed without assistant text.');
+    let ipcVectors;
+    if (embeddings) {
+      const ipc = assertReply(await sidecar.send('embedTexts', {
+        model: modelAlias,
+        inputs: EMBEDDING_INPUTS,
+      }, 3 * 60 * 1000), 'embedTexts').result;
+      ipcVectors = validateEmbeddings(ipc);
+      report.ipc = {
+        variantId: loaded.variantId,
+        dimensions: ipcVectors[0].length,
+        count: ipcVectors.length,
+        activeProvider: loaded.acceleration?.active ?? null,
+      };
+    } else {
+      const ipc = assertReply(await sidecar.send('chatCompletion', {
+        model: modelAlias,
+        messages: prompt,
+        maxTokens: 32,
+      }, 3 * 60 * 1000), 'chatCompletion').result;
+      const ipcText = ipc?.choices?.[0]?.message?.content;
+      if (typeof ipcText !== 'string' || !ipcText.trim()) {
+        throw new Error('Flint IPC completed without assistant text.');
+      }
+      report.ipc = { variantId: loaded.variantId, text: ipcText.slice(0, 240) };
     }
-    report.ipc = { variantId: loaded.variantId, text: ipcText.slice(0, 240) };
 
     report.phase = 'gateway';
     const port = await listenOnFreePort();
@@ -347,30 +394,57 @@ async function run(modelPath, { copy = false, restart = false } = {}) {
     const modelListing = await fetch(`${endpoint}/models`);
     if (!modelListing.ok) throw new Error(`Gateway model listing returned HTTP ${modelListing.status}.`);
     const modelRows = (await modelListing.json())?.data;
-    if (!Array.isArray(modelRows) || !modelRows.some((model) => model.parent === ALIAS)) {
+    if (!Array.isArray(modelRows) || !modelRows.some((model) => model.parent === modelAlias)) {
       throw new Error('The gateway model listing omitted the registered BYOM.');
     }
-    const request = { model: ALIAS, messages: prompt, max_tokens: 32 };
-    const buffered = await complete(endpoint, request);
-    const bufferedText = buffered?.choices?.[0]?.message?.content;
-    if (typeof bufferedText !== 'string' || !bufferedText.trim()) {
-      throw new Error('Gateway buffered inference completed without assistant text.');
+    if (embeddings) {
+      const response = await fetch(`${endpoint}/embeddings`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: modelAlias, input: EMBEDDING_INPUTS }),
+        signal: AbortSignal.timeout(3 * 60 * 1000),
+      });
+      if (!response.ok) {
+        throw new Error(`Gateway embeddings returned HTTP ${response.status}: ${await response.text()}`);
+      }
+      const gatewayVectors = validateEmbeddings(await response.json());
+      if (gatewayVectors[0].length !== ipcVectors[0].length) {
+        throw new Error('Gateway and IPC embedding dimensions differ.');
+      }
+      const agreement = gatewayVectors.map((vector, index) => cosine(vector, ipcVectors[index]));
+      if (!agreement.every((score) => Number.isFinite(score) && score > 0.99)) {
+        throw new Error(`Gateway and IPC embeddings disagree: ${JSON.stringify(agreement)}`);
+      }
+      report.gateway = {
+        endpoint,
+        discoveredId: modelRows.find((model) => model.parent === modelAlias).id,
+        count: gatewayVectors.length,
+        dimensions: gatewayVectors[0].length,
+        ipcCosine: agreement,
+      };
+    } else {
+      const request = { model: modelAlias, messages: prompt, max_tokens: 32 };
+      const buffered = await complete(endpoint, request);
+      const bufferedText = buffered?.choices?.[0]?.message?.content;
+      if (typeof bufferedText !== 'string' || !bufferedText.trim()) {
+        throw new Error('Gateway buffered inference completed without assistant text.');
+      }
+      const streamed = await complete(endpoint, request, true);
+      if (!streamed.done || !streamed.text.trim()) {
+        throw new Error('Gateway streaming inference did not emit text and [DONE].');
+      }
+      report.gateway = {
+        endpoint,
+        discoveredId: modelRows.find((model) => model.parent === modelAlias).id,
+        bufferedText: bufferedText.slice(0, 240),
+        streamedText: streamed.text.slice(0, 240),
+        streamDone: streamed.done,
+      };
     }
-    const streamed = await complete(endpoint, request, true);
-    if (!streamed.done || !streamed.text.trim()) {
-      throw new Error('Gateway streaming inference did not emit text and [DONE].');
-    }
-    report.gateway = {
-      endpoint,
-      discoveredId: modelRows.find((model) => model.parent === ALIAS).id,
-      bufferedText: bufferedText.slice(0, 240),
-      streamedText: streamed.text.slice(0, 240),
-      streamDone: streamed.done,
-    };
 
     report.phase = 'model removal';
-    assertReply(await sidecar.send('unload', { alias: ALIAS }), 'unload');
-    assertReply(await sidecar.send('deleteModel', { alias: ALIAS }), 'deleteModel');
+    assertReply(await sidecar.send('unload', { alias: modelAlias }), 'unload');
+    assertReply(await sidecar.send('deleteModel', { alias: modelAlias }), 'deleteModel');
     const finalFiles = await snapshotFolder(modelPath);
     report.sourceUnchanged = JSON.stringify(sourceBefore) === JSON.stringify(finalFiles);
     if (!report.sourceUnchanged) throw new Error('The source model files changed during the test.');
@@ -401,18 +475,19 @@ async function main() {
     assert.equal(parseArgs(['--model', 'model']).model, path.resolve('model'));
     assert.equal(parseArgs(['--model', 'model', '--copy']).copy, true);
     assert.equal(parseArgs(['--model', 'model', '--restart']).restart, true);
+    assert.equal(parseArgs(['--model', 'model', '--embeddings']).embeddings, true);
     assert.throws(() => parseArgs(['--model']), /requires a folder/);
     assert.throws(() => parseArgs(['--unexpected']), /Unknown argument/);
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart]');
-  const report = await run(args.model, { copy: args.copy, restart: args.restart });
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings]');
+  const report = await run(args.model, { copy: args.copy, restart: args.restart, embeddings: args.embeddings });
   console.log(JSON.stringify(report, null, 2));
   if (report.error) process.exitCode = 2;
 }
 
-export { parseArgs, stopSidecar };
+export { parseArgs, stopSidecar, validateEmbeddings };
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
