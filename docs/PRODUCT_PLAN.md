@@ -487,6 +487,16 @@ which the gateway recognizes. Flint's `embedTexts` IPC
 handler returned two finite 1024-dimensional vectors on the 0.6B variant and
 one finite 4096-dimensional vector on the 8B variant. Both cached variants
 also returned embeddings through gateway alias autoload.
+The cached 0.6B variant's `model.onnx` is 501,754,600 bytes with SHA-256
+`9e0e70798d8563b2d2f72584a026cd1ba3b55ad0dd147e72c5cad2c969435be9`.
+The separately built portable export's graph is 812,372,350 bytes with SHA-256
+`c329c06087fc940b48491f32d66c5c46b7d0c89f0208014cf2388d9ae3dbae61`.
+The cached `config.json` has `quantization_config.embeds: true` and an
+8-bit input-embedding override; the portable export has `embeds: false`.
+Their `tokenizer.json`, `vocab.json`, and `merges.txt` match byte-for-byte,
+but the graphs and GenAI configs do not.
+This proves the cached artifact is not the measured portable export; it does
+not identify the cached graph's source revision or establish its retrieval score.
 With physical GPU 1 selected by UUID, an isolated sidecar's normal unfiltered
 registration reported TensorRT-RTX, CUDA, and WebGPU ready with no failed
 providers. The cached Qwen3 0.6B CUDA variant then returned two
@@ -494,7 +504,7 @@ providers. The cached Qwen3 0.6B CUDA variant then returned two
 vectors through gateway alias requests. It was explicitly unloaded and
 shutdown reported confirmed cleanup. Load still reported
 `acceleration.active: null`; these vectors do not establish which provider
-executed inference or explain Continue's stored 256-component rows.
+executed inference or prove post-fix Continue persisted-vector parity.
 A source-pinned Qwen3 0.6B INT4 build used upstream revision
 `97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3` and the local Olive recipe checkout
 at `1ebab74ab474869c53575954fda0772cee723ecf`. Its isolated toolchain pinned
