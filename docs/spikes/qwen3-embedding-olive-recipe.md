@@ -166,6 +166,16 @@ crash after provider discovery and local catalog acquisition, inside the
 restarted SDK `Catalog.registerModel` call for Flint's copied embedding model;
 that call did not return. The underlying native fault and its trigger remain
 unidentified.
+In an isolated comparison, six restarts passed when owned-model
+re-registration used the SDK's synchronous method instead. Flint now uses
+`registerModelSync` only for restoring owned models during accelerator
+registration; user-initiated imports keep the async method. Eight additional
+unmodified GPU-1 sidecar runs after that change passed copy, restart, IPC and
+gateway embeddings, source-hash preservation, removal, and confirmed shutdown.
+One measured synchronous registration took 19 ms for this folder. These
+runs do not establish that the native crash is impossible for this or another
+model, especially on slower filesystems; synchronous registration blocks the
+sidecar event loop while it runs.
 The active execution provider was still not reported, and these results do not
 establish the provenance or quality of the separately cached catalog artifact,
 cross-host reproducibility, or full MTEB performance.

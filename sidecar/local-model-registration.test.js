@@ -133,6 +133,41 @@ describe('ensureRegisteredLocalModel', () => {
     expect(created[0].props.context_length).toBe(131072);
   });
 
+  it('uses the synchronous SDK registration for owned-model recovery', async () => {
+    const { MutableModelInfo, created } = metadataClass();
+    const catalog = {
+      async registerModel() {
+        throw new Error('Async registration must not run during owned-model recovery.');
+      },
+      registerModelSync(_modelPath, modelId, info) {
+        return { info: { id: modelId, task: info.props.task } };
+      },
+    };
+    const result = await ensureRegisteredLocalModel({
+      catalog,
+      MutableModelInfo,
+      modelPath: 'C:/models/llama',
+      modelId: 'llama:1',
+      task: 'chat-completion',
+      synchronous: true,
+    });
+    expect(result).toMatchObject({ registered: true, id: 'llama:1', task: 'chat-completion' });
+    expect(created).toHaveLength(1);
+    expect(created[0].disposed).toBe(true);
+  });
+
+  it('does not silently fall back to the crashing async method for owned-model recovery', async () => {
+    const { MutableModelInfo } = metadataClass();
+    await expect(ensureRegisteredLocalModel({
+      catalog: { async registerModel() { throw new Error('Async registration must not run.'); } },
+      MutableModelInfo,
+      modelPath: 'C:/models/llama',
+      modelId: 'llama:1',
+      task: 'chat-completion',
+      synchronous: true,
+    })).rejects.toThrow(/registerModelSync/);
+  });
+
   it('leaves a model that already has the same task', async () => {
     const { MutableModelInfo } = metadataClass();
     const calls = [];
@@ -186,6 +221,41 @@ describe('ensureRegisteredLocalModel', () => {
     });
     expect(result).toMatchObject({ registered: true, replaced: true, id: 'llama:1', task: 'chat-completion' });
     expect(calls).toEqual(['llama:1']);
+    expect(created).toHaveLength(2);
+    expect(created.every((info) => info.disposed)).toBe(true);
+  });
+
+  it('uses the synchronous SDK method for both recovery registration attempts', async () => {
+    const { MutableModelInfo, created } = metadataClass();
+    const calls = [];
+    const catalog = {
+      async registerModel() {
+        throw new Error('Async registration must not run during owned-model recovery.');
+      },
+      registerModelSync(_modelPath, modelId, info) {
+        calls.push('registerSync');
+        if (calls.filter((call) => call === 'registerSync').length === 1) {
+          throw new Error('already registered');
+        }
+        return { info: { id: modelId, task: info.props.task } };
+      },
+      async getModel() {
+        return { path: 'C:/models/llama', info: { id: 'llama:1', task: '' } };
+      },
+      async unregisterModel() {
+        calls.push('unregister');
+      },
+    };
+    const result = await ensureRegisteredLocalModel({
+      catalog,
+      MutableModelInfo,
+      modelPath: 'C:/models/llama',
+      modelId: 'llama:1',
+      task: 'chat-completion',
+      synchronous: true,
+    });
+    expect(result).toMatchObject({ registered: true, replaced: true, task: 'chat-completion' });
+    expect(calls).toEqual(['registerSync', 'unregister', 'registerSync']);
     expect(created).toHaveLength(2);
     expect(created.every((info) => info.disposed)).toBe(true);
   });

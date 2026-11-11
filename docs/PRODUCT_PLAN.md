@@ -543,7 +543,13 @@ Six further catalog-traced runs passed. A later boundary-traced run reproduced
 the access violation inside the restarted SDK `Catalog.registerModel` call
 after provider discovery and local catalog acquisition; the call did not
 return. Its native trigger and the active provider remain unidentified. The
-BYOM gate remains open for cached catalog-artifact provenance.
+SDK's synchronous registration passed six isolated comparison runs. Flint now
+uses that method only while re-registering owned models; new imports remain
+async. Eight further uninstrumented GPU-1 copy/restart runs passed embedding
+IPC/gateway parity, unchanged source hashes, removal, and confirmed shutdown.
+One synchronous registration took 19 ms for this folder, but blocks the
+sidecar event loop and does not prove the crash impossible for other models or
+filesystems. The BYOM gate remains open for cached catalog-artifact provenance.
 Qwen2.5
 0.5B CPU rejected a real 38,708-word request during structural preflight (39,249
 estimated tokens against a 32,768 limit), before any stream event or in-flight

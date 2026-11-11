@@ -2078,7 +2078,7 @@ async function releaseLocalRegistration(model) {
   return true;
 }
 
-async function registerOneLocalModel(target) {
+async function registerOneLocalModel(target, { synchronous = false } = {}) {
   try {
     const local = localCatalogForRegistration();
     if (!local) {
@@ -2091,6 +2091,7 @@ async function registerOneLocalModel(target) {
       modelId: target.modelId,
       task: target.task,
       contextLength: target.contextLength,
+      synchronous,
     });
     return {
       registered: outcome.registered,
@@ -2129,7 +2130,7 @@ async function registerOwnedLocalModels() {
   const results = [];
   const failures = [];
   for (const target of targets) {
-    const registration = await registerOneLocalModel(target);
+    const registration = await registerOneLocalModel(target, { synchronous: true });
     if (registration.registered) {
       log(
         'info',

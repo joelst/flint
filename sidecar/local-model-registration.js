@@ -261,7 +261,7 @@ function sameModelPath(existingPath, requestedPath) {
  * A different non-empty task is kept. Metadata is never reused after registerModel,
  * which disposes it.
  *
- * @param {{ catalog: { registerModel: Function, getModel?: Function, unregisterModel?: Function }, MutableModelInfo: Function, modelPath: string, modelId: string, task: string, contextLength?: number | null }} input
+ * @param {{ catalog: { registerModel: Function, registerModelSync?: Function, getModel?: Function, unregisterModel?: Function }, MutableModelInfo: Function, modelPath: string, modelId: string, task: string, contextLength?: number | null, synchronous?: boolean }} input
  */
 export async function ensureRegisteredLocalModel(input) {
   const catalog = input?.catalog;
@@ -269,8 +269,9 @@ export async function ensureRegisteredLocalModel(input) {
   const modelPath = input?.modelPath;
   const modelId = input?.modelId;
   const task = cleanTask(input?.task);
-  if (!catalog || typeof catalog.registerModel !== 'function') {
-    throw new TypeError('This Foundry SDK has no local catalog registerModel.');
+  const registrationMethod = input?.synchronous === true ? 'registerModelSync' : 'registerModel';
+  if (!catalog || typeof catalog[registrationMethod] !== 'function') {
+    throw new TypeError(`This Foundry SDK has no local catalog ${registrationMethod}.`);
   }
   if (typeof MutableModelInfo !== 'function') {
     throw new TypeError('This Foundry SDK has no MutableModelInfo.');
@@ -284,7 +285,7 @@ export async function ensureRegisteredLocalModel(input) {
   const first = new MutableModelInfo();
   applyLocalModelMetadata(first, metadata);
   try {
-    const model = await catalog.registerModel(modelPath, modelId, first);
+    const model = await catalog[registrationMethod](modelPath, modelId, first);
     return outcomeFrom(model, { registered: true, replaced: false, task });
   } catch (error) {
     if (!alreadyRegistered(error)) throw error;
@@ -326,7 +327,7 @@ export async function ensureRegisteredLocalModel(input) {
   const second = new MutableModelInfo();
   applyLocalModelMetadata(second, metadata);
   try {
-    const model = await catalog.registerModel(modelPath, modelId, second);
+    const model = await catalog[registrationMethod](modelPath, modelId, second);
     return outcomeFrom(model, { registered: true, replaced: true, task });
   } finally {
     disposeMetadata(second);
