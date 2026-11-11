@@ -9,7 +9,7 @@ function sidecarFixture() {
   const sidecar = {
     hasClosed: false,
     exited: new Promise((resolve) => { close = resolve; }),
-    send: vi.fn(async () => ({ ok: true })),
+    send: vi.fn(async () => ({ ok: true, result: { cleanup: 'confirmed' } })),
     child: { kill: vi.fn() },
   };
   return {
@@ -19,6 +19,16 @@ function sidecarFixture() {
 }
 
 describe('BYOM runner cleanup', () => {
+  it('does not claim graceful cleanup when the sidecar already closed', async () => {
+    const { sidecar } = sidecarFixture();
+    sidecar.hasClosed = true;
+    await expect(stopSidecar(sidecar)).resolves.toMatchObject({
+      error: expect.stringMatching(/closed before.*shutdown/),
+      forced: false,
+    });
+    expect(sidecar.send).not.toHaveBeenCalled();
+  });
+
   it('waits for child close after the shutdown acknowledgement instead of killing immediately', async () => {
     vi.useFakeTimers();
     const { sidecar, close } = sidecarFixture();
@@ -58,6 +68,18 @@ describe('BYOM runner cleanup', () => {
     sidecar.send.mockImplementation(async () => { close(); return { ok: false, error: 'drain failed' }; });
     await expect(stopSidecar(sidecar)).resolves.toMatchObject({
       error: expect.stringMatching(/drain failed/),
+      forced: false,
+    });
+  });
+
+  it.each(['failed', 'timed-out'])('reports %s runtime cleanup even after a graceful child close', async (cleanup) => {
+    const { sidecar, close } = sidecarFixture();
+    sidecar.send.mockImplementation(async () => {
+      close();
+      return { ok: true, result: { cleanup, unloadFailures: ['flint-byom-live'] } };
+    });
+    await expect(stopSidecar(sidecar)).resolves.toMatchObject({
+      error: expect.stringMatching(new RegExp(`cleanup.*${cleanup}`)),
       forced: false,
     });
   });

@@ -177,9 +177,20 @@ async function waitForClose(sidecar, timeoutMs) {
 
 async function stopSidecar(sidecar, { graceMs = 1500, forceMs = 5000 } = {}) {
   let error = null;
-  if (sidecar.hasClosed) return { error, forced: false };
+  if (sidecar.hasClosed) {
+    return { error: 'Sidecar closed before graceful runtime shutdown could be confirmed.', forced: false };
+  }
   try {
-    assertReply(await sidecar.send('shutdownRuntime', { drainTimeoutMs: 10000 }, 15000), 'shutdownRuntime');
+    const shutdown = assertReply(
+      await sidecar.send('shutdownRuntime', { drainTimeoutMs: 10000 }, 15000),
+      'shutdownRuntime',
+    );
+    if (shutdown.result?.cleanup !== 'confirmed') {
+      throw new Error(
+        `Runtime cleanup not confirmed (${shutdown.result?.cleanup ?? 'missing status'}): ` +
+        JSON.stringify(shutdown.result ?? null),
+      );
+    }
   } catch (failure) {
     error = `Graceful sidecar shutdown failed: ${failure?.message || failure}`;
   }
