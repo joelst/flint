@@ -256,10 +256,14 @@ The 2.1.0 contracts, re-run on 2.4.0:
 
 - IPC ChatSession one-shot and streaming paths now forward the request-owned
   `AbortSignal`; streaming retains its activity lease through the terminal
-  `response`. Automated tests cover that fence. Still qualify real-model
-  completion/cancel races, queued requests, legacy-client fallback, and gateway
-  disconnect independently. The UI Stop acknowledgement is not proof of native
-  completion.
+  `response`. Automated tests cover that fence. A direct real-model SDK adapter
+  cancellation and concurrent-completion probe is recorded below; still
+  qualify sidecar IPC completion/cancel races, actual queued requests,
+  legacy-client fallback, and sidecar gateway wiring independently. A real
+  streaming and buffered client-disconnect check passed through a direct
+  gateway harness, but neither proves native cancellation; sidecar integration
+  and native quiescence remain open. The UI Stop acknowledgement is not proof
+  of native completion.
 - Model downloads now pass an AbortSignal to `IModel.download` and expose
   `cancelDownload` through the UI/sidecar. Flint waits for native settlement and
   refreshes cache state; automated tests cover cancellation and admission
@@ -353,8 +357,16 @@ include cancellation certainty.
 On `qwen2.5-0.5b-instruct-cuda-gpu:4`, a direct `createSessionChatClient`
 probe restricted to physical GPU 1 emitted one chunk, then signal cancellation
 settled as `AbortError` after 20 ms with no later chunks; a fresh non-streaming
-request succeeded. This verifies adapter-level cancellation and reuse, not
-sidecar IPC or native quiescence. The uncached 131-MB
+request succeeded. A separate one-shot call aborted 165 ms after invocation
+settled as `AbortError` after 232 ms, and a fresh one-shot request then
+succeeded. In another run, a one-shot request started after the first stream
+chunk and before abort; the stream settled as `AbortError` in 24 ms and the
+one-shot completion succeeded in 26 ms. These verify adapter-level
+cancellation and reuse, not sidecar IPC, queue ordering, or native
+quiescence. A buffered request through the direct gateway harness was aborted
+123 ms after request start; the client settled as `AbortError`, its activity
+lease ended (one start/one end), and a later request succeeded. This also does
+not establish native quiescence. The uncached 131-MB
 `openai-whisper-tiny-generic-cpu:4` download was cancelled after positive native
 progress; cancellation settled, its partial marker and metadata files were
 removed, the inventory no longer reports the entry, and the variant remained
@@ -382,10 +394,19 @@ before load.
 Qwen2.5 0.5B declares tool support, and strict `openai-live --require-tools`
 passed all required checks when given its exact listed variant id, including
 usage, streamed tool call, tool-result follow-up, tool-free final answer, and
-disconnect. The friendly alias also passed inference/tool checks but was not a
-`/v1/models` row; SDK 2.4.0 returned full versioned variant ids without a
-`parent` alias in this probe. Package revision/license provenance, broader
-lifecycle and provider checks, additional tool-capable models, the 2.2.0–2.3.1
+disconnect. A separate direct `createGateway` harness with the native 2.4.0
+listener passed the same required checks on the cached CUDA variant; its
+streaming client-disconnect settled, but the runner cannot establish that
+native generation stopped. This harness did not exercise sidecar startup or
+IPC. Qwen3 0.6B CUDA also passed the strict tool, follow-up, and disconnect
+checks through the direct gateway harness. Phi-4 Mini CUDA passed ordinary
+chat, streaming, and client-disconnect checks, but did not produce the required
+tool call; its optional `/v1/responses` check returned HTTP 500 with a CUDA
+`invalid argument` diagnostic, whose cause was not isolated. The friendly alias
+also passed inference/tool checks but was not a `/v1/models` row; SDK 2.4.0
+returned full versioned variant ids without a `parent` alias in this probe.
+Package revision/license provenance, broader lifecycle and provider checks,
+additional tool-capable model families beyond Qwen2.5/Qwen3, the 2.2.0–2.3.1
 gates on this pin, and installed-app qualification remain open. Flash-Next
 conversion or architecture enablement is not a release gate.
 
