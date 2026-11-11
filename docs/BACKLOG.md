@@ -69,10 +69,15 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       `/v1/embeddings` and `embedTexts` IPC; the cached 8B model passed both
       paths as well. An isolated SDK 2.4.0 local-registration probe using a
       temporary external copy of the cached 0.6B folder returned two finite
-      1,024-dimensional vectors with CUDA masked to GPU 1. It did not establish
-      a source-pinned BYOM recipe; the source repo/revision/license and SDK/core
-      pin, with the dimension tied to that exact artifact, are still required
-      before Continue's indexer can be verified.
+      1,024-dimensional vectors with CUDA masked to GPU 1. Cache metadata
+      identifies the export as
+      `azureml://registries/azureml/models/qwen3-embedding-0.6b-cuda-gpu/versions/1`
+      with Apache-2.0 licensing; the candidate upstream
+      [Qwen/Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/tree/97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3)
+      is pinned to that Hub revision, and Flint pins SDK/core 2.4.0. Available
+      metadata does not tie the registry export to that source commit, so a
+      reproducible source-pinned BYOM recipe and Continue indexer verification
+      remain open.
 
 ## Dependencies
 
