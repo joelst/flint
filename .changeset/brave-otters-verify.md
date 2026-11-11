@@ -1,3 +1,3 @@
 ---
 ---
-Reject unconfirmed runtime cleanup in real-model BYOM qualification.
+Reject unconfirmed or forced runtime cleanup in real-model BYOM qualification.

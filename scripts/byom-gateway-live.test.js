@@ -46,7 +46,10 @@ describe('BYOM runner cleanup', () => {
     sidecar.child.kill.mockImplementation(() => { setTimeout(close, 10); return true; });
     const stopping = stopSidecar(sidecar, { graceMs: 20 });
     await vi.advanceTimersByTimeAsync(30);
-    await expect(stopping).resolves.toEqual({ error: null, forced: true });
+    await expect(stopping).resolves.toMatchObject({
+      error: expect.stringMatching(/forced termination/),
+      forced: true,
+    });
     expect(sidecar.child.kill).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });

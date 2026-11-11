@@ -198,6 +198,8 @@ async function stopSidecar(sidecar, { graceMs = 1500, forceMs = 5000 } = {}) {
   sidecar.child.kill();
   if (!await waitForClose(sidecar, forceMs)) {
     error = 'The isolated sidecar did not close; temporary files were retained.';
+  } else {
+    error ??= 'The isolated sidecar required forced termination; graceful shutdown was not confirmed.';
   }
   return { error, forced: true };
 }
