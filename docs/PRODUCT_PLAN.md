@@ -348,7 +348,13 @@ emitted 36. A buffered gateway request aborted while pending (540 ms) returned
 `AbortError`; the first pool snapshot, 10.1 seconds later, showed `inFlight: 0`.
 A separate 256-token gateway request completed in 21.6 seconds. These are
 caller/lease observations, not proof of native quiescence; IPC replies did not
-include cancellation certainty. The uncached 131-MB
+include cancellation certainty.
+
+On `qwen2.5-0.5b-instruct-cuda-gpu:4`, a direct `createSessionChatClient`
+probe restricted to physical GPU 1 emitted one chunk, then signal cancellation
+settled as `AbortError` after 20 ms with no later chunks; a fresh non-streaming
+request succeeded. This verifies adapter-level cancellation and reuse, not
+sidecar IPC or native quiescence. The uncached 131-MB
 `openai-whisper-tiny-generic-cpu:4` download was cancelled after positive native
 progress; cancellation settled, its partial marker and metadata files were
 removed, the inventory no longer reports the entry, and the variant remained
