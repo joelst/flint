@@ -266,6 +266,39 @@ describe('BYOM link', () => {
     // The source must be untouched: no marker file, no metadata rewrite.
     expect(fs.readdirSync(src).sort()).toEqual(before);
   });
+
+  it.skipIf(!hasNativeSdk)('refuses to load a linked registration while its source is missing', async () => {
+    const src = track(makeSourceRepo({ nested: false }));
+    const alias = 'temporarily-missing-link';
+    fs.writeFileSync(
+      path.join(src, 'inference_model.json'),
+      JSON.stringify({ Name: `${alias}:1`, PromptTemplate: CUSTOM_TEMPLATE }),
+    );
+    const linked = await send('linkModelFolder', { folderPath: src, name: alias });
+    expect(linked.ok, JSON.stringify(linked)).toBe(true);
+
+    const moved = `${src}-hidden`;
+    fs.renameSync(src, moved);
+    try {
+      const listed = await send('listModels');
+      expect(listed.ok, JSON.stringify(listed)).toBe(true);
+      const model = listed.result.find((row: any) => row.alias === alias);
+      expect(model).toBeDefined();
+      expect(model.cached).toBe(false);
+      expect(model.variants.every((variant: any) => !variant.cached)).toBe(true);
+
+      const load = await send('load', { alias });
+      expect(load.ok).toBeFalsy();
+      expect(String(load.error)).toMatch(/not cached|not found|does not exist|missing|ENOENT/i);
+    } finally {
+      fs.renameSync(moved, src);
+    }
+
+    const deleted = await send('deleteModel', { alias });
+    expect(deleted.ok, JSON.stringify(deleted)).toBe(true);
+    expect(fs.existsSync(src)).toBe(true);
+    expect(fs.existsSync(linked.result.linkPath)).toBe(false);
+  }, 120000);
 });
 
 describe('BYOM discovery by the Foundry SDK', () => {
