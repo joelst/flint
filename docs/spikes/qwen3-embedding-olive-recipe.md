@@ -161,9 +161,11 @@ restart stability.
 In a traced reproduction, CUDA, WebGPU, and TensorRT registration calls all
 returned success in the restarted sidecar before the access violation; it
 exited before replying to `ensureAccelerators`. Six subsequent runs with
-additional catalog tracing passed. The crash could be in provider-state
-discovery or local-model re-registration after those calls; neither operation
-has been isolated as the cause.
+additional catalog tracing passed. A later boundary-traced run reproduced the
+crash after provider discovery and local catalog acquisition, inside the
+restarted SDK `Catalog.registerModel` call for Flint's copied embedding model;
+that call did not return. The underlying native fault and its trigger remain
+unidentified.
 The active execution provider was still not reported, and these results do not
 establish the provenance or quality of the separately cached catalog artifact,
 cross-host reproducibility, or full MTEB performance.
