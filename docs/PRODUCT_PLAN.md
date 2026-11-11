@@ -372,6 +372,11 @@ progress; cancellation settled, its partial marker and metadata files were
 removed, the inventory no longer reports the entry, and the variant remained
 uncached. The now-empty variant directory was removed during probe cleanup.
 No complete model weights were downloaded.
+A full `sidecar/foundry-sidecar.test.ts` run passed all 154 tests, including
+queued IPC chat drain, buffered and streaming cancellation, legacy `ChatClient`
+fallback, and refusal to replay a dispatched `ChatSession` failure. The suite
+uses a fake SDK, so this verifies sidecar IPC coordination, not native runtime
+behavior or quiescence.
 The SDK/core 2.4.0 catalog also exposes `qwen3-embedding-0.6b` and
 `qwen3-embedding-8b`; their cached variants are CUDA-only. CUDA EP assets exist
 in the local cache. Explicit CUDA registration succeeded; the cached Qwen3
