@@ -105,6 +105,7 @@ import {
 import {
   ensureRegisteredLocalModel,
   linkedLocalRegistrationTargets,
+  lookupLocalAfterPublicMiss,
   localRegistrationDeletePlan,
   ownedLocalRegistrationTargets,
   removeLocalRegistrationAssets,
@@ -2040,16 +2041,7 @@ async function readLocalCatalogList(method) {
 }
 
 async function modelAfterPublicMiss(kind, key, publicError) {
-  const local = localCatalogHandle();
-  const method = kind === 'variant' ? 'getModelVariant' : 'getModel';
-  if (local && typeof local[method] === 'function') {
-    try {
-      return await local[method](key);
-    } catch {
-      // Keep the public catalog error. It names the alias the caller asked for.
-    }
-  }
-  throw publicError;
+  return lookupLocalAfterPublicMiss(kind, key, publicError, localCatalogHandle);
 }
 
 // removeFromCache throws for a LocalRegistration and leaves the row in place.

@@ -7,6 +7,7 @@ import {
   applyLocalModelMetadata,
   ensureRegisteredLocalModel,
   linkedLocalRegistrationTargets,
+  lookupLocalAfterPublicMiss,
   localRegistrationDeletePlan,
   ownedLocalRegistrationTargets,
   removeLocalRegistrationAssets,
@@ -48,6 +49,44 @@ function metadataClass() {
   }
   return { MutableModelInfo, created };
 }
+
+describe('lookupLocalAfterPublicMiss', () => {
+  const missing = new Error("Model with alias 'llama' not found.");
+
+  it('uses the local catalog only for a public missing-model error', async () => {
+    const failure = new Error('Public catalog failed to read');
+    await expect(lookupLocalAfterPublicMiss('alias', 'llama', failure, () => {
+      throw new Error('Local catalog must not be read');
+    })).rejects.toBe(failure);
+  });
+
+  it('resolves a missing public alias or variant from the local catalog', async () => {
+    const model = { alias: 'llama', id: 'llama:1' };
+    const variantMissing = new Error("Model variant with ID 'llama:1' not found.");
+    const local = {
+      async getModel(key) {
+        expect(key).toBe('llama');
+        return model;
+      },
+      async getModelVariant(key) {
+        expect(key).toBe('llama:1');
+        return model;
+      },
+    };
+    await expect(lookupLocalAfterPublicMiss('alias', 'llama', missing, () => local)).resolves.toBe(model);
+    await expect(lookupLocalAfterPublicMiss('variant', 'llama:1', variantMissing, () => local)).resolves.toBe(model);
+  });
+
+  it('preserves public misses but surfaces unrelated local catalog failures', async () => {
+    const unavailable = new Error('Local catalog failed to read');
+    await expect(lookupLocalAfterPublicMiss('alias', 'llama', missing, () => ({
+      async getModel() { throw new Error("Model with alias 'llama' not found."); },
+    }))).rejects.toBe(missing);
+    await expect(lookupLocalAfterPublicMiss('alias', 'llama', missing, () => ({
+      async getModel() { throw unavailable; },
+    }))).rejects.toBe(unavailable);
+  });
+});
 
 describe('applyLocalModelMetadata', () => {
   it('sets task and a positive integer context length', () => {

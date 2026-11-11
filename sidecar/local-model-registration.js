@@ -39,6 +39,20 @@ function modelNotFound(error) {
       .test(String(error?.message || error || ''));
 }
 
+export async function lookupLocalAfterPublicMiss(kind, key, publicError, getLocalCatalog) {
+  if (!modelNotFound(publicError)) throw publicError;
+  const local = getLocalCatalog();
+  const method = kind === 'variant' ? 'getModelVariant' : 'getModel';
+  if (local && typeof local[method] === 'function') {
+    try {
+      return await local[method](key);
+    } catch (error) {
+      if (!modelNotFound(error)) throw error;
+    }
+  }
+  throw publicError;
+}
+
 function aliasFromModelId(modelId) {
   return String(modelId).replace(/:\d+$/, '');
 }
