@@ -430,8 +430,31 @@ The native service returns the bare 2.4.0 `Model not found: X` alias rejection,
 which the gateway recognizes. Flint's `embedTexts` IPC
 handler returned two finite 1024-dimensional vectors on the 0.6B variant and
 one finite 4096-dimensional vector on the 8B variant. Both cached variants
-also returned embeddings through gateway alias autoload. A recorded BYOM
-folder recipe remains unqualified. Qwen2.5
+also returned embeddings through gateway alias autoload.
+A source-pinned Qwen3 0.6B INT4 build used upstream revision
+`97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3` and the local Olive recipe checkout
+at `1ebab74ab474869c53575954fda0772cee723ecf`. Its isolated toolchain pinned
+Python 3.12.12, Olive 0.11.0, Torch 2.6.0+cu126, onnxruntime-gpu 1.24.1,
+onnxruntime-genai-cuda 0.12.2, Transformers 4.52.4, Accelerate 1.15.0, and
+Datasets 3.6.0. The unchanged recipe's RTN pass failed while quantizing the
+input embedding layer, so this build used `passes.r.embeds=false`; Olive's
+optional TensorRT provider DLL was temporarily hidden for CUDA-only provider
+registration and restored afterward. The 13-file export totals 828,305,485
+bytes; `model.onnx` is 812,372,350 bytes with SHA-256
+`c329c06087fc940b48491f32d66c5c46b7d0c89f0208014cf2388d9ae3dbae61`.
+The export also received the README's post-export fixes: copy
+`config_sentence_transformers.json` and set top-level `tie_word_embeddings`
+to `true`.
+An isolated SDK/core 2.4.0 sidecar imported a copy into a temporary cache,
+registered CUDA, TensorRT RTX, and WebGPU without provider failures, and
+autoloaded the local registration on its first gateway `/v1/embeddings` request.
+With `CUDA_VISIBLE_DEVICES` restricted to physical GPU 1 by UUID, both the
+gateway and `embedTexts` IPC returned two finite 1,024-dimensional vectors
+for the same inputs, with zero maximum absolute difference. GPU 0 remained at
+0% utilization in the before/after snapshots. This is inference smoke evidence,
+not retrieval-quality or MTEB evidence. The source recipe remains unmodified,
+does not pin its model revision or full toolchain, and does not encode the two
+build workarounds, so the recorded BYOM recipe gate remains open. Qwen2.5
 0.5B CPU rejected a real 38,708-word request during structural preflight (39,249
 estimated tokens against a 32,768 limit), before any stream event or in-flight
 model work. A cached Nemotron 0.6B CPU WAV transcription recognized the local test phrase.

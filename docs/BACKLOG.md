@@ -76,16 +76,21 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       [Qwen/Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/tree/97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3)
       is pinned to that Hub revision, and Flint pins SDK/core 2.4.0. Available
       metadata does not tie the registry export to that source commit, so a
-      reproducible source-pinned BYOM recipe remains open. Microsoft maintains
+      reproducible source-pinned BYOM recipe remains open. A temporary build
+      using the pinned model snapshot and recipe commit was imported and
+      validated through sidecar 2.4.0 gateway and IPC; detailed evidence is in
+      PRODUCT_PLAN. The original recipe still required disabling
+      input-embedding quantization and temporarily hiding the optional TensorRT
+      provider DLL, so it is not reproducible from its checked-in configuration.
+      Microsoft maintains
       an [Olive CUDA recipe at pinned repository commit
       `1ebab74`](https://github.com/microsoft/olive-recipes/tree/1ebab74ab474869c53575954fda0772cee723ecf/Qwen-Qwen3-Embedding-0.6B/cuda)
       that builds an ONNX GenAI INT4 model from this upstream model, but its
       config omits the Hugging Face revision and its README installs Olive from
       `main`; it also requires copying `config_sentence_transformers.json` and
       correcting `tie_word_embeddings` after export. Treat it as a candidate
-      recipe, not as evidence for the existing AzureML artifact, until inputs
-      and dependencies are pinned and a built package is validated through
-      Flint. Its `requirements.txt` pins only
+      recipe, not as evidence for the existing AzureML artifact. Its
+      `requirements.txt` pins only
       `onnxruntime-genai-cuda==0.12.2` and `transformers==4.52.4`; `olive-ai`,
       `onnxruntime-gpu`, and the other tooling dependencies are unpinned.
       Continue source review at commit

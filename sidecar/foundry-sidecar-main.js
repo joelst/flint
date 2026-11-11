@@ -2592,6 +2592,23 @@ function getNativeOpenAiApiBase () {
     : getOpenAiApiBase(sharedEndpoint);
 }
 
+async function createEmbeddingClientForModel(modelAlias, embedModel) {
+  let client = null;
+  try {
+    const sdkModule = await getFoundrySdkModule();
+    client = createSessionEmbeddingClient(embedModel, sdkModule);
+  } catch (err) {
+    log('debug', `EmbeddingsSession client unavailable, using createEmbeddingClient(): ${err?.message || err}`);
+  }
+  if (!client) {
+    if (typeof embedModel?.createEmbeddingClient !== 'function') {
+      throw new Error(`Model ${modelAlias} does not expose createEmbeddingClient`);
+    }
+    client = embedModel.createEmbeddingClient();
+  }
+  return client;
+}
+
 async function serveLocalGatewayChat(req, res, rawBody, target) {
   let request;
   try {
@@ -2717,6 +2734,89 @@ async function serveLocalGatewayChat(req, res, rawBody, target) {
     }
     res.writeHead(500, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: { message, type: 'server_error' } }));
+  }
+}
+
+async function serveLocalGatewayEmbeddings(req, res, rawBody, target) {
+  const respondError = (status, message, type) => {
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: { message, type } }));
+  };
+  let request;
+  try {
+    request = JSON.parse(rawBody);
+  } catch {
+    respondError(400, 'Request body must be valid JSON.', 'invalid_request_error');
+    return;
+  }
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    respondError(400, 'Request body must be a JSON object.', 'invalid_request_error');
+    return;
+  }
+  if (!Object.prototype.hasOwnProperty.call(request, 'input')) {
+    respondError(400, 'The input field is required.', 'invalid_request_error');
+    return;
+  }
+  if (request.encoding_format !== undefined && request.encoding_format !== 'float') {
+    respondError(400, 'Only float embedding encoding is supported.', 'invalid_request_error');
+    return;
+  }
+  if (request.dimensions !== undefined) {
+    respondError(400, 'Custom embedding dimensions are not supported.', 'invalid_request_error');
+    return;
+  }
+  const inputs = typeof request.input === 'string' ? [request.input] : request.input;
+  if (!Array.isArray(inputs) || inputs.length === 0) {
+    respondError(400, 'Input must be a non-empty string or array of strings.', 'invalid_request_error');
+    return;
+  }
+  if (inputs.length > EMBED_MAX_INPUTS) {
+    respondError(400, `Input accepts at most ${EMBED_MAX_INPUTS} strings per request.`, 'invalid_request_error');
+    return;
+  }
+  for (const input of inputs) {
+    if (typeof input !== 'string' || !input.trim()) {
+      respondError(400, 'Input values must be non-empty strings.', 'invalid_request_error');
+      return;
+    }
+    if (input.length > EMBED_MAX_CHARS) {
+      respondError(400, `Input strings cannot exceed ${EMBED_MAX_CHARS} characters.`, 'invalid_request_error');
+      return;
+    }
+  }
+
+  const entry = pool.get(target.alias);
+  if (!entry?.catModel) {
+    respondError(503, `Local model ${target.alias} is not resident.`, 'server_error');
+    return;
+  }
+
+  try {
+    const client = await createEmbeddingClientForModel(target.alias, entry.catModel);
+    const result = await client.generateEmbeddings(inputs);
+    if (!Array.isArray(result?.data) || result.data.length !== inputs.length) {
+      throw new Error(`Foundry Local returned an invalid embedding count for ${inputs.length} inputs.`);
+    }
+    const data = result.data.map((item, index) => {
+      if (!Array.isArray(item?.embedding)
+          || !item.embedding.every((value) => typeof value === 'number' && Number.isFinite(value))) {
+        throw new Error(`Foundry Local returned an invalid embedding at index ${index}.`);
+      }
+      return { ...item, object: 'embedding', index };
+    });
+    if (res.destroyed || res.writableEnded) return;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      ...result,
+      object: 'list',
+      data,
+      model: target.variantId || entry.variantId || target.alias,
+    }));
+  } catch (error) {
+    const message = error?.message || String(error);
+    log('warn', `Local gateway embeddings failed for ${target.alias}: ${message}`);
+    if (res.destroyed || res.writableEnded) return;
+    respondError(500, message, 'server_error');
   }
 }
 
@@ -3974,6 +4074,7 @@ rl.on('line', async (line) => {
               return loaded === true ? entry.variantId : null;
             },
             serveLocal: serveLocalGatewayChat,
+            serveLocalEmbeddings: serveLocalGatewayEmbeddings,
             listLocalModels: listLocalGatewayModels,
             // Proxied traffic never reaches this process, so without this hook a model
             // serving a long completion would look idle and could be evicted underneath it.
@@ -4904,23 +5005,7 @@ rl.on('line', async (line) => {
       try {
         const poolEntry = await ensureModel(modelAlias);
         const embedModel = poolEntry.catModel;
-        // Prefer the EmbeddingsSession-backed replacement (see createSessionEmbeddingClient)
-        // over the deprecated createEmbeddingClient() wrapper it mirrors, removed end of 2026.
-        // Falls back to createEmbeddingClient() unchanged on any SDK build that doesn't export
-        // EmbeddingsSession/Request/Item.
-        let client = null;
-        try {
-          const sdkModule = await getFoundrySdkModule();
-          client = createSessionEmbeddingClient(embedModel, sdkModule);
-        } catch (err) {
-          log('debug', `EmbeddingsSession client unavailable, using createEmbeddingClient(): ${err?.message || err}`);
-        }
-        if (!client) {
-          if (typeof embedModel?.createEmbeddingClient !== 'function') {
-            throw new Error(`Model ${modelAlias} does not expose createEmbeddingClient`);
-          }
-          client = embedModel.createEmbeddingClient();
-        }
+        const client = await createEmbeddingClientForModel(modelAlias, embedModel);
         const result = await client.generateEmbeddings(inputs);
         embedOk = true;
         audit('embedTexts', { alias: modelAlias, count: inputs.length });

@@ -437,6 +437,79 @@ describe('gateway autoload', () => {
     expect(serveLocal).not.toHaveBeenCalled();
   });
 
+  it('serves local embeddings through the SDK after loading the registration', async () => {
+    const body = JSON.stringify({ model: 'local-model', input: 'hello' });
+    const serveLocalEmbeddings = vi.fn(async (_req, res, _body, model) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        object: 'list',
+        data: [{ object: 'embedding', index: 0, embedding: [0.1, 0.2] }],
+        model: model.variantId,
+      }));
+    });
+    const load = vi.fn(async () => 'local-model:1');
+    gateway = await startGateway({
+      resolve: async () => ({ alias: 'local-model', variantId: null, local: true }),
+      load,
+      serveLocalEmbeddings,
+    });
+
+    const res = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({
+      object: 'list',
+      model: 'local-model:1',
+      data: [{ object: 'embedding', index: 0, embedding: [0.1, 0.2] }],
+    });
+    expect(load).toHaveBeenCalledWith('local-model', null);
+    expect(serveLocalEmbeddings).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      body,
+      { alias: 'local-model', variantId: 'local-model:1', local: true },
+    );
+    expect(upstream.state.hits).toHaveLength(1);
+  });
+
+  it('buffers embeddings for an already-loaded local model when autoload is disabled', async () => {
+    const body = JSON.stringify({ model: 'local-model', input: ['hello'] });
+    const serveLocalEmbeddings = vi.fn(async (_req, res, _body, model) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ object: 'list', data: [], model: model.variantId }));
+    });
+    const load = vi.fn(async () => 'local-model:1');
+    const getLoadedModel = vi.fn(async () => 'local-model:1');
+    gateway = await startGateway({
+      autoload: false,
+      resolve: async () => ({ alias: 'local-model', variantId: null, local: true }),
+      load,
+      getLoadedModel,
+      serveLocalEmbeddings,
+    });
+
+    const res = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).model).toBe('local-model:1');
+    expect(getLoadedModel).toHaveBeenCalledWith('local-model', null);
+    expect(load).not.toHaveBeenCalled();
+    expect(serveLocalEmbeddings).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      body,
+      { alias: 'local-model', variantId: 'local-model:1', local: true },
+    );
+  });
+
   it('loads the model and replays the request once', async () => {
     const loads = [];
     gateway = await startGateway({

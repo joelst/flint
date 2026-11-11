@@ -127,6 +127,8 @@ function extractLeadingMultipartModel (body, boundary, ended = false) {
  * @param {(req: object, res: object, body: string, model: object) => Promise<void>} [options.serveLocal]
  *        serves a local registration through the in-process SDK when Foundry's HTTP router
  *        cannot expose that registration
+ * @param {(req: object, res: object, body: string, model: object) => Promise<void>} [options.serveLocalEmbeddings]
+ *        serves embeddings for a local registration through the in-process SDK
  * @param {(alias: string, variantId: string|null) => Promise<string|null>} [options.getLoadedModel]
  *        returns the resident variant id without loading; used when remote autoload is disabled
  * @param {() => Promise<object[]>} [options.listLocalModels]
@@ -157,6 +159,7 @@ export function createGateway (options) {
     resolve,
     load,
     serveLocal,
+    serveLocalEmbeddings,
     getLoadedModel,
     listLocalModels = async () => [],
     log = () => {},
@@ -408,7 +411,7 @@ export function createGateway (options) {
     // Upstream's rejection must name the model we sent, which is the rewritten id when a
     // rewrite was applied, not the client's own wording.
     const sentModel = known ?? requested;
-    const localFallbackMayBeNeeded = isChatCompletionPath(req.url);
+    const localFallbackMayBeNeeded = isChatCompletionPath(req.url) || isEmbeddingsPath(req.url);
     const attempt = await forward(req, res, outgoing, {
       captureNotLoaded: mayAutoload || localFallbackMayBeNeeded,
       sentModel,
@@ -458,7 +461,8 @@ export function createGateway (options) {
       if (canonical && !setActivityModel(canonical)) {
         return respondUnloading(req, res, canonical);
       }
-      if (typeof serveLocal !== 'function') {
+      const localHandler = isEmbeddingsPath(req.url) ? serveLocalEmbeddings : serveLocal;
+      if (typeof localHandler !== 'function') {
         res.writeHead(501, { 'content-type': 'application/json' });
         res.end(openAiError('Local model inference is unavailable through this gateway.', 'server_error'));
         return;
@@ -468,7 +472,7 @@ export function createGateway (options) {
         res.end(openAiError('A buffered JSON request is required for local model inference.', 'invalid_request_error'));
         return;
       }
-      await serveLocal(req, res, buffered, {
+      await localHandler(req, res, buffered, {
         ...target,
         variantId: canonical ?? target.variantId,
       });
@@ -501,8 +505,8 @@ export function createGateway (options) {
   }
 
   /**
-   * Read bounded JSON chat bodies so neutral penalties can always be normalized. Other JSON
-   * requests are buffered only when this caller may autoload and replay them.
+   * Read bounded JSON chat and embeddings bodies for local SDK fallback. Other JSON requests
+   * are buffered only when this caller may autoload and replay them.
    * @returns {Promise<string|null|typeof ABORTED>}
    */
   function maybeBufferBody (req, res, mayAutoload) {
@@ -537,13 +541,19 @@ export function createGateway (options) {
       contentLength: null,
       maxBytes: bufferedBodyLimit,
     });
-    if (isChatJson && Number.isFinite(declared) && declared > bufferedBodyLimit) {
+    const isEmbeddingsJson = isEmbeddingsPath(req.url) && shouldBufferBody({
+      method: req.method,
+      contentType: req.headers['content-type'],
+      contentLength: null,
+      maxBytes: bufferedBodyLimit,
+    });
+    if ((isChatJson || isEmbeddingsJson) && Number.isFinite(declared) && declared > bufferedBodyLimit) {
       res.writeHead(413, { 'content-type': 'application/json', connection: 'close' });
       res.end(openAiError('Request body too large.', 'invalid_request_error'));
       req.resume();
       return Promise.resolve(ABORTED);
     }
-    const wanted = bufferableJson && (isChatJson || mayAutoload);
+    const wanted = bufferableJson && (isChatJson || isEmbeddingsJson || mayAutoload);
     if (!wanted) return Promise.resolve(null);
 
     return new Promise(resolve2 => {
@@ -896,6 +906,10 @@ export function createGateway (options) {
 
   function isChatCompletionPath (url) {
     return canonicalGatewayPath(url) === '/v1/chat/completions';
+  }
+
+  function isEmbeddingsPath (url) {
+    return canonicalGatewayPath(url) === '/v1/embeddings';
   }
 
   function isEventStream (contentType) {
