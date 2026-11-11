@@ -59,7 +59,11 @@ import { createModelActivityFence } from './model-activity-fence.js';
 import {
   applyPreferredExecutionProvider as applyPreferredExecutionProviderTo,
 } from './execution-provider.js';
-import { rebuildBrokenExecutionProviders, removeProviderCache } from './execution-provider-cache.js';
+import {
+  providerCacheDirectory,
+  rebuildBrokenExecutionProviders,
+  removeProviderCache,
+} from './execution-provider-cache.js';
 import {
   createCatalogRegistrationGate,
   registerDiscoveredExecutionProviders,
@@ -633,7 +637,7 @@ function acceleratorGate() {
       if (!manager || typeof manager.downloadAndRegisterEps !== 'function') return null;
       return registerDiscoveredExecutionProviders(manager, progress, {
         ...options,
-        prepareCudaRuntime: options?.prepareCudaRuntime ?? prepareCudaRuntime,
+        prepareCudaRuntime: options?.prepareCudaRuntime ?? prepareCudaRuntimeForSidecar,
       });
     }, () => {
       const catalog = manager?.catalog;
@@ -644,6 +648,13 @@ function acceleratorGate() {
     });
   }
   return catalogRegistrationGate;
+}
+
+function prepareCudaRuntimeForSidecar() {
+  const epRoot = path.join(os.homedir(), `.${initConfig?.appName || 'flint'}`, 'ep');
+  return prepareCudaRuntime({
+    cudaExecutionProviderDirectory: providerCacheDirectory(epRoot, 'CUDAExecutionProvider'),
+  });
 }
 
 function beforeCatalogRead(onProgress, options = {}) {

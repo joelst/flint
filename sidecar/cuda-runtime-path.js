@@ -1,8 +1,9 @@
 /**
  * Windows x64 CUDA execution providers in Foundry Local 2.2.1+ no longer ship
- * the CUDA 12 / cuDNN 9 runtime. AddDllDirectory has to run in this Node
- * process before that provider is registered. PATH alone does not apply, and a
- * parent-process call does not apply to the sidecar. Other platforms skip it.
+ * the CUDA toolkit runtime. AddDllDirectory is process-local and must expose
+ * the installed toolkit to this sidecar; the cached provider directory also
+ * belongs on this process's PATH for provider dependencies such as cuDNN.
+ * Other platforms skip this setup.
  */
 
 import fs from 'node:fs';
@@ -114,6 +115,7 @@ export async function addDllDirectory(directory) {
  *   exists?: (dir: string) => boolean,
  *   readdir?: (dir: string) => string[],
  *   addDllDirectory?: (dir: string) => unknown,
+ *   cudaExecutionProviderDirectory?: string|null,
  * }} [options]
  * @returns {Promise<{ ok: boolean, required: boolean, directory?: string | null, reason?: string }>}
  */
@@ -124,6 +126,7 @@ export async function prepareCudaRuntime({
   exists = (directory) => fs.existsSync(directory),
   readdir = (directory) => fs.readdirSync(directory),
   addDllDirectory: addDirectory = addDllDirectory,
+  cudaExecutionProviderDirectory,
 } = {}) {
   if (platform !== 'win32' || arch !== 'x64') {
     return { ok: true, required: false };
@@ -146,6 +149,17 @@ export async function prepareCudaRuntime({
       directory,
       reason: error?.message || String(error),
     };
+  }
+  if (typeof cudaExecutionProviderDirectory === 'string' && cudaExecutionProviderDirectory) {
+    const pathEntries = typeof env.PATH === 'string' ? env.PATH.split(path.win32.delimiter) : [];
+    const target = path.win32.resolve(cudaExecutionProviderDirectory).toLowerCase();
+    const alreadyPresent = pathEntries.some((entry) => {
+      const candidate = entry.trim().replace(/^"(.*)"$/, '$1');
+      return candidate && path.win32.resolve(candidate).toLowerCase() === target;
+    });
+    if (!alreadyPresent) {
+      env.PATH = [cudaExecutionProviderDirectory, ...pathEntries].join(path.win32.delimiter);
+    }
   }
   return { ok: true, required: true, directory };
 }

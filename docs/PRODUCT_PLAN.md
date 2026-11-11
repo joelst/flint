@@ -216,15 +216,16 @@ landed after 2.1.0:
   place.
 - **2.2.1 Windows CUDA runtime.** The CUDA execution provider no longer
   bundles the CUDA toolkit or cuDNN runtime. Windows x64 needs a separate
-  CUDA 12 and cuDNN 9 install. Before CUDA registration, that runtime
+  CUDA 12 and cuDNN 9 install. Before CUDA registration, the toolkit runtime
   directory has to be on the DLL search path with `AddDllDirectory`; the
-  packaged sidecar includes the koffi binding that makes that call. `PATH`
-  alone does not satisfy the GenAI CUDA bridge. A missing runtime is an
-  explicit failure, not a silent CPU fallback presented as CUDA. Register
-  CUDA before TensorRT-RTX; 2.3.0 fixed out-of-memory failures from the
-  reverse order. Windows ARM64 uses CUDA 13 and does not need that extra
-  `AddDllDirectory` step. It is not the 0.11.0 production target. Linux CUDA
-  registration stays out of this release.
+  packaged sidecar includes the koffi binding that makes that call. The
+  cached CUDA provider directory must also be on the sidecar's `PATH` so
+  provider dependencies such as cuDNN resolve. `PATH` alone does not satisfy
+  the GenAI CUDA bridge. A missing toolkit runtime is an explicit failure, not
+  a silent CPU fallback presented as CUDA. Register CUDA before TensorRT-RTX;
+  2.3.0 fixed out-of-memory failures from the reverse order. Windows ARM64 uses
+  CUDA 13 and does not need that extra `AddDllDirectory` step. It is not the
+  0.11.0 production target. Linux CUDA registration stays out of this release.
 - **2.2.1 tools and disconnect.** An invalid generic tool schema fails the
   request. Flint must not report that failure as a successful tool call.
   Where Flint already sends a parallel-tool-call disable, 2.4.0 must honor
@@ -233,10 +234,11 @@ landed after 2.1.0:
   rule as streaming: caller completion is not native completion.
 - **2.3.0 defaults, speech, and cache ownership.** An explicit Flint
   generation setting wins over an SDK chat default. An omitted setting uses
-  the pinned SDK default and stays visible as that default. Re-probe Whisper and
-  Parakeet on 2.4.0. Keep the current Parakeet refusal until that probe
-  records a pass or a still-unsupported result. Do not claim native word
-  timestamps. 2.3.0 adds a shared model cache across Foundry Local SDKs.
+  the pinned SDK default and stays visible as that default. The cached Whisper
+  Tiny CUDA variant passed a real `transcribeAudio` sidecar request on 2.4.0;
+  keep the current Parakeet refusal until its probe records a pass or a
+  still-unsupported result. Do not claim native word timestamps. 2.3.0 adds a
+  shared model cache across Foundry Local SDKs.
   Flint keeps `~/.flint` and does not opt into another product's cache.
   Confirm startup does not read or write another app's model cache.
 - **2.4.0 pin.** The package keeps the 2.1.0 through 2.3.1 behavior Flint
@@ -276,10 +278,12 @@ The 2.1.0 contracts, re-run on 2.4.0:
   before inference in the UI, IPC, and gateway, while omitting neutral zero.
   Do not claim that nonzero frequency-penalty semantics are supported.
 - A cached Nemotron 0.6B CPU WAV probe on SDK/core 2.4.0 recognized locally
-  synthesized speech; Parakeet was refused before loading. Re-probe Whisper URI
-  behavior when its cached CUDA variant can run. Do not infer success from the
-  old 2.0.1 shapes or the 2.3.0 release note, and do not claim native word
-  timestamps. SDK/core 2.4.0 lists `qwen3-embedding-0.6b` and
+  synthesized speech; Parakeet was refused before loading. Cached Whisper Tiny
+  CUDA URI transcription also succeeded. Its cuDNN dependencies require the
+  cached CUDA EP directory on the sidecar `PATH`; `prepareCudaRuntime` now adds
+  it before provider registration. Do not infer success from the old 2.0.1
+  shapes or the 2.3.0 release note, and do not claim native word timestamps.
+  SDK/core 2.4.0 lists `qwen3-embedding-0.6b` and
   `qwen3-embedding-8b`; the cached variants for both are CUDA-only. A fresh
   manager initially reported CUDA unregistered; explicit
   registration using the cached EP assets succeeded. The cached 0.6B variant
@@ -347,9 +351,12 @@ reproduced and is now recognized by the gateway. Flint's `embedTexts` IPC
 handler and the 8B variant remain unqualified. Qwen2.5
 0.5B CPU rejected a real 38,708-word request during structural preflight (39,249
 estimated tokens against a 32,768 limit), before any stream event or in-flight
-model work. A cached Nemotron 0.6B CPU WAV transcription recognized the local
-test phrase; Parakeet was refused before load. Whisper URI inference remains
-unqualified.
+model work. A cached Nemotron 0.6B CPU WAV transcription recognized the local test phrase.
+The actual sidecar `transcribeAudio` path also recognized the local phrase
+through `AudioSession` URI on `openai-whisper-tiny-cuda-gpu:3`; the CUDA EP
+cache directory must be on the sidecar `PATH` for its cuDNN dependencies, and
+the CUDA preparer now configures it before registration. Parakeet was refused
+before load.
 Qwen2.5 0.5B declares tool support, and strict `openai-live --require-tools`
 passed all required checks when given its exact listed variant id, including
 usage, streamed tool call, tool-result follow-up, tool-free final answer, and

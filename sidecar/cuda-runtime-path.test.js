@@ -172,6 +172,26 @@ describe('prepareCudaRuntime', () => {
     expect(failed.reason).toContain('no directory cookie');
   });
 
+  it('adds the cached CUDA provider directory to PATH once', async () => {
+    const env = {
+      CUDA_PATH: 'D:\\CUDA\\v12.8',
+      PATH: 'C:\\Windows\\System32',
+    };
+    const prepareOptions = {
+      platform: 'win32',
+      arch: 'x64',
+      env,
+      exists: () => true,
+      readdir: () => [],
+      addDllDirectory: vi.fn(),
+      cudaExecutionProviderDirectory: 'D:\\Users\\test\\.flint\\ep\\cuda-ep',
+    };
+
+    await expect(prepareCudaRuntime(prepareOptions)).resolves.toMatchObject({ ok: true });
+    await prepareCudaRuntime(prepareOptions);
+    expect(env.PATH).toBe('D:\\Users\\test\\.flint\\ep\\cuda-ep;C:\\Windows\\System32');
+  });
+
   it('does not load kernel32 except on Windows', async () => {
     vi.stubGlobal('process', { ...process, platform: 'linux' });
     await expect(addDllDirectory('D:\\CUDA\\v12.8\\bin')).rejects.toThrow(/only available on Windows/);
@@ -179,6 +199,7 @@ describe('prepareCudaRuntime', () => {
 
   it('passes the CUDA preparer from the production sidecar registration call', () => {
     const source = readFileSync(join(process.cwd(), 'sidecar', 'foundry-sidecar-main.js'), 'utf8');
-    expect(source).toContain('prepareCudaRuntime: options?.prepareCudaRuntime ?? prepareCudaRuntime');
+    expect(source).toContain('prepareCudaRuntime: options?.prepareCudaRuntime ?? prepareCudaRuntimeForSidecar');
+    expect(source).toContain("providerCacheDirectory(epRoot, 'CUDAExecutionProvider')");
   });
 });
