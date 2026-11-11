@@ -307,6 +307,20 @@ export function silentWav() {
   return buffer;
 }
 
+async function raceWithTimeout(pending, timeoutMs, timeoutResult) {
+  let timer;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(timeoutResult), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function disconnectStream(base, model, timeoutMs) {
   const controller = new AbortController();
   const pending = fetch(`${base}/chat/completions`, {
@@ -315,10 +329,11 @@ async function disconnectStream(base, model, timeoutMs) {
     body: chatBody(model, [{ role: 'user', content: 'Keep writing until stopped.' }], { stream: true, max_tokens: 64 }),
     signal: controller.signal,
   });
-  const started = await Promise.race([
+  const started = await raceWithTimeout(
     pending.then((res) => ({ kind: 'headers', res })).catch((error) => ({ kind: 'error', error })),
-    new Promise((resolve) => setTimeout(() => resolve({ kind: 'slow' }), Math.min(timeoutMs, 30000))),
-  ]);
+    Math.min(timeoutMs, 30000),
+    { kind: 'slow' },
+  );
   if (started.kind !== 'headers') {
     controller.abort();
     return {
@@ -338,13 +353,14 @@ async function disconnectStream(base, model, timeoutMs) {
     return { ok: false, detail: 'Streaming response had no body.' };
   }
   const read = reader.read();
-  const first = await Promise.race([
+  const first = await raceWithTimeout(
     read.then(
       (result) => ({ kind: result.done ? 'ended' : 'chunk' }),
       (error) => ({ kind: 'error', error }),
     ),
-    new Promise((resolve) => setTimeout(() => resolve({ kind: 'pending' }), 2000)),
-  ]);
+    2000,
+    { kind: 'pending' },
+  );
   if (first.kind === 'ended' || first.kind === 'error') {
     controller.abort();
     try { await reader.cancel(); } catch { /* the body has already ended */ }
@@ -361,10 +377,7 @@ async function disconnectStream(base, model, timeoutMs) {
   };
   const completion = drain().then(() => 'settled', () => 'settled');
   controller.abort();
-  const outcome = await Promise.race([
-    completion,
-    new Promise((resolve) => setTimeout(() => resolve('timeout'), 5000)),
-  ]);
+  const outcome = await raceWithTimeout(completion, 5000, 'timeout');
   try { await reader.cancel(); } catch { /* the abort already owns the body */ }
   return {
     ok: outcome !== 'timeout',

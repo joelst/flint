@@ -229,4 +229,20 @@ describe('openai-live qualification gates', () => {
     expect(check(report, 'disconnect')).toMatchObject({ required: true, ok: false });
     expect(report.requiredOk).toBe(false);
   });
+
+  it('clears disconnect timeouts when the probe settles', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      installGateway();
+      const report = await runOpenAiLive({
+        base: 'http://127.0.0.1:5272/v1',
+        model: MODEL,
+      });
+
+      expect(check(report, 'disconnect').ok).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
