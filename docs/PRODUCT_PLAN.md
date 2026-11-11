@@ -427,6 +427,10 @@ invalid-argument diagnostic. A direct `createSessionChatClient` probe on
 restricted to physical GPU 1, passed native ChatSession image input: an
 in-memory synthetic PNG containing a green square was identified as `Green`.
 This is not evidence for sidecar IPC or gateway vision.
+On cached `qwen2.5-0.5b-instruct-cuda-gpu:4`, two direct `ChatSession`
+load/infer/unload cycles, with the CUDA runtime prepared and inference
+restricted to physical GPU 1, each answered `42` to the same arithmetic prompt.
+This verifies SDK model reuse, not sidecar or pool lifecycle.
 On the Qwen2.5 0.5B CUDA variant, the direct gateway also returned valid JSON
 for `response_format.type=json_object`, honored `tool_choice=required`, and
 reported `finish_reason: length` at `max_tokens: 1` with one completion token.
