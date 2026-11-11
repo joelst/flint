@@ -1221,13 +1221,17 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     holdDownload = false,
     holdUnload = false,
     failUnload = false,
+    downloadCached = true,
+    recordCacheRemoval = false,
   ) {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-gateway-fence-home-'));
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
     const corePath = join(homeDir, 'fake-core.dylib');
+    const cacheRemovalMarker = join(homeDir, 'cache-removal-called');
     writeFileSync(corePath, '');
     writeFileSync(loaderPath, `
       const sdk = \`
+        import { writeFileSync } from 'node:fs';
         class FakeModel {
           constructor() { this.id = 'fake-variant'; this.loaded = false; }
           async load() {
@@ -1242,7 +1246,10 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
             this.loaded = true;
           }
           isLoaded() { return this.loaded; }
-          get isCached() { return true; }
+          get isCached() { return ${JSON.stringify(downloadCached)}; }
+          ${recordCacheRemoval
+            ? `removeFromCache() { writeFileSync(process.env.FLINT_TEST_CACHE_REMOVAL_MARKER, ''); }`
+            : ''}
           async download(_progressCallback, signal) {
             if (${JSON.stringify(holdDownload)}) {
               await fetch('http://127.0.0.1:${upstreamPort}/hold-download', { signal });
@@ -1322,9 +1329,10 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
         USERPROFILE: homeDir,
         FLINT_FOUNDRY_CORE_PATH: corePath,
         FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS: String(drainMs),
+        FLINT_TEST_CACHE_REMOVAL_MARKER: cacheRemovalMarker,
       },
     });
-    return { proc, homeDir };
+    return { proc, homeDir, cacheRemovalMarker };
   }
 
   /** Starts the sidecar and its gateway, returning the process, its temp home dir (for
@@ -1338,8 +1346,10 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     holdDownload = false,
     holdUnload = false,
     failUnload = false,
+    downloadCached = true,
+    recordCacheRemoval = false,
   ) {
-    const { proc, homeDir } = spawnGatewaySidecar(
+    const { proc, homeDir, cacheRemovalMarker } = spawnGatewaySidecar(
       upstreamPort,
       drainMs,
       catalogModels,
@@ -1348,6 +1358,8 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       holdDownload,
       holdUnload,
       failUnload,
+      downloadCached,
+      recordCacheRemoval,
     );
     await waitForLine(proc, (msg) => msg.ready === true);
     proc.stdin.write(`${JSON.stringify({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
@@ -1359,7 +1371,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     const started = await waitForLine(proc, (msg) => msg.id === 2, 15000);
     if (!started.ok) throw new Error(`startService failed: ${started.error}`);
     const gatewayPort = Number(new URL(started.endpoint).port);
-    return { proc, homeDir, gatewayPort };
+    return { proc, homeDir, gatewayPort, cacheRemovalMarker };
   }
 
   it('rejects a new gateway request while exclusive, and admits again after release', async () => {
@@ -1564,7 +1576,13 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     }
   }, 20000);
 
-  it('cancels a native model download and settles only after the SDK operation aborts', async () => {
+  it.each([
+    { cacheState: 'partial', downloadCached: false, expectCacheRemoval: true },
+    { cacheState: 'verified', downloadCached: true, expectCacheRemoval: false },
+  ])('cancels a native model download and handles $cacheState cache safely', async ({
+    downloadCached,
+    expectCacheRemoval,
+  }) => {
     let downloadStartedResolve: (() => void) | null = null;
     const downloadStarted = new Promise<void>((resolve) => { downloadStartedResolve = resolve; });
     let releaseUpstream: (() => void) | null = null;
@@ -1586,7 +1604,9 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     try {
       await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
       const { port: upstreamPort } = upstream.address() as AddressInfo;
-      const started = await startedGateway(upstreamPort, 200, [], false, null, true);
+      const started = await startedGateway(
+        upstreamPort, 200, [], false, null, true, false, false, downloadCached, true,
+      );
       proc = started.proc;
       homeDir = started.homeDir;
 
@@ -1602,6 +1622,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
         error: 'Model download was cancelled after native work settled.',
         certainty: 'cancelled',
       });
+      expect(existsSync(started.cacheRemovalMarker)).toBe(expectCacheRemoval);
 
       proc.stdin.write(`${JSON.stringify({ id: 77, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
       expect(await waitForLine(proc, (msg) => msg.id === 77, 3000)).toMatchObject({

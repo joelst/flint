@@ -2,4 +2,4 @@
 "flint": patch
 ---
 
-Add cooperative native model-download cancellation and refresh cache state after settlement.
+Clean up partial cache data after cancelled model downloads settle, while preserving fully cached variants.

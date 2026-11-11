@@ -3523,19 +3523,80 @@ rl.on('line', async (line) => {
             throw error;
           }
           audit('download.start', { alias: payload.alias, variantId: payload.variantId ?? null });
+          let cancelledAfterNative = false;
+          let cacheRefreshFailed = false;
+          let cacheRefreshError;
           try {
             await model.download((p) => send({ id, progress: p, alias: payload.alias }), controller.signal);
           } catch (error) {
             if (controller.signal.aborted && error?.name === 'AbortError') {
-              const cancelled = new Error('Model download was cancelled after native work settled.');
-              cancelled.name = 'AbortError';
-              throw cancelled;
+              cancelledAfterNative = true;
+            } else {
+              throw error;
             }
-            throw error;
           } finally {
             activeDownloads.delete(id);
-            try { manager.catalog.invalidateCache?.(); } catch {}
+            try {
+              manager.catalog.invalidateCache?.();
+            } catch (error) {
+              cacheRefreshFailed = true;
+              cacheRefreshError = error;
+            }
             invalidateModelIndex();
+          }
+          if (cancelledAfterNative) {
+            const describeError = error => error?.message || String(error);
+            const cancellationError = (message, cause) => {
+              const cancelled = new Error(message, cause !== undefined ? { cause } : undefined);
+              cancelled.name = 'AbortError';
+              return cancelled;
+            };
+            if (cacheRefreshFailed) {
+              throw cancellationError(
+                `Model download was cancelled after native work settled, but its cache state could not be verified: ${describeError(cacheRefreshError)}`,
+                cacheRefreshError,
+              );
+            }
+
+            let isCached;
+            try {
+              isCached = model.isCached;
+            } catch (error) {
+              throw cancellationError(
+                `Model download was cancelled after native work settled, but its cache state could not be verified: ${describeError(error)}`,
+                error,
+              );
+            }
+            if (isCached !== true && isCached !== false) {
+              throw cancellationError(
+                'Model download was cancelled after native work settled, but the runtime did not report whether the model is cached.',
+              );
+            }
+            if (isCached === false) {
+              if (typeof model.removeFromCache !== 'function') {
+                throw cancellationError(
+                  'Model download was cancelled after native work settled, but the runtime does not expose removeFromCache to clean up its partial cache.',
+                );
+              }
+              try {
+                await model.removeFromCache();
+              } catch (error) {
+                throw cancellationError(
+                  `Model download was cancelled after native work settled, but partial cache cleanup failed: ${describeError(error)}`,
+                  error,
+                );
+              }
+              try {
+                manager.catalog.invalidateCache?.();
+              } catch (error) {
+                throw cancellationError(
+                  `Model download was cancelled and partial cache cleanup completed, but the catalog cache could not be refreshed: ${describeError(error)}`,
+                  error,
+                );
+              }
+              invalidateModelIndex();
+            }
+            throw cancellationError('Model download was cancelled after native work settled.');
           }
           audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
         });

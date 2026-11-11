@@ -261,9 +261,12 @@ The 2.1.0 contracts, re-run on 2.4.0:
 - Model downloads now pass an AbortSignal to `IModel.download` and expose
   `cancelDownload` through the UI/sidecar. Flint waits for native settlement and
   refreshes cache state; automated tests cover cancellation and admission
-  release. Still qualify real-model races and partial-file cleanup/reporting. A
-  checkpoint delay or cancellation acknowledgement alone is not proof the
-  download stopped.
+  release. A real SDK 2.4.0 Whisper Tiny CPU download was cancelled after its
+  first positive native progress update; the operation settled, its pre-existing
+  2.7-KiB partial cache entry was removed, and the variant remained uncached. A
+  regression test also verifies that a now-cached variant is preserved. Broader
+  real-model races and native quiescence remain open; a checkpoint delay or
+  cancellation acknowledgement alone is not proof the download stopped.
 - Prove Qwen enum arguments, fragmented/cumulative tool calls, malformed-call
   recovery, a tool-result follow-up, unique ids, and a tool-free final answer.
   Keep Llama text-call compatibility model-scoped and subject to the existing
@@ -342,8 +345,11 @@ emitted 36. A buffered gateway request aborted while pending (540 ms) returned
 `AbortError`; the first pool snapshot, 10.1 seconds later, showed `inFlight: 0`.
 A separate 256-token gateway request completed in 21.6 seconds. These are
 caller/lease observations, not proof of native quiescence; IPC replies did not
-include cancellation certainty. No model weights were downloaded, so native
-download cancellation and partial-cache cleanup remain unqualified.
+include cancellation certainty. The uncached 131-MB
+`openai-whisper-tiny-generic-cpu:4` download was cancelled after positive native
+progress; cancellation settled, its pre-existing partial cache directory was
+removed, and the variant remained uncached. No complete model weights were
+downloaded.
 The SDK/core 2.4.0 catalog also exposes `qwen3-embedding-0.6b` and
 `qwen3-embedding-8b`; their cached variants are CUDA-only. CUDA EP assets exist
 in the local cache. Explicit CUDA registration succeeded; the cached Qwen3
