@@ -499,6 +499,13 @@ non-empty text and shutdown exited cleanly. The sidecar load reply reported
 attested. This qualifies sidecar cancellation settlement and reuse, not native
 inference quiescence or normal all-provider startup; do not treat terminal
 `ok: true` or pool drain as proof that native work stopped.
+A separate SDK/core 2.4.0 sidecar service probe used the same CUDA-only provider
+filter and loaded no model. The loopback gateway returned HTTP 200 for `/status`
+and `/v1/models` (99 rows); the listing exposed the cached Qwen CPU and CUDA
+builds as full versioned `id` values without a `parent`. The pool stayed empty,
+`stopService` withdrew the published endpoint, and the sidecar exited 0.
+This qualifies listener/gateway start-stop and health on the filtered setup, not
+normal all-provider startup or inference.
 On the Qwen2.5 0.5B CUDA variant, the direct gateway also returned valid JSON
 for `response_format.type=json_object`, honored `tool_choice=required`, and
 reported `finish_reason: length` at `max_tokens: 1` with one completion token.
