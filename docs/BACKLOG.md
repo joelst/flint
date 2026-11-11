@@ -67,9 +67,12 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
 - [ ] **Recorded BYOM embedding recipe** — gateway autoload and `embedTexts` are
       present (PRODUCT_PLAN Wave 9). The cached Qwen3 0.6B catalog model passed
       `/v1/embeddings` and `embedTexts` IPC; the cached 8B model passed both
-      paths as well. A Flint-tested onnxruntime-genai embedding folder (repo,
-      revision, dimension, core pin) is still required before Continue's
-      indexer can be marked verified.
+      paths as well. An isolated SDK 2.4.0 local-registration probe using a
+      temporary external copy of the cached 0.6B folder returned two finite
+      1,024-dimensional vectors with CUDA masked to GPU 1. It did not establish
+      a source-pinned BYOM recipe; the source repo/revision/license and SDK/core
+      pin, with the dimension tied to that exact artifact, are still required
+      before Continue's indexer can be verified.
 
 ## Dependencies
 
