@@ -85,7 +85,10 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       correcting `tie_word_embeddings` after export. Treat it as a candidate
       recipe, not as evidence for the existing AzureML artifact, until inputs
       and dependencies are pinned and a built package is validated through
-      Flint. Continue source review at commit
+      Flint. Its `requirements.txt` pins only
+      `onnxruntime-genai-cuda==0.12.2` and `transformers==4.52.4`; `olive-ai`,
+      `onnxruntime-gpu`, and the other tooling dependencies are unpinned.
+      Continue source review at commit
       [`5522c6f`](https://github.com/continuedev/continue/commit/5522c6f44ca0ac3528b37244818fbfa39b5af470)
       indicates local indexing does not require a Continue account: the VS Code
       adapter provides local IDE settings with an empty user token, and the
