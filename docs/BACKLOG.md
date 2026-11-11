@@ -76,8 +76,16 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       [Qwen/Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/tree/97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3)
       is pinned to that Hub revision, and Flint pins SDK/core 2.4.0. Available
       metadata does not tie the registry export to that source commit, so a
-      reproducible source-pinned BYOM recipe remains open. Continue source
-      review at commit
+      reproducible source-pinned BYOM recipe remains open. Microsoft maintains
+      an [Olive CUDA recipe at pinned repository commit
+      `1ebab74`](https://github.com/microsoft/olive-recipes/tree/1ebab74ab474869c53575954fda0772cee723ecf/Qwen-Qwen3-Embedding-0.6B/cuda)
+      that builds an ONNX GenAI INT4 model from this upstream model, but its
+      config omits the Hugging Face revision and its README installs Olive from
+      `main`; it also requires copying `config_sentence_transformers.json` and
+      correcting `tie_word_embeddings` after export. Treat it as a candidate
+      recipe, not as evidence for the existing AzureML artifact, until inputs
+      and dependencies are pinned and a built package is validated through
+      Flint. Continue source review at commit
       [`5522c6f`](https://github.com/continuedev/continue/commit/5522c6f44ca0ac3528b37244818fbfa39b5af470)
       indicates local indexing does not require a Continue account: the VS Code
       adapter provides local IDE settings with an empty user token, and the
