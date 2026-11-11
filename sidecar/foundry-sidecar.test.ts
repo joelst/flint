@@ -251,14 +251,16 @@ describe('foundry-sidecar protocol basics', () => {
     writeFileSync(loaderPath, `
       const sdk = \`
         class FakeModel {
-          constructor() { this.id = 'fake-variant'; this.loaded = false; }
+          constructor(provider = 'CPUExecutionProvider') {
+            this.id = 'fake-variant'; this.loaded = false; this.provider = provider;
+          }
           async load() {
             process.stdout.write('fake model load stdout noise\\\\n');
             console.log('fake model load console noise');
             this.loaded = true;
           }
           isLoaded() { return this.loaded; }
-          getExecutionProvider() { return 'CPUExecutionProvider'; }
+          getExecutionProvider() { return this.provider; }
           createChatClient() {
             return {
               async *completeStreamingChat() {
@@ -280,9 +282,9 @@ describe('foundry-sidecar protocol basics', () => {
         class FakeManager {
           constructor() {
             this.catalog = {
-              getModel: async () => {
+              getModel: async (alias) => {
                 process.stdout.write('fake catalog getModel stdout noise\\\\n');
-                return new FakeModel();
+                return new FakeModel(alias === 'unknown-provider-model' ? null : 'CPUExecutionProvider');
               },
               getModels: async () => [],
             };
@@ -394,6 +396,16 @@ describe('foundry-sidecar protocol basics', () => {
         tokensOut: 3,
         executionProvider: 'CPUExecutionProvider',
       });
+      proc.stdin.write(`${JSON.stringify({ id: 45, cmd: 'load', alias: 'unknown-provider-model' })}\n`);
+      const unknownProviderLoad = await waitForLine(proc, (msg) => msg.id === 45);
+      expect(unknownProviderLoad).toMatchObject({
+        ok: true,
+        result: { acceleration: { active: null } },
+      });
+      const logDir = join(homeDir, '.flint', 'logs');
+      const logFile = readdirSync(logDir).find((name) => name.endsWith('.log'));
+      expect(logFile).toBeDefined();
+      expect(readFileSync(join(logDir, logFile!), 'utf8')).toContain('"accel":"unknown"');
       nonJsonStdout.stop();
       expect(nonJsonStdout.lines).toEqual([]);
       expect(stderrText).toContain('FLINT_DIAG info fake model load console noise');

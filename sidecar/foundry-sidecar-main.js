@@ -3702,8 +3702,8 @@ rl.on('line', async (line) => {
         requested: null,
         active: await detectActiveExecutionProvider(entry.catModel)
       };
-      log('info', `Model ${payload.alias} ready (variantId: ${entry.variantId}, accel: ${acceleration.active || 'cpu'})`);
-      audit('load', { alias: payload.alias, variantId: entry.variantId, accel: acceleration.active || 'cpu' });
+      log('info', `Model ${payload.alias} ready (variantId: ${entry.variantId}, accel: ${acceleration.active || 'unknown'})`);
+      audit('load', { alias: payload.alias, variantId: entry.variantId, accel: acceleration.active || 'unknown' });
       reply({ ok: true, result: { acceleration, lane: payload.lane || 'chat', variantId: entry.variantId } });
     } else if (cmd === 'unload') {
       const alias = payload.alias;
