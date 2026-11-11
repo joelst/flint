@@ -65,10 +65,11 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       remain byte-preserving pass-through. Broader endpoint capability conformance
       remains open.
 - [ ] **Recorded BYOM embedding recipe** — gateway autoload and `embedTexts` are
-      present (PRODUCT_PLAN Wave 9). SDK/core 2.4.0 lists Qwen3 embedding models,
-      but no end-to-end inference recipe is qualified yet. A Flint-tested
-      onnxruntime-genai embedding folder (repo, revision, dimension, core pin) is
-      still required before Continue's indexer can be marked verified.
+      present (PRODUCT_PLAN Wave 9). The cached Qwen3 0.6B catalog model passed
+      `/v1/embeddings` and `embedTexts` IPC; the cached 8B model passed both
+      paths as well. A Flint-tested onnxruntime-genai embedding folder (repo,
+      revision, dimension, core pin) is still required before Continue's
+      indexer can be marked verified.
 
 ## Dependencies
 

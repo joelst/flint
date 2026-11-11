@@ -288,10 +288,13 @@ The 2.1.0 contracts, re-run on 2.4.0:
   manager initially reported CUDA unregistered; explicit
   registration using the cached EP assets succeeded. The cached 0.6B variant
   returned two finite 1024-dimensional vectors through `EmbeddingsSession` and
-  the Flint gateway `/v1/embeddings` alias-rewrite path. The native router's
-  unquoted 2.4.0 `Model not found: X` alias rejection was added to the gateway
-  classifier. Still exercise the sidecar `embedTexts` command and qualify the
-  8B variant before claiming end-to-end embedding support.
+  the Flint gateway `/v1/embeddings` alias-rewrite path. The sidecar
+  `embedTexts` command returned the same vector shape through IPC. The cached
+  8B variant returned one finite 4096-dimensional vector through `embedTexts`;
+  the gateway alias request also returned a finite 4096-dimensional vector.
+  A recorded BYOM recipe remains unqualified. The native router's unquoted
+  2.4.0 `Model not found: X` alias rejection is recognized by the gateway
+  classifier.
 - Native ChatSession paths use `preflightRequest` when the SDK exposes it and
   refuse requests that exceed the structural token limit before inference.
   Qualify the result against real models. Preserve whole-turn packing,
@@ -346,9 +349,12 @@ The SDK/core 2.4.0 catalog also exposes `qwen3-embedding-0.6b` and
 in the local cache. Explicit CUDA registration succeeded; the cached Qwen3
 0.6B variant returned two finite 1024-dimensional vectors through
 `EmbeddingsSession` and the Flint gateway `/v1/embeddings` alias-rewrite path.
-The native service's bare 2.4.0 `Model not found: X` alias rejection was
-reproduced and is now recognized by the gateway. Flint's `embedTexts` IPC
-handler and the 8B variant remain unqualified. Qwen2.5
+The native service returns the bare 2.4.0 `Model not found: X` alias rejection,
+which the gateway recognizes. Flint's `embedTexts` IPC
+handler returned two finite 1024-dimensional vectors on the 0.6B variant and
+one finite 4096-dimensional vector on the 8B variant. Both cached variants
+also returned embeddings through gateway alias autoload. A recorded BYOM
+folder recipe remains unqualified. Qwen2.5
 0.5B CPU rejected a real 38,708-word request during structural preflight (39,249
 estimated tokens against a 32,768 limit), before any stream event or in-flight
 model work. A cached Nemotron 0.6B CPU WAV transcription recognized the local test phrase.
@@ -606,7 +612,7 @@ qualification. Extra audio-decoder work has no 1.0 gate.
 | Must 1.0 ship a time-series health store? | No. Bounded in-process health ring plus diagnostics export. |
 | Is UX maturity missing? | No. It was unscoped. Coach, Network/WSL, and Monitor memory UX exist; 1.0 qualifies them. |
 | Must we component-test `+page.svelte`? | No. Keep extracting into `src/lib/*.ts`. 1.0 testing is unit + contract + sidecar E2E + one packaged Windows smoke. |
-| Is BYOM `/v1/embeddings` a 1.0 blocker? | No. SDK/core 2.4.0 lists Qwen3 embedding models, but the end-to-end route is not yet qualified. 1.0.0 recipes are chat completions; full RAG stays after 1.0. |
+| Is BYOM `/v1/embeddings` a 1.0 blocker? | No. The cached Qwen3 0.6B and 8B catalog models are qualified through the gateway and sidecar IPC. A recorded BYOM folder recipe is not. 1.0.0 recipes are chat completions; full RAG stays after 1.0. |
 | Broader WebM/Opus/MP3 decoder for 1.0? | No. Browser `decodeAudioData` → 16 kHz WAV already ships. Document supported formats. Word-level timestamps stay upstream-blocked. |
 | Must CI install the MSI to ship 1.0? | No, if clean-machine dogfood is recorded. Staged-layout smoke in CI; msiexec automation is later. |
 | Is the updater broken? | No known wiring gap. Stable releases resolve through `releases/latest`; drafts and prereleases are intentionally invisible. Keep install/rollback evidence current before 1.0. |

@@ -171,7 +171,7 @@ not currently exposed.
 ### Bring Your Own Model (BYOM) and External Linking
 
 - **Import local ONNX models**: Add custom ONNX models (containing `genai_config.json` and `inference_model.json`) into Flint's local cache directly from the Models tab.
-- **Embedding models**: folders whose architecture or name contains `embed` import without a chat prompt template. The gateway supports `POST /v1/embeddings` with autoload, and the sidecar has an `embedTexts` command. SDK/core 2.4.0 lists `qwen3-embedding-0.6b` and `qwen3-embedding-8b`, but Flint does not yet have a verified end-to-end embedding recipe.
+- **Embedding models**: folders whose architecture or name contains `embed` import without a chat prompt template. The gateway supports `POST /v1/embeddings` with autoload, and the sidecar has an `embedTexts` command. SDK/core 2.4.0 lists `qwen3-embedding-0.6b` and `qwen3-embedding-8b`; both cached CUDA variants have passed gateway and IPC probes. Flint does not yet have a verified BYOM/Continue embedding recipe.
 - **Link external model folders**: Connect existing models stored elsewhere on your drive using directory junctions without duplicating weights across folders.
 - **Prompt template authoring**: Validate and customize Jinja/chat prompt templates using the `{Content}` placeholder to ensure proper message formatting. Embedding imports skip this.
 
