@@ -275,11 +275,19 @@ The 2.1.0 contracts, re-run on 2.4.0:
   adapter does not support nonzero frequency penalties; Flint now rejects them
   before inference in the UI, IPC, and gateway, while omitting neutral zero.
   Do not claim that nonzero frequency-penalty semantics are supported.
-- Re-probe Whisper URI, Parakeet, and Nemotron PCM/language behavior on
-  2.4.0; do not infer success from the old 2.0.1 shapes or from the 2.3.0
-  release note, and do not claim native word timestamps. Run a real
-  embedding package through both `embedTexts` and `/v1/embeddings` with numeric,
-  finite vectors before claiming end-to-end embedding support.
+- A cached Nemotron 0.6B CPU WAV probe on SDK/core 2.4.0 recognized locally
+  synthesized speech; Parakeet was refused before loading. Re-probe Whisper URI
+  behavior when its cached CUDA variant can run. Do not infer success from the
+  old 2.0.1 shapes or the 2.3.0 release note, and do not claim native word
+  timestamps. SDK/core 2.4.0 lists `qwen3-embedding-0.6b` and
+  `qwen3-embedding-8b`; the cached variants for both are CUDA-only. A fresh
+  manager initially reported CUDA unregistered; explicit
+  registration using the cached EP assets succeeded. The cached 0.6B variant
+  returned two finite 1024-dimensional vectors through `EmbeddingsSession` and
+  the Flint gateway `/v1/embeddings` alias-rewrite path. The native router's
+  unquoted 2.4.0 `Model not found: X` alias rejection was added to the gateway
+  classifier. Still exercise the sidecar `embedTexts` command and qualify the
+  8B variant before claiming end-to-end embedding support.
 - Native ChatSession paths use `preflightRequest` when the SDK exposes it and
   refuse requests that exceed the structural token limit before inference.
   Qualify the result against real models. Preserve whole-turn packing,
@@ -329,7 +337,20 @@ A separate 256-token gateway request completed in 21.6 seconds. These are
 caller/lease observations, not proof of native quiescence; IPC replies did not
 include cancellation certainty. No model weights were downloaded, so native
 download cancellation and partial-cache cleanup remain unqualified.
-The same model declares tool support, and strict `openai-live --require-tools`
+The SDK/core 2.4.0 catalog also exposes `qwen3-embedding-0.6b` and
+`qwen3-embedding-8b`; their cached variants are CUDA-only. CUDA EP assets exist
+in the local cache. Explicit CUDA registration succeeded; the cached Qwen3
+0.6B variant returned two finite 1024-dimensional vectors through
+`EmbeddingsSession` and the Flint gateway `/v1/embeddings` alias-rewrite path.
+The native service's bare 2.4.0 `Model not found: X` alias rejection was
+reproduced and is now recognized by the gateway. Flint's `embedTexts` IPC
+handler and the 8B variant remain unqualified. Qwen2.5
+0.5B CPU rejected a real 38,708-word request during structural preflight (39,249
+estimated tokens against a 32,768 limit), before any stream event or in-flight
+model work. A cached Nemotron 0.6B CPU WAV transcription recognized the local
+test phrase; Parakeet was refused before load. Whisper URI inference remains
+unqualified.
+Qwen2.5 0.5B declares tool support, and strict `openai-live --require-tools`
 passed all required checks when given its exact listed variant id, including
 usage, streamed tool call, tool-result follow-up, tool-free final answer, and
 disconnect. The friendly alias also passed inference/tool checks but was not a
@@ -578,7 +599,7 @@ qualification. Extra audio-decoder work has no 1.0 gate.
 | Must 1.0 ship a time-series health store? | No. Bounded in-process health ring plus diagnostics export. |
 | Is UX maturity missing? | No. It was unscoped. Coach, Network/WSL, and Monitor memory UX exist; 1.0 qualifies them. |
 | Must we component-test `+page.svelte`? | No. Keep extracting into `src/lib/*.ts`. 1.0 testing is unit + contract + sidecar E2E + one packaged Windows smoke. |
-| Is BYOM `/v1/embeddings` a 1.0 blocker? | No. Catalog has zero embedding models. 1.0.0 recipes are chat completions. The embeddings **path** exists (Wave 9). Full RAG stays after 1.0. |
+| Is BYOM `/v1/embeddings` a 1.0 blocker? | No. SDK/core 2.4.0 lists Qwen3 embedding models, but the end-to-end route is not yet qualified. 1.0.0 recipes are chat completions; full RAG stays after 1.0. |
 | Broader WebM/Opus/MP3 decoder for 1.0? | No. Browser `decodeAudioData` → 16 kHz WAV already ships. Document supported formats. Word-level timestamps stay upstream-blocked. |
 | Must CI install the MSI to ship 1.0? | No, if clean-machine dogfood is recorded. Staged-layout smoke in CI; msiexec automation is later. |
 | Is the updater broken? | No known wiring gap. Stable releases resolve through `releases/latest`; drafts and prereleases are intentionally invisible. Keep install/rollback evidence current before 1.0. |

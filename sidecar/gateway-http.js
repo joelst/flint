@@ -69,19 +69,20 @@ export function isJsonContentType (contentType) {
 
 /**
  * Foundry's rejection of the model a request named, which is the whole reason this proxy
- * exists. Two shapes, both carrying the quoted name:
+ * exists. The retryable responses have these known shapes:
  *
  * - `400`: the router knows the exact variant id but it is not resident. SDK 1.x says
  *   `Model 'X' is not loaded`; SDK 2.0.1 says `Model not loaded: Model 'X' must be loaded
  *   before inference`.
- * - `404 Model not found: No model matching 'X'` (SDK 2.0.1): the router does not know the
- *   name at all. It routes only the exact, case-sensitive loaded variant id, so this is what
- *   an alias, a versionless id, or a differently cased id gets, resident or not.
+ * - `404 Model not found: No model matching 'X'` (SDK 2.0.1), or `Model not found: X`
+ *   (observed on SDK 2.4.0 `/v1/embeddings`): the router does not know the name. It routes
+ *   only the exact, case-sensitive loaded variant id, so aliases are rejected even when the
+ *   corresponding variant is resident.
  *
- * Matched narrowly and keyed to the quoted name, the one part of the sentence that cannot
+ * Matched narrowly and keyed to the exact model name, the one part of the sentence that cannot
  * appear by accident: a retry is a second execution of the client's request, so it must not
  * be triggered by an unrelated failure that happens to mention a model. The caller checks
- * that the quoted name is the one it sent.
+ * that the returned model name is the one it sent.
  *
  * @param {number} status
  * @param {string} body
@@ -103,10 +104,12 @@ export function modelRejection (status, body) {
     const match = /\bModel '([^']+)' (?:is not loaded|must be loaded before inference)\b/i.exec(message);
     return match ? { kind: 'not-loaded', model: match[1] } : null;
   }
-  // The whole router phrase, not just the quoted name: a 404 can come from anything behind
-  // the proxy, and only this one means "the router does not know that model".
-  const match = /\bModel not found: No model matching '([^']+)'/i.exec(message);
-  return match ? { kind: 'not-found', model: match[1] } : null;
+  // Match the whole known router phrase. The SDK 2.4.0 form is exact and unquoted; a 404
+  // can come from anything behind the proxy, so do not accept arbitrary trailing text.
+  const quoted = /\bModel not found: No model matching '([^']+)'/i.exec(message);
+  const unquoted = /^Model not found: ([^\s'"]+)$/i.exec(message.trim());
+  const model = quoted?.[1] ?? unquoted?.[1];
+  return model ? { kind: 'not-found', model } : null;
 }
 
 /** True when Foundry's rejection names the model this request sent, ignoring case. */
