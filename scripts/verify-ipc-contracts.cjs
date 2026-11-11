@@ -326,6 +326,7 @@ module.exports = {
   verifyIpcContracts,
 };
 
+/* v8 ignore start -- CI exercises this entrypoint via npm run verify:ipc-contracts */
 if (require.main === module) {
   const root = path.resolve(__dirname, '..');
   try {
@@ -335,3 +336,4 @@ if (require.main === module) {
     process.exitCode = 1;
   }
 }
+/* v8 ignore stop */
