@@ -389,6 +389,16 @@ startup and loopback gateway chat also succeeded. `GET /v1/models` returned
 versioned variant ids without parent aliases; gateway chat by friendly alias
 returned `42`. Graceful sidecar shutdown exited cleanly. The preloader bypasses
 normal all-provider startup and does not qualify that release path.
+A second real SDK 2.4.0 sidecar run on cached
+`Phi-4-mini-instruct-cuda-gpu:5`, restricted to physical GPU 1 and using the
+same test-only CUDA discovery filter, returned the enum-constrained
+`pick_color({"color":"blue"})` call over IPC in both non-streaming and
+`stream:true` terminal results. The non-streaming usage totals were consistent,
+and a tool-result turn returned “The color blue has been confirmed.” The
+streaming request emitted no text frames; its completed tool call arrived in
+the terminal result. The pool reported `inFlight: 0`, and the model was
+unloaded before shutdown. This qualifies the real sidecar ChatSession IPC path
+for this model, not normal all-provider startup or native cancellation.
 The SDK/core 2.4.0 catalog also exposes `qwen3-embedding-0.6b` and
 `qwen3-embedding-8b`; their cached variants are CUDA-only. CUDA EP assets exist
 in the local cache. Explicit CUDA registration succeeded; the cached Qwen3
