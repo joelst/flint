@@ -488,6 +488,17 @@ On cached `qwen2.5-0.5b-instruct-cuda-gpu:4`, two direct `ChatSession`
 load/infer/unload cycles, with the CUDA runtime prepared and inference
 restricted to physical GPU 1, each answered `42` to the same arithmetic prompt.
 This verifies SDK model reuse, not sidecar or pool lifecycle.
+A real SDK/core 2.4.0 sidecar IPC cancellation probe on cached
+`qwen2.5-0.5b-instruct-cuda-gpu:4` (friendly alias `qwen2.5-0.5b`) used
+physical GPU 1 by UUID and filtered EP discovery to CUDA. After the first
+`Here` delta, `cancelChatRequest` acknowledged `{ok: true}`; the terminal reply
+settled 30 ms later with four characters, no `finish_reason` or certainty, and
+pool status `inFlight: 0`, `streaming.active: false`. A subsequent chat returned
+non-empty text and shutdown exited cleanly. The sidecar load reply reported
+`acceleration.active: null`, so actual EP activation is not separately
+attested. This qualifies sidecar cancellation settlement and reuse, not native
+inference quiescence or normal all-provider startup; do not treat terminal
+`ok: true` or pool drain as proof that native work stopped.
 On the Qwen2.5 0.5B CUDA variant, the direct gateway also returned valid JSON
 for `response_format.type=json_object`, honored `tool_choice=required`, and
 reported `finish_reason: length` at `max_tokens: 1` with one completion token.
