@@ -75,11 +75,14 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       with Apache-2.0 licensing; the candidate upstream
       [Qwen/Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/tree/97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3)
       is pinned to that Hub revision, and Flint pins SDK/core 2.4.0. Available
-      metadata does not tie the registry export to that source commit, so a
-      reproducible source-pinned BYOM recipe remains open. A temporary build
+      metadata does not tie the registry export to that source commit. The
+      pinned candidate procedure is recorded in
+      [the Olive recipe note](./spikes/qwen3-embedding-olive-recipe.md); clean
+      replay, registry-artifact provenance, and retrieval-quality evidence
+      remain open. A temporary build
       using the pinned model snapshot and recipe commit was imported and
       validated through sidecar 2.4.0 gateway and IPC; detailed evidence is in
-      PRODUCT_PLAN. The original recipe still required disabling
+      PRODUCT_PLAN. The upstream checked-in recipe required disabling
       input-embedding quantization and temporarily hiding the optional TensorRT
       provider DLL, so it is not reproducible from its checked-in configuration.
       Microsoft maintains
@@ -110,7 +113,8 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       to zero and the indexing lock was released. This verifies Continue
       indexing through Flint's local endpoint, not normal all-provider
       startup, retrieval quality, or packaged-app behavior. Model-export
-      provenance and a reproducible source-pinned BYOM recipe remain open.
+      provenance, clean replay of the candidate recipe, and retrieval quality
+      remain open.
       The [onnx-community ONNX export](https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/tree/c25a394dd583836952667c12f008335071b3f43d)
       explicitly targets Transformers.js and is not a tested ONNX Runtime GenAI
       folder, so it does not close the recipe gate. The upstream

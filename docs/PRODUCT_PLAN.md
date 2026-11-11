@@ -303,9 +303,11 @@ The 2.1.0 contracts, re-run on 2.4.0:
   `embedTexts` command returned the same vector shape through IPC. The cached
   8B variant returned one finite 4096-dimensional vector through `embedTexts`;
   the gateway alias request also returned a finite 4096-dimensional vector.
-  A recorded BYOM recipe remains unqualified. The native router's unquoted
-  2.4.0 `Model not found: X` alias rejection is recognized by the gateway
-  classifier.
+  A pinned Qwen3 0.6B CUDA INT4 candidate recipe is recorded in
+  [the Olive recipe note](./spikes/qwen3-embedding-olive-recipe.md); a clean
+  replay and retrieval-quality evaluation remain unverified. The native
+  router's unquoted 2.4.0 `Model not found: X` alias rejection is recognized by
+  the gateway classifier.
 - Native ChatSession paths use `preflightRequest` when the SDK exposes it and
   refuse requests that exceed the structural token limit before inference.
   Qualify the result against real models. Preserve whole-turn packing,
@@ -414,7 +416,8 @@ used cached `qwen3-embedding-0.6b` variant
 paths, and ended with pool `inFlight: 0` and no indexing lock. This verifies
 Continue's configured `embed` role and `codebase` provider against Flint's real
 local endpoint; it does not qualify normal all-provider startup, retrieval
-quality, packaged-app behavior, or a source-pinned BYOM recipe.
+quality, packaged-app behavior, or a clean replay of the source-pinned BYOM
+recipe.
 Inspection of the exact `v2.0.0-vscode` source shows `LanceDbIndex` persists
 the vectors returned by `ILLM.embed()` unchanged, and the OpenAI embedding path
 maps the response vectors without dimension slicing or a `dimensions` request
@@ -452,9 +455,11 @@ With `CUDA_VISIBLE_DEVICES` restricted to physical GPU 1 by UUID, both the
 gateway and `embedTexts` IPC returned two finite 1,024-dimensional vectors
 for the same inputs, with zero maximum absolute difference. GPU 0 remained at
 0% utilization in the before/after snapshots. This is inference smoke evidence,
-not retrieval-quality or MTEB evidence. The source recipe remains unmodified,
-does not pin its model revision or full toolchain, and does not encode the two
-build workarounds, so the recorded BYOM recipe gate remains open. Qwen2.5
+not retrieval-quality or MTEB evidence. The upstream recipe remains unmodified;
+the derived config and version-pinned environment are recorded in
+[the Olive recipe note](./spikes/qwen3-embedding-olive-recipe.md), but have not
+been replayed from a clean environment. The BYOM gate remains open pending that
+replay, catalog-artifact provenance, and retrieval-quality evidence. Qwen2.5
 0.5B CPU rejected a real 38,708-word request during structural preflight (39,249
 estimated tokens against a 32,768 limit), before any stream event or in-flight
 model work. A cached Nemotron 0.6B CPU WAV transcription recognized the local test phrase.
@@ -722,7 +727,8 @@ Embedding-model path, not RAG.
   indexed paths, and ended with `inFlight: 0`. The real run used a CUDA-only
   provider filter and an isolated VS Code profile. This verifies actual
   Continue codebase indexing through Flint, not normal all-provider startup,
-  retrieval quality, packaged-app behavior, or a source-pinned BYOM recipe.
+  retrieval quality, packaged-app behavior, or a clean replay of the
+  source-pinned BYOM recipe.
 
 ### SDK 2.x session migration
 
@@ -810,7 +816,7 @@ qualification. Extra audio-decoder work has no 1.0 gate.
 | Must 1.0 ship a time-series health store? | No. Bounded in-process health ring plus diagnostics export. |
 | Is UX maturity missing? | No. It was unscoped. Coach, Network/WSL, and Monitor memory UX exist; 1.0 qualifies them. |
 | Must we component-test `+page.svelte`? | No. Keep extracting into `src/lib/*.ts`. 1.0 testing is unit + contract + sidecar E2E + one packaged Windows smoke. |
-| Is BYOM `/v1/embeddings` a 1.0 blocker? | No. The cached Qwen3 0.6B and 8B catalog models are qualified through the gateway and sidecar IPC. A recorded BYOM folder recipe is not. 1.0.0 recipes are chat completions; full RAG stays after 1.0. |
+| Is BYOM `/v1/embeddings` a 1.0 blocker? | No. The cached Qwen3 0.6B and 8B catalog models are qualified through the gateway and sidecar IPC. A Qwen3 0.6B CUDA INT4 candidate recipe is recorded, but a clean replay and retrieval-quality evaluation remain open. 1.0.0 recipes are chat completions; full RAG stays after 1.0. |
 | Broader WebM/Opus/MP3 decoder for 1.0? | No. Browser `decodeAudioData` → 16 kHz WAV already ships. Document supported formats. Word-level timestamps stay upstream-blocked. |
 | Must CI install the MSI to ship 1.0? | No, if clean-machine dogfood is recorded. Staged-layout smoke in CI; msiexec automation is later. |
 | Is the updater broken? | No known wiring gap. Stable releases resolve through `releases/latest`; drafts and prereleases are intentionally invisible. Keep install/rollback evidence current before 1.0. |
