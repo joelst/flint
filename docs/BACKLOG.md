@@ -93,8 +93,10 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       are configured. The codebase provider requests embeddings, full-text, and
       chunk indexes; remote chunk-cache lookup is optional and missing chunks
       are computed locally. This makes a local OpenAI-compatible Flint endpoint
-      feasible in principle, but the extension is not installed and no index
-      has been built, so Continue indexer verification remains open. The public
+      feasible in principle. A temporary VS Code Insiders profile installed
+      Continue 2.0.0, but the extension host activated only built-ins and the
+      loopback embeddings endpoint received no requests; no codebase index has
+      been built, so Continue indexer verification remains open. The public
       [onnx-community ONNX export](https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/tree/c25a394dd583836952667c12f008335071b3f43d)
       explicitly targets Transformers.js and is not a tested ONNX Runtime GenAI
       folder, so it does not close the recipe gate. The upstream
