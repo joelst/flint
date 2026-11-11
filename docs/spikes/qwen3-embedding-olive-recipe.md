@@ -176,6 +176,12 @@ One measured synchronous registration took 19 ms for this folder. These
 runs do not establish that the native crash is impossible for this or another
 model, especially on slower filesystems; synchronous registration blocks the
 sidecar event loop while it runs.
+The portable export has no `inference_model.json`, so Flint correctly refuses
+to link it without altering its source. A separate isolated copy with only
+`{"Name":"flint-byom-embedding-live:1"}` added to that file passed three GPU-1
+link/restart runs, each with IPC and gateway embedding parity, unchanged linked
+source hashes, link removal, and confirmed shutdown. The original portable
+export was not modified.
 The active execution provider was still not reported, and these results do not
 establish the provenance or quality of the separately cached catalog artifact,
 cross-host reproducibility, or full MTEB performance.

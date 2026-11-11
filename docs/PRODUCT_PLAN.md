@@ -549,7 +549,11 @@ async. Eight further uninstrumented GPU-1 copy/restart runs passed embedding
 IPC/gateway parity, unchanged source hashes, removal, and confirmed shutdown.
 One synchronous registration took 19 ms for this folder, but blocks the
 sidecar event loop and does not prove the crash impossible for other models or
-filesystems. The BYOM gate remains open for cached catalog-artifact provenance.
+filesystems. The portable export lacks `inference_model.json` and cannot be
+linked without altering its source. An isolated copy with that metadata added
+passed three GPU-1 link/restart embedding runs, source-hash preservation,
+junction removal, and confirmed shutdown. The BYOM gate remains open for
+cached catalog-artifact provenance.
 Qwen2.5
 0.5B CPU rejected a real 38,708-word request during structural preflight (39,249
 estimated tokens against a 32,768 limit), before any stream event or in-flight
