@@ -129,7 +129,10 @@ function splitTopLevelEntries(rawBody) {
 
 /** Extracts the top-level keys of an object, e.g. every command name in COMMAND_SCHEMA. */
 function extractObjectKeys(source, marker) {
-  return splitTopLevelEntries(findObjectBody(source, marker)).map(([key]) => key);
+  const keys = splitTopLevelEntries(findObjectBody(source, marker)).map(([key]) => key);
+  const duplicate = keys.find((key, index) => keys.indexOf(key) !== index);
+  if (duplicate) throw new Error(`Duplicate command ${duplicate} in ${marker}`);
+  return keys;
 }
 
 /**
@@ -187,6 +190,7 @@ function extractTypedCommandFields(source, marker) {
     const cmdMatch = cmdField.match(/^cmd\s*:\s*'([^']+)'$/);
     if (!cmdMatch) throw new Error(`Expected "cmd: 'name'" as the first field, got: "${cmdField}"`);
     const command = cmdMatch[1];
+    if (byCommand.has(command)) throw new Error(`Duplicate typed command ${command}`);
     const required = [];
     const optional = [];
     for (const field of payloadFields) {
@@ -210,9 +214,12 @@ function extractFieldsByCommand(source, marker, { fieldsAsQuotedLiterals }) {
   const entries = splitTopLevelEntries(findObjectBody(source, marker));
   const byCommand = new Map();
   for (const [command, value] of entries) {
+    if (byCommand.has(command)) throw new Error(`Duplicate command ${command} in ${marker}`);
     const fields = fieldsAsQuotedLiterals
       ? [...value.matchAll(/'([^']+)'/g)].map((match) => match[1])
       : splitTopLevelEntries(value.replace(/^\{/, '').replace(/\}$/, '')).map(([field]) => field);
+    const duplicate = fields.find((field, index) => fields.indexOf(field) !== index);
+    if (duplicate) throw new Error(`Duplicate field ${duplicate} in ${marker}.${command}`);
     byCommand.set(command, fields);
   }
   return byCommand;
@@ -231,7 +238,11 @@ function extractSchemaRequiredOptional(source, marker) {
     const asList = (key) => {
       const entry = body.find(([field]) => field === key);
       if (!entry) throw new Error(`COMMAND_SCHEMA.${command} is missing "${key}"`);
-      return [...entry[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
+      const literal = entry[1].trim();
+      if (literal.replace(/'[^']+'/g, '').replace(/[\s,]/g, '') !== '[]') {
+        throw new Error(`Expected a literal field array for COMMAND_SCHEMA.${command}.${key}`);
+      }
+      return [...literal.matchAll(/'([^']+)'/g)].map((match) => match[1]);
     };
     byCommand.set(command, { required: asList('required'), optional: asList('optional') });
   }

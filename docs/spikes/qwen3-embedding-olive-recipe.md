@@ -4,8 +4,8 @@ This is a pinned candidate recipe for building a Qwen3 embedding folder that
 Foundry Local can register as an ONNX Runtime GenAI model. It records the
 successful build's source revisions, full Python package versions, modified
 Olive config, and export fixes. It does not establish that the registered
-catalog artifact came from these sources. A fresh build/output replay reused
-the pinned Python environment; rebuilding that environment remains unverified.
+catalog artifact came from these sources. Fresh build/output replay succeeds
+with both the original and a newly provisioned pinned Python environment.
 
 ## Pinned inputs
 
@@ -98,5 +98,15 @@ app home, restarted without re-importing, and returned two finite
 had cosine similarity above 0.999999; the source's 12 file hashes were
 unchanged, removal succeeded, and both sidecar shutdowns reported confirmed
 cleanup. The runtime still reported no active-provider identity. The replay
-does not establish a newly provisioned Python environment, retrieval quality,
-MTEB scores, or provenance of the separately cached catalog artifact.
+does not establish retrieval quality, MTEB scores, or provenance of the
+separately cached catalog artifact.
+
+A second replay created an empty Python 3.12.12 virtual environment, restored
+`requirements.lock.txt` from public PyPI and the CUDA 12.6 wheel index, and
+passed `pip check`. With the optional TensorRT DLL hidden only during the Olive
+run and restored afterward, the pinned source copy and checked-in config
+produced all 12 prepared files byte-for-byte identical to the first portable
+replay, including the ONNX graph. Its isolated Flint import, fresh-process
+restart, IPC and gateway embedding calls on GPU 1, source-hash check, removal,
+and confirmed shutdown also passed. Wheel hashes and the host driver are not
+pinned; these runs do not establish bit-for-bit reproducibility on other hosts.

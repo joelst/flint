@@ -307,9 +307,9 @@ The 2.1.0 contracts, re-run on 2.4.0:
   8B variant returned one finite 4096-dimensional vector through `embedTexts`;
   the gateway alias request also returned a finite 4096-dimensional vector.
   A pinned Qwen3 0.6B CUDA INT4 candidate recipe is recorded in
-  [the Olive recipe note](./spikes/qwen3-embedding-olive-recipe.md); a fresh
-  build/output replay passed with the prior pinned environment. A newly
-  provisioned environment and retrieval-quality evaluation remain open. The
+  [the Olive recipe note](./spikes/qwen3-embedding-olive-recipe.md); fresh
+  build/output replay passed with both the prior and a newly provisioned
+  pinned environment. Retrieval-quality evaluation remains open. The
   native router's unquoted 2.4.0 `Model not found: X` alias rejection is
   recognized by the gateway classifier.
 - Native ChatSession paths use `preflightRequest` when the SDK exposes it and
@@ -500,7 +500,7 @@ not retrieval-quality or MTEB evidence. The upstream recipe remains unmodified;
 the derived config and version-pinned environment are recorded in
 [the Olive recipe note](./spikes/qwen3-embedding-olive-recipe.md).
 A separate build/output replay using copied revision-pinned source inputs and
-the checked-in config, but the prior pinned Python environment, matched the
+the checked-in config and the prior pinned Python environment matched the
 original ONNX hash. Export preparation excluded Olive's absolute-path
 `model_config.json`; the remaining 12 files total 828,266,615 bytes and have
 no replay work-directory references in JSON. An isolated sidecar imported that
@@ -508,9 +508,14 @@ portable output into a fresh app home, restarted without re-importing, and
 returned two finite 1,024-component vectors from both IPC and gateway alias
 requests on physical GPU 1. Corresponding IPC/gateway vectors had cosine
 similarity above 0.999999. Source hashes were unchanged; removal and both
-shutdowns were confirmed. The active provider remains unidentified. The BYOM
-gate remains open for newly provisioned environment replay, catalog-artifact
-provenance, and retrieval-quality evidence. Qwen2.5
+shutdowns were confirmed. A second replay in a newly provisioned Python
+3.12.12 venv restored the recorded requirements, passed `pip check`, and
+produced the same 12 portable file hashes. Its separate isolated import,
+fresh-process restart, IPC/gateway embeddings on GPU 1, source-hash check,
+removal, and confirmed shutdown also passed. Wheel hashes and host driver
+remain unpinned. The active provider remains unidentified. The BYOM gate
+remains open for catalog-artifact provenance and retrieval-quality evidence.
+Qwen2.5
 0.5B CPU rejected a real 38,708-word request during structural preflight (39,249
 estimated tokens against a 32,768 limit), before any stream event or in-flight
 model work. A cached Nemotron 0.6B CPU WAV transcription recognized the local test phrase.
@@ -867,7 +872,7 @@ qualification. Extra audio-decoder work has no 1.0 gate.
 | Must 1.0 ship a time-series health store? | No. Bounded in-process health ring plus diagnostics export. |
 | Is UX maturity missing? | No. It was unscoped. Coach, Network/WSL, and Monitor memory UX exist; 1.0 qualifies them. |
 | Must we component-test `+page.svelte`? | No. Keep extracting into `src/lib/*.ts`. 1.0 testing is unit + contract + sidecar E2E + one packaged Windows smoke. |
-| Is BYOM `/v1/embeddings` a 1.0 blocker? | No. The cached Qwen3 0.6B and 8B catalog models are qualified through the gateway and sidecar IPC. A source-pinned Qwen3 0.6B CUDA INT4 recipe passed fresh-output replay and BYOM embedding smoke, but clean Python-environment replay and retrieval-quality evaluation remain open. 1.0.0 recipes are chat completions; full RAG stays after 1.0. |
+| Is BYOM `/v1/embeddings` a 1.0 blocker? | No. The cached Qwen3 0.6B and 8B catalog models are qualified through the gateway and sidecar IPC. A source-pinned Qwen3 0.6B CUDA INT4 recipe passed fresh pinned-environment replay and BYOM embedding smoke; retrieval-quality evaluation remains open. 1.0.0 recipes are chat completions; full RAG stays after 1.0. |
 | Broader WebM/Opus/MP3 decoder for 1.0? | No. Browser `decodeAudioData` → 16 kHz WAV already ships. Document supported formats. Word-level timestamps stay upstream-blocked. |
 | Must CI install the MSI to ship 1.0? | No, if clean-machine dogfood is recorded. Staged-layout smoke in CI; msiexec automation is later. |
 | Is the updater broken? | No known wiring gap. Stable releases resolve through `releases/latest`; drafts and prereleases are intentionally invisible. Keep install/rollback evidence current before 1.0. |

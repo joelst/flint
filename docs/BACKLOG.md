@@ -77,9 +77,10 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       is pinned to that Hub revision, and Flint pins SDK/core 2.4.0. Available
       metadata does not tie the registry export to that source commit. The
       pinned candidate procedure is recorded in
-      [the Olive recipe note](./spikes/qwen3-embedding-olive-recipe.md); clean
-      replay, registry-artifact provenance, and retrieval-quality evidence
-      remain open. A temporary build
+      [the Olive recipe note](./spikes/qwen3-embedding-olive-recipe.md); fresh
+      pinned-environment replay and BYOM embedding smoke passed, while
+      registry-artifact provenance and retrieval-quality evidence remain open.
+      A temporary build
       using the pinned model snapshot and recipe commit was imported and
       validated through sidecar 2.4.0 gateway and IPC; detailed evidence is in
       PRODUCT_PLAN. The upstream checked-in recipe required disabling
@@ -113,8 +114,7 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       to zero and the indexing lock was released. This verifies Continue
       indexing through Flint's local endpoint, not normal all-provider
       startup, retrieval quality, or packaged-app behavior. Model-export
-      provenance, clean replay of the candidate recipe, and retrieval quality
-      remain open.
+      provenance of the cached catalog export and retrieval quality remain open.
       The [onnx-community ONNX export](https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/tree/c25a394dd583836952667c12f008335071b3f43d)
       explicitly targets Transformers.js and is not a tested ONNX Runtime GenAI
       folder, so it does not close the recipe gate. The upstream
