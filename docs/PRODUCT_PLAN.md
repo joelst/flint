@@ -413,6 +413,15 @@ ordinary chat, usage, streaming, and disconnect, but its strict tool stream
 ended without `[DONE]`; its optional `/v1/responses` check returned HTTP 500
 with a CUDA `Zero` invalid-argument diagnostic. Neither is positive evidence
 for structured tool calling outside the Qwen variants.
+Strict `openai-live --require-tools` CUDA probes for SmolLM3 3B, Ministral 3
+3B, and OLMo 3 7B also passed ordinary chat, usage, streaming, and disconnect,
+but each lacked `[DONE]` and a completed tool call; the cause was not isolated.
+OLMo 3's optional `/v1/responses` check returned HTTP 500 with a CUDA `Zero`
+invalid-argument diagnostic. A direct `createSessionChatClient` probe on
+`qwen3-vl-2b-instruct-cuda-gpu:2`, with the CUDA runtime prepared and inference
+restricted to physical GPU 1, passed native ChatSession image input: an
+in-memory synthetic PNG containing a green square was identified as `Green`.
+This is not evidence for sidecar IPC or gateway vision.
 On the Qwen2.5 0.5B CUDA variant, the direct gateway also returned valid JSON
 for `response_format.type=json_object`, honored `tool_choice=required`, and
 reported `finish_reason: length` at `max_tokens: 1` with one completion token.
