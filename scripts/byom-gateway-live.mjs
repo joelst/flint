@@ -27,7 +27,8 @@ function parseArgs(argv) {
     retrieval: null, catalogAlias: null, catalogVariant: null, preflight: false,
     admissionErrors: false, switchModel: null, switchVariant: null, concurrent: false,
     cancelStream: false, idleEviction: false, requireTools: false, probeResponses: false,
-    disconnectOnly: false, packagedRoot: null,
+    disconnectOnly: false, activeEviction: false, coexistModel: null,
+    coexistAlias: null, coexistVariant: null, packagedRoot: null,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
@@ -42,17 +43,23 @@ function parseArgs(argv) {
     else if (argv[i] === '--require-tools') args.requireTools = true;
     else if (argv[i] === '--probe-responses') args.probeResponses = true;
     else if (argv[i] === '--disconnect-only') args.disconnectOnly = true;
+    else if (argv[i] === '--active-eviction') args.activeEviction = true;
     else if (argv[i] === '--packaged-root') {
       const value = argv[++i];
       if (!value || value.startsWith('--')) throw new Error('--packaged-root requires a release resource directory.');
       args.packagedRoot = path.resolve(value);
     }
-    else if (argv[i] === '--switch-model' || argv[i] === '--switch-variant') {
+    else if (argv[i] === '--switch-model' || argv[i] === '--switch-variant'
+      || argv[i] === '--coexist-model' || argv[i] === '--coexist-alias' || argv[i] === '--coexist-variant') {
       const option = argv[i];
       const value = argv[++i];
       if (!value || value.startsWith('--')) throw new Error(`${option} requires a value.`);
-      args[option === '--switch-model' ? 'switchModel' : 'switchVariant'] =
-        option === '--switch-model' ? path.resolve(value) : value;
+      const field = {
+        '--switch-model': 'switchModel', '--switch-variant': 'switchVariant',
+        '--coexist-model': 'coexistModel', '--coexist-alias': 'coexistAlias',
+        '--coexist-variant': 'coexistVariant',
+      }[option];
+      args[field] = option.endsWith('-model') ? path.resolve(value) : value;
     }
     else if (argv[i] === '--retrieval') {
       args.retrieval = argv[++i];
@@ -96,6 +103,13 @@ function parseArgs(argv) {
   }
   if (args.probeResponses && (args.disconnectOnly || args.requireTools)) {
     throw new Error('--probe-responses must run without tool or disconnect probes.');
+  }
+  if (args.activeEviction || args.coexistModel || args.coexistAlias || args.coexistVariant) {
+    if (!args.activeEviction || !args.coexistModel || !args.coexistAlias || !args.coexistVariant
+      || !args.catalogAlias || args.embeddings || args.coexistAlias === args.catalogAlias
+      || args.switchModel) {
+      throw new Error('--active-eviction requires a distinct --coexist-model, --coexist-alias, and --coexist-variant with a cached catalog chat model.');
+    }
   }
   if (args.switchModel || args.switchVariant) {
     if (!args.switchModel || !args.switchVariant || !args.catalogAlias || args.embeddings) {
@@ -399,7 +413,8 @@ async function run(modelPath, {
   catalogAlias = null, catalogVariant = null, preflight = false, admissionErrors = false,
   switchModel = null, switchVariant = null, concurrent = false, cancelStream = false,
   idleEviction = false, requireTools = false, probeResponses = false,
-  disconnectOnly = false, packagedRoot = null,
+  disconnectOnly = false, activeEviction = false, coexistModel = null,
+  coexistAlias = null, coexistVariant = null, packagedRoot = null,
 } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
@@ -409,6 +424,9 @@ async function run(modelPath, {
   }
   if (switchModel && (!path.isAbsolute(switchModel) || !fs.statSync(switchModel).isDirectory())) {
     throw new Error('--switch-model must name an existing model directory.');
+  }
+  if (coexistModel && (!path.isAbsolute(coexistModel) || !fs.statSync(coexistModel).isDirectory())) {
+    throw new Error('--coexist-model must name an existing model directory.');
   }
   if (packagedRoot) {
     for (const resource of ['node.exe', path.join('sidecar', 'foundry-sidecar.js'),
@@ -451,6 +469,7 @@ async function run(modelPath, {
     tools: null,
     responses: null,
     disconnect: null,
+    activeEviction: null,
     error: null,
     cleanupError: null,
     cleanupForced: false,
@@ -459,6 +478,7 @@ async function run(modelPath, {
   let linkedPath = null;
   let sourceBefore;
   let switchBefore;
+  let coexistBefore;
   try {
     sourceBefore = await snapshotFolder(modelPath);
     report.sourceFileCount = sourceBefore.length;
@@ -472,6 +492,12 @@ async function run(modelPath, {
       const isolated = catalogCacheTarget(switchModel, switchVariant, home, appName);
       fs.mkdirSync(path.dirname(isolated), { recursive: true });
       fs.cpSync(switchModel, isolated, { recursive: true, errorOnExist: true, force: false });
+    }
+    if (coexistModel) {
+      coexistBefore = await snapshotFolder(coexistModel);
+      const isolated = catalogCacheTarget(coexistModel, coexistVariant, home, appName);
+      fs.mkdirSync(path.dirname(isolated), { recursive: true });
+      fs.cpSync(coexistModel, isolated, { recursive: true, errorOnExist: true, force: false });
     }
     sidecar = startSidecar(home, appName, stderrLines, packagedRoot);
     await sidecar.ready;
@@ -523,6 +549,10 @@ async function run(modelPath, {
     }
     if (switchVariant && !local.variants?.some((variant) => variant.id === switchVariant && variant.cached)) {
       throw new Error('The switch target was not visible as cached in Flint model discovery.');
+    }
+    if (coexistAlias && !listed.some((model) => model.alias === coexistAlias
+      && model.variants?.some((variant) => variant.id === coexistVariant && variant.cached))) {
+      throw new Error('The co-resident model was not visible as cached in Flint model discovery.');
     }
     report.phase = 'model load and IPC';
     const loaded = assertReply(await sidecar.send('load', {
@@ -918,6 +948,88 @@ async function run(modelPath, {
         }
         report.idleEviction = { thresholdMs: 60_000, pinnedSurvived: true, evictedOnUnpin: true, gatewayRecovered: true };
       }
+      if (activeEviction) {
+        report.phase = 'active-stream eviction';
+        const second = assertReply(await sidecar.send('load', {
+          alias: coexistAlias, variantId: coexistVariant,
+        }, 3 * 60 * 1000), 'co-resident load').result;
+        if (second?.variantId !== coexistVariant) {
+          throw new Error('The co-resident model selected the wrong variant.');
+        }
+        assertReply(await sidecar.send('setModelPriorities', {
+          priorities: [
+            { alias: modelAlias, priority: 'low' },
+            { alias: coexistAlias, priority: 'normal' },
+          ],
+        }), 'set active-eviction priorities');
+        let firstDeltaResolve;
+        const firstDelta = new Promise((resolve) => { firstDeltaResolve = resolve; });
+        let sawDelta = false;
+        let streamSettled = false;
+        const streaming = sidecar.send('chatCompletion', {
+          model: modelAlias,
+          messages: [
+            { role: 'system', content: 'You are a list generator. Output list items only, never instructions or a summary.' },
+            { role: 'user', content: 'List 1000 distinct astronomy facts in numbered sentences. Start with fact 1 and continue as long as possible.' },
+          ],
+          maxTokens: 8192,
+          stream: true,
+        }, 5 * 60 * 1000, (message) => {
+          if (!sawDelta && typeof message.delta === 'string' && message.delta) {
+            sawDelta = true;
+            firstDeltaResolve();
+          }
+        });
+        void streaming.then(
+          () => { streamSettled = true; },
+          () => { streamSettled = true; },
+        );
+        void streaming.catch(() => {});
+        await Promise.race([
+          firstDelta,
+          streaming.then(() => { throw new Error('The streaming request ended before its first delta.'); }),
+        ]);
+        const active = assertReply(await sidecar.send('poolStatus'), 'active-stream poolStatus').result;
+        const primary = active?.models?.find((model) => model.alias === modelAlias);
+        if (active?.models?.length !== 2 || primary?.variantId !== loaded.variantId
+          || primary.inFlight < 1 || !active.models.some((model) => model.alias === coexistAlias)) {
+          throw new Error('The streaming request did not retain an activity lease.');
+        }
+        const capped = assertReply(await sidecar.send('setEvictionConfig', {
+          maxResidentEnabled: true, maxResident: 1,
+        }), 'enable resident cap').result;
+        const activeWhenCapped = !streamSettled;
+        assertReply(await streaming, 'active chatCompletion');
+        if (!activeWhenCapped
+          || !capped?.evicted?.some((entry) => entry.alias === coexistAlias && entry.reason === 'cap')
+          || capped.evicted.some((entry) => entry.alias === modelAlias)) {
+          throw new Error(`The cap did not protect the streaming model: ${JSON.stringify(capped?.evicted ?? null)}.`);
+        }
+        const protectedPool = assertReply(await sidecar.send('poolStatus'), 'protected poolStatus').result;
+        if (protectedPool?.models?.length !== 1
+          || protectedPool.models[0].variantId !== loaded.variantId || protectedPool.models[0].inFlight !== 0) {
+          throw new Error('The streamed model was not resident after its request settled.');
+        }
+        const admitted = assertReply(await sidecar.send('load', {
+          alias: coexistAlias, variantId: coexistVariant,
+        }, 3 * 60 * 1000), 'post-stream co-resident load').result;
+        if (admitted?.variantId !== coexistVariant) {
+          throw new Error('The post-stream load selected the wrong variant.');
+        }
+        const after = assertReply(await sidecar.send('poolStatus'), 'post-stream poolStatus').result;
+        if (after?.models?.length !== 1 || after.models[0].alias !== coexistAlias
+          || after.models[0].variantId !== coexistVariant || after.models[0].inFlight !== 0) {
+          throw new Error('The resident cap did not evict the completed low-priority stream model.');
+        }
+        report.activeEviction = {
+          inFlightWhenCapped: primary.inFlight,
+          evictedWhileStreaming: coexistAlias,
+          remainingVariant: after.models[0].variantId,
+        };
+        assertReply(await sidecar.send('setEvictionConfig', {
+          maxResidentEnabled: false,
+        }), 'disable resident cap');
+      }
       if (switchVariant) {
         report.phase = 'same-alias variant switch';
         const switched = assertReply(await sidecar.send('load', {
@@ -957,15 +1069,18 @@ async function run(modelPath, {
       }
     }
     report.phase = 'model removal';
-    assertReply(await sidecar.send('unload', { alias: modelAlias }), 'unload');
+    if (!activeEviction) assertReply(await sidecar.send('unload', { alias: modelAlias }), 'unload');
+    else assertReply(await sidecar.send('unload', { alias: coexistAlias }), 'unload co-resident');
     if (!catalogAlias) assertReply(await sidecar.send('deleteModel', { alias: modelAlias }), 'deleteModel');
     const finalFiles = await snapshotFolder(modelPath);
     const primaryUnchanged = JSON.stringify(sourceBefore) === JSON.stringify(finalFiles);
     const switchUnchanged = !switchModel ||
       JSON.stringify(switchBefore) === JSON.stringify(await snapshotFolder(switchModel));
-    report.sourceUnchanged = primaryUnchanged && switchUnchanged;
+    const coexistUnchanged = !coexistModel ||
+      JSON.stringify(coexistBefore) === JSON.stringify(await snapshotFolder(coexistModel));
+    report.sourceUnchanged = primaryUnchanged && switchUnchanged && coexistUnchanged;
     if (!report.sourceUnchanged) {
-      throw new Error(`${!primaryUnchanged ? 'Primary' : 'Switch'} source model files changed during the test.`);
+      throw new Error(`${!primaryUnchanged ? 'Primary' : !switchUnchanged ? 'Switch' : 'Co-resident'} source model files changed during the test.`);
     }
     if (linkedPath && fs.existsSync(linkedPath)) {
       throw new Error('Flint did not remove the isolated model assets during cleanup.');
@@ -1007,6 +1122,7 @@ async function main() {
     assert.throws(() => parseArgs(['--model', 'model', '--require-tools']), /requires a cached catalog chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--probe-responses']), /requires a cached catalog chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--disconnect-only']), /requires a cached catalog chat model/);
+    assert.throws(() => parseArgs(['--model', 'model', '--active-eviction']), /requires a distinct --coexist-model/);
     assert.throws(() => parseArgs(['--model', 'model', '--switch-model', 'other']), /Variant switching requires/);
     assert.equal(parseArgs(['--model', 'model', '--embeddings', '--retrieval', 'dataset.json']).retrieval, 'dataset.json');
     assert.throws(() => parseArgs(['--model', 'model', '--retrieval', 'dataset.json']), /requires --embeddings/);
@@ -1015,7 +1131,7 @@ async function main() {
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--concurrent] [--cancel-stream] [--idle-eviction] [--require-tools] [--probe-responses] [--disconnect-only] [--packaged-root <release-dir>] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--concurrent] [--cancel-stream] [--idle-eviction] [--require-tools] [--probe-responses] [--disconnect-only] [--active-eviction --coexist-model <folder> --coexist-alias <alias> --coexist-variant <id>] [--packaged-root <release-dir>] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
   const report = await run(args.model, {
     copy: args.copy, restart: args.restart, embeddings: args.embeddings,
     retrieval: args.retrieval, catalogAlias: args.catalogAlias, catalogVariant: args.catalogVariant,
@@ -1025,6 +1141,8 @@ async function main() {
     requireTools: args.requireTools,
     probeResponses: args.probeResponses,
     disconnectOnly: args.disconnectOnly,
+    activeEviction: args.activeEviction, coexistModel: args.coexistModel,
+    coexistAlias: args.coexistAlias, coexistVariant: args.coexistVariant,
     packagedRoot: args.packagedRoot,
   });
   console.log(JSON.stringify(report, null, 2));

@@ -232,7 +232,16 @@ do not combine a runtime replacement or storage-format change with this upgrade.
   it immediately with reason `idle`; the pool emptied, and gateway chat by
   alias reloaded it and returned an answer without leaving an activity lease.
   All ten source hashes were unchanged, and shutdown was confirmed. This
-  does not qualify eviction during an active stream or after a restart.
+  does not qualify eviction after a restart.
+  A staged-runtime GPU-1 run preloaded Qwen2.5 0.5B CUDA and Qwen3
+  Embedding CUDA, with Qwen marked low priority. While a Qwen IPC stream
+  held an `inFlight: 1` lease, enabling the one-resident cap evicted the
+  idle embedding model with reason `cap`, rather than the lower-priority
+  active model. The stream settled, and reloading the embedding model
+  evicted Qwen under the cap. Both source folders retained their hashes
+  and shutdown was confirmed without force. This establishes Flint's
+  activity-lease and cap behavior in this run, not native generation
+  quiescence or post-restart eviction.
 
 **5. Native 2.1.0–2.4.0 feature completion**
 
