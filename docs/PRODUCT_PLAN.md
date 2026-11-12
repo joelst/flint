@@ -435,6 +435,13 @@ A separate staged tool run that skipped both optional routes passed, drained,
 unloaded and shut down cleanly with unchanged source hashes. The native
 session/unload failure remains an open stability concern; neither optional
 route is qualified by the required-only run.
+Two isolated staged-runtime Qwen2.5 0.5B runs switched the same alias from
+CUDA to CPU and from CPU to CUDA while exposing only physical GPU 1. Both
+replied over IPC and gateway chat before the switch, served gateway alias
+chat after the switch, kept only the selected variant resident with no
+activity lease, preserved both ten-file model sources, and shut down without
+force. This is staged resource qualification, not installed-app model
+switching or observed execution-provider identity.
 Fresh-process restart with the same isolated app home passed link and copy
 re-discovery, IPC and gateway chat/streaming, removal, source-hash comparison,
 and confirmed shutdown without re-import. One earlier copy/restart attempt
