@@ -150,6 +150,16 @@ describe('BYOM runner copy selection', () => {
     ])).toMatchObject({ admissionErrors: true, embeddings: false });
     expect(() => parseArgs(['--model', 'model', '--admission-errors']))
       .toThrow(/requires a cached catalog chat model/);
+    expect(parseArgs([
+      '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1',
+      '--switch-model', 'catalog/v2', '--switch-variant', 'v:2',
+    ])).toMatchObject({
+      catalogAlias: 'a', switchModel: path.resolve('catalog/v2'), switchVariant: 'v:2',
+    });
+    expect(() => parseArgs([
+      '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1',
+      '--switch-model', 'catalog/v1', '--switch-variant', 'v:1',
+    ])).toThrow(/different versioned model id/);
   });
 });
 

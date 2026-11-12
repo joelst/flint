@@ -24,7 +24,7 @@ function parseArgs(argv) {
   const args = {
     model: null, selfTest: false, copy: false, restart: false, embeddings: false,
     retrieval: null, catalogAlias: null, catalogVariant: null, preflight: false,
-    admissionErrors: false,
+    admissionErrors: false, switchModel: null, switchVariant: null,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
@@ -33,6 +33,13 @@ function parseArgs(argv) {
     else if (argv[i] === '--embeddings') args.embeddings = true;
     else if (argv[i] === '--preflight') args.preflight = true;
     else if (argv[i] === '--admission-errors') args.admissionErrors = true;
+    else if (argv[i] === '--switch-model' || argv[i] === '--switch-variant') {
+      const option = argv[i];
+      const value = argv[++i];
+      if (!value || value.startsWith('--')) throw new Error(`${option} requires a value.`);
+      args[option === '--switch-model' ? 'switchModel' : 'switchVariant'] =
+        option === '--switch-model' ? path.resolve(value) : value;
+    }
     else if (argv[i] === '--retrieval') {
       args.retrieval = argv[++i];
       if (!args.retrieval || args.retrieval.startsWith('--')) throw new Error('--retrieval requires a JSON dataset path.');
@@ -54,6 +61,14 @@ function parseArgs(argv) {
   if (args.preflight && args.embeddings) throw new Error('--preflight requires a chat model.');
   if (args.admissionErrors && (!args.catalogAlias || args.embeddings)) {
     throw new Error('--admission-errors requires a cached catalog chat model.');
+  }
+  if (args.switchModel || args.switchVariant) {
+    if (!args.switchModel || !args.switchVariant || !args.catalogAlias || args.embeddings) {
+      throw new Error('Variant switching requires --switch-model, --switch-variant, and a cached catalog chat model.');
+    }
+    if (args.switchVariant === args.catalogVariant) {
+      throw new Error('Variant switching requires a different versioned model id.');
+    }
   }
   if (args.catalogAlias || args.catalogVariant) {
     if (!args.catalogAlias || !args.catalogVariant) {
@@ -315,12 +330,16 @@ function catalogCacheTarget(modelPath, variantId, home, appName) {
 async function run(modelPath, {
   copy = false, restart = false, embeddings = false, retrieval = null,
   catalogAlias = null, catalogVariant = null, preflight = false, admissionErrors = false,
+  switchModel = null, switchVariant = null,
 } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
   }
   if (!path.isAbsolute(modelPath) || !fs.statSync(modelPath).isDirectory()) {
     throw new Error('--model must name an existing model directory.');
+  }
+  if (switchModel && (!path.isAbsolute(switchModel) || !fs.statSync(switchModel).isDirectory())) {
+    throw new Error('--switch-model must name an existing model directory.');
   }
   if (flintIsRunning()) {
     throw new Error('Quit Flint before this spike creates an isolated Foundry runtime.');
@@ -347,6 +366,7 @@ async function run(modelPath, {
     retrieval: null,
     preflight: null,
     admissionErrors: null,
+    switch: null,
     error: null,
     cleanupError: null,
     cleanupForced: false,
@@ -354,6 +374,7 @@ async function run(modelPath, {
   let sidecar;
   let linkedPath = null;
   let sourceBefore;
+  let switchBefore;
   try {
     sourceBefore = await snapshotFolder(modelPath);
     report.sourceFileCount = sourceBefore.length;
@@ -361,6 +382,12 @@ async function run(modelPath, {
       const isolated = catalogCacheTarget(modelPath, catalogVariant, home, appName);
       fs.mkdirSync(path.dirname(isolated), { recursive: true });
       fs.cpSync(modelPath, isolated, { recursive: true, errorOnExist: true, force: false });
+    }
+    if (switchModel) {
+      switchBefore = await snapshotFolder(switchModel);
+      const isolated = catalogCacheTarget(switchModel, switchVariant, home, appName);
+      fs.mkdirSync(path.dirname(isolated), { recursive: true });
+      fs.cpSync(switchModel, isolated, { recursive: true, errorOnExist: true, force: false });
     }
     sidecar = startSidecar(home, appName, stderrLines);
     await sidecar.ready;
@@ -408,6 +435,9 @@ async function run(modelPath, {
       ? !local.variants?.some((variant) => variant.id === catalogVariant && variant.cached)
       : local.info?.uri !== `local://${modelAlias}`)) {
       throw new Error('The selected model was not visible as cached in Flint model discovery.');
+    }
+    if (switchVariant && !local.variants?.some((variant) => variant.id === switchVariant && variant.cached)) {
+      throw new Error('The switch target was not visible as cached in Flint model discovery.');
     }
     report.phase = 'model load and IPC';
     const loaded = assertReply(await sidecar.send('load', {
@@ -638,6 +668,26 @@ async function run(modelPath, {
         }
         report.admissionErrors = { ...statuses, residentVariantId: loaded.variantId, healthyAfter: true };
       }
+      if (switchVariant) {
+        report.phase = 'same-alias variant switch';
+        const switched = assertReply(await sidecar.send('load', {
+          alias: modelAlias, variantId: switchVariant,
+        }), 'switch load').result;
+        if (switched?.variantId !== switchVariant) {
+          throw new Error(`The sidecar selected ${switched?.variantId} instead of ${switchVariant}.`);
+        }
+        const alternate = await complete(endpoint, request);
+        if (typeof alternate?.choices?.[0]?.message?.content !== 'string'
+          || !alternate.choices[0].message.content.trim()) {
+          throw new Error('The gateway did not serve a reply after switching variants.');
+        }
+        const pool = assertReply(await sidecar.send('poolStatus'), 'post-switch poolStatus').result;
+        if (pool?.models?.length !== 1 || pool.models[0].alias !== modelAlias
+          || pool.models[0].variantId !== switchVariant || pool.models[0].inFlight !== 0) {
+          throw new Error('The gateway did not retain only the selected switch variant.');
+        }
+        report.switch = { from: loaded.variantId, to: switchVariant, healthyAfter: true };
+      }
     }
 
     report.phase = 'model removal';
@@ -646,6 +696,9 @@ async function run(modelPath, {
     const finalFiles = await snapshotFolder(modelPath);
     report.sourceUnchanged = JSON.stringify(sourceBefore) === JSON.stringify(finalFiles);
     if (!report.sourceUnchanged) throw new Error('The source model files changed during the test.');
+    if (switchModel && JSON.stringify(switchBefore) !== JSON.stringify(await snapshotFolder(switchModel))) {
+      throw new Error('The switch source model files changed during the test.');
+    }
     if (linkedPath && fs.existsSync(linkedPath)) {
       throw new Error('Flint did not remove the isolated model assets during cleanup.');
     }
@@ -677,6 +730,7 @@ async function main() {
     assert.equal(parseArgs(['--model', 'model', '--preflight']).preflight, true);
     assert.throws(() => parseArgs(['--model', 'model', '--embeddings', '--preflight']), /requires a chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--admission-errors']), /requires a cached catalog chat model/);
+    assert.throws(() => parseArgs(['--model', 'model', '--switch-model', 'other']), /Variant switching requires/);
     assert.equal(parseArgs(['--model', 'model', '--embeddings', '--retrieval', 'dataset.json']).retrieval, 'dataset.json');
     assert.throws(() => parseArgs(['--model', 'model', '--retrieval', 'dataset.json']), /requires --embeddings/);
     assert.throws(() => parseArgs(['--model']), /requires a folder/);
@@ -684,11 +738,12 @@ async function main() {
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--catalog-alias <alias> --catalog-variant <id>]');
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
   const report = await run(args.model, {
     copy: args.copy, restart: args.restart, embeddings: args.embeddings,
     retrieval: args.retrieval, catalogAlias: args.catalogAlias, catalogVariant: args.catalogVariant,
     preflight: args.preflight, admissionErrors: args.admissionErrors,
+    switchModel: args.switchModel, switchVariant: args.switchVariant,
   });
   console.log(JSON.stringify(report, null, 2));
   if (report.error) process.exitCode = 2;
