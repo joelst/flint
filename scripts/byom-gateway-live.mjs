@@ -23,6 +23,7 @@ function parseArgs(argv) {
   const args = {
     model: null, selfTest: false, copy: false, restart: false, embeddings: false,
     retrieval: null, catalogAlias: null, catalogVariant: null, preflight: false,
+    admissionErrors: false,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
@@ -30,6 +31,7 @@ function parseArgs(argv) {
     else if (argv[i] === '--restart') args.restart = true;
     else if (argv[i] === '--embeddings') args.embeddings = true;
     else if (argv[i] === '--preflight') args.preflight = true;
+    else if (argv[i] === '--admission-errors') args.admissionErrors = true;
     else if (argv[i] === '--retrieval') {
       args.retrieval = argv[++i];
       if (!args.retrieval || args.retrieval.startsWith('--')) throw new Error('--retrieval requires a JSON dataset path.');
@@ -49,6 +51,9 @@ function parseArgs(argv) {
   }
   if (args.retrieval && !args.embeddings) throw new Error('--retrieval requires --embeddings.');
   if (args.preflight && args.embeddings) throw new Error('--preflight requires a chat model.');
+  if (args.admissionErrors && (!args.catalogAlias || args.embeddings)) {
+    throw new Error('--admission-errors requires a cached catalog chat model.');
+  }
   if (args.catalogAlias || args.catalogVariant) {
     if (!args.catalogAlias || !args.catalogVariant) {
       throw new Error('Catalog runs require both --catalog-alias and --catalog-variant.');
@@ -308,7 +313,7 @@ function catalogCacheTarget(modelPath, variantId, home, appName) {
 
 async function run(modelPath, {
   copy = false, restart = false, embeddings = false, retrieval = null,
-  catalogAlias = null, catalogVariant = null, preflight = false,
+  catalogAlias = null, catalogVariant = null, preflight = false, admissionErrors = false,
 } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
@@ -340,6 +345,7 @@ async function run(modelPath, {
     gateway: null,
     retrieval: null,
     preflight: null,
+    admissionErrors: null,
     error: null,
     cleanupError: null,
     cleanupForced: false,
@@ -531,6 +537,38 @@ async function run(modelPath, {
         streamedText: streamed.text.slice(0, 240),
         streamDone: streamed.done,
       };
+      if (admissionErrors) {
+        report.phase = 'gateway model admission';
+        const failures = [
+          ['unknownAlias', 'flint-unknown-model-live'],
+          ['wrongVersion', `${catalogVariant.split(':')[0]}:99999`],
+        ];
+        const statuses = {};
+        for (const [kind, model] of failures) {
+          const response = await fetch(`${endpoint}/chat/completions`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ model, messages: prompt, max_tokens: 32 }),
+            signal: AbortSignal.timeout(3 * 60 * 1000),
+          });
+          if (response.status !== 404) {
+            throw new Error(`${kind} returned HTTP ${response.status} instead of 404.`);
+          }
+          await response.body?.cancel();
+          statuses[kind] = response.status;
+        }
+        const pool = assertReply(await sidecar.send('poolStatus'), 'poolStatus').result;
+        if (pool?.models?.length !== 1 || pool.models[0].alias !== modelAlias
+          || pool.models[0].variantId !== loaded.variantId || pool.models[0].inFlight !== 0) {
+          throw new Error('Rejected model requests changed the resident pool or left an activity lease.');
+        }
+        const healthy = await complete(endpoint, request);
+        if (typeof healthy?.choices?.[0]?.message?.content !== 'string'
+          || !healthy.choices[0].message.content.trim()) {
+          throw new Error('The original catalog model stopped serving after rejected requests.');
+        }
+        report.admissionErrors = { ...statuses, residentVariantId: loaded.variantId, healthyAfter: true };
+      }
     }
 
     report.phase = 'model removal';
@@ -569,6 +607,7 @@ async function main() {
     assert.equal(parseArgs(['--model', 'model', '--embeddings']).embeddings, true);
     assert.equal(parseArgs(['--model', 'model', '--preflight']).preflight, true);
     assert.throws(() => parseArgs(['--model', 'model', '--embeddings', '--preflight']), /requires a chat model/);
+    assert.throws(() => parseArgs(['--model', 'model', '--admission-errors']), /requires a cached catalog chat model/);
     assert.equal(parseArgs(['--model', 'model', '--embeddings', '--retrieval', 'dataset.json']).retrieval, 'dataset.json');
     assert.throws(() => parseArgs(['--model', 'model', '--retrieval', 'dataset.json']), /requires --embeddings/);
     assert.throws(() => parseArgs(['--model']), /requires a folder/);
@@ -576,11 +615,11 @@ async function main() {
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--catalog-alias <alias> --catalog-variant <id>]');
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--catalog-alias <alias> --catalog-variant <id>]');
   const report = await run(args.model, {
     copy: args.copy, restart: args.restart, embeddings: args.embeddings,
     retrieval: args.retrieval, catalogAlias: args.catalogAlias, catalogVariant: args.catalogVariant,
-    preflight: args.preflight,
+    preflight: args.preflight, admissionErrors: args.admissionErrors,
   });
   console.log(JSON.stringify(report, null, 2));
   if (report.error) process.exitCode = 2;

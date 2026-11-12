@@ -144,6 +144,12 @@ describe('BYOM runner copy selection', () => {
     ])).toMatchObject({ catalogAlias: 'a', preflight: true, embeddings: false });
     expect(() => parseArgs(['--model', 'model', '--embeddings', '--preflight']))
       .toThrow(/requires a chat model/);
+    expect(parseArgs([
+      '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1',
+      '--admission-errors',
+    ])).toMatchObject({ admissionErrors: true, embeddings: false });
+    expect(() => parseArgs(['--model', 'model', '--admission-errors']))
+      .toThrow(/requires a cached catalog chat model/);
   });
 });
 
