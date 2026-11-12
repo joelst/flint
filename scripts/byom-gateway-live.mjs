@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_MAX_BUFFERED_BODY } from '../sidecar/gateway-http.js';
 import { evaluateRetrieval } from './retrieval-quality.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -557,6 +558,31 @@ async function run(modelPath, {
           await response.body?.cancel();
           statuses[kind] = response.status;
         }
+        const malformed = await fetch(`${endpoint}/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{"model":',
+          signal: AbortSignal.timeout(3 * 60 * 1000),
+        });
+        if (malformed.status !== 400) {
+          throw new Error(`Malformed chat JSON returned HTTP ${malformed.status} instead of 400.`);
+        }
+        await malformed.body?.cancel();
+        statuses.malformedJson = malformed.status;
+        const oversized = await fetch(`${endpoint}/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: modelAlias,
+            messages: [{ role: 'user', content: 'w'.repeat(DEFAULT_MAX_BUFFERED_BODY) }],
+          }),
+          signal: AbortSignal.timeout(3 * 60 * 1000),
+        });
+        if (oversized.status !== 413) {
+          throw new Error(`Oversized chat JSON returned HTTP ${oversized.status} instead of 413.`);
+        }
+        await oversized.body?.cancel();
+        statuses.oversizedJson = oversized.status;
         const pool = assertReply(await sidecar.send('poolStatus'), 'poolStatus').result;
         if (pool?.models?.length !== 1 || pool.models[0].alias !== modelAlias
           || pool.models[0].variantId !== loaded.variantId || pool.models[0].inFlight !== 0) {
