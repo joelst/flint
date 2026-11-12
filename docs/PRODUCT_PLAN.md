@@ -435,6 +435,17 @@ A separate staged tool run that skipped both optional routes passed, drained,
 unloaded and shut down cleanly with unchanged source hashes. The native
 session/unload failure remains an open stability concern; neither optional
 route is qualified by the required-only run.
+Two isolated staged Phi runs invoked `/v1/responses` without tool or
+disconnect probes. Both returned HTTP 500 but then unloaded and shut down
+cleanly with all nine source hashes unchanged. The optional route remains
+unsupported by this qualification; its 500 response alone did not reproduce
+the native session/unload failure.
+Two further isolated staged Phi runs aborted only a streaming gateway request
+after first output, without tool or `/v1/responses` probes. Client settlement
+and activity-lease drain preceded clean unload and confirmed shutdown, with
+all nine source hashes unchanged. The earlier combined-run unload failure is
+intermittent and remains unexplained; neither isolated probe proves native
+quiescence after the client abort.
 Two isolated staged-runtime Qwen2.5 0.5B runs switched the same alias from
 CUDA to CPU and from CPU to CUDA while exposing only physical GPU 1. Both
 replied over IPC and gateway chat before the switch, served gateway alias

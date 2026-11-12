@@ -13,7 +13,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_MAX_BUFFERED_BODY } from '../sidecar/gateway-http.js';
-import { runOpenAiLive } from './openai-live.mjs';
+import { disconnectStream, runOpenAiLive } from './openai-live.mjs';
 import { evaluateRetrieval } from './retrieval-quality.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -26,7 +26,8 @@ function parseArgs(argv) {
     model: null, selfTest: false, copy: false, restart: false, embeddings: false,
     retrieval: null, catalogAlias: null, catalogVariant: null, preflight: false,
     admissionErrors: false, switchModel: null, switchVariant: null, concurrent: false,
-    cancelStream: false, idleEviction: false, requireTools: false, packagedRoot: null,
+    cancelStream: false, idleEviction: false, requireTools: false, probeResponses: false,
+    disconnectOnly: false, packagedRoot: null,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
@@ -39,6 +40,8 @@ function parseArgs(argv) {
     else if (argv[i] === '--cancel-stream') args.cancelStream = true;
     else if (argv[i] === '--idle-eviction') args.idleEviction = true;
     else if (argv[i] === '--require-tools') args.requireTools = true;
+    else if (argv[i] === '--probe-responses') args.probeResponses = true;
+    else if (argv[i] === '--disconnect-only') args.disconnectOnly = true;
     else if (argv[i] === '--packaged-root') {
       const value = argv[++i];
       if (!value || value.startsWith('--')) throw new Error('--packaged-root requires a release resource directory.');
@@ -84,6 +87,15 @@ function parseArgs(argv) {
   }
   if (args.requireTools && (!args.catalogAlias || args.embeddings)) {
     throw new Error('--require-tools requires a cached catalog chat model.');
+  }
+  if (args.probeResponses && (!args.catalogAlias || args.embeddings)) {
+    throw new Error('--probe-responses requires a cached catalog chat model.');
+  }
+  if (args.disconnectOnly && (!args.catalogAlias || args.embeddings || args.requireTools)) {
+    throw new Error('--disconnect-only requires a cached catalog chat model without --require-tools.');
+  }
+  if (args.probeResponses && (args.disconnectOnly || args.requireTools)) {
+    throw new Error('--probe-responses must run without tool or disconnect probes.');
   }
   if (args.switchModel || args.switchVariant) {
     if (!args.switchModel || !args.switchVariant || !args.catalogAlias || args.embeddings) {
@@ -386,7 +398,8 @@ async function run(modelPath, {
   copy = false, restart = false, embeddings = false, retrieval = null,
   catalogAlias = null, catalogVariant = null, preflight = false, admissionErrors = false,
   switchModel = null, switchVariant = null, concurrent = false, cancelStream = false,
-  idleEviction = false, requireTools = false, packagedRoot = null,
+  idleEviction = false, requireTools = false, probeResponses = false,
+  disconnectOnly = false, packagedRoot = null,
 } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
@@ -436,6 +449,8 @@ async function run(modelPath, {
     cancelStream: null,
     idleEviction: null,
     tools: null,
+    responses: null,
+    disconnect: null,
     error: null,
     cleanupError: null,
     cleanupForced: false,
@@ -699,6 +714,23 @@ async function run(modelPath, {
         streamedText: streamed.text.slice(0, 240),
         streamDone: streamed.done,
       };
+      if (probeResponses) {
+        report.phase = 'optional responses route';
+        const response = await fetch(`${endpoint}/responses`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model: catalogVariant, input: 'Reply with ready.' }),
+          signal: AbortSignal.timeout(3 * 60 * 1000),
+        });
+        await response.body?.cancel();
+        report.responses = { status: response.status };
+      }
+      if (disconnectOnly) {
+        report.phase = 'isolated gateway disconnect';
+        const disconnected = await disconnectStream(endpoint, catalogVariant, 3 * 60 * 1000);
+        if (!disconnected.ok) throw new Error(`Gateway disconnect did not settle: ${disconnected.detail}`);
+        report.disconnect = { clientSettled: true };
+      }
       if (requireTools) {
         report.phase = 'gateway tool round trip';
         const qualification = await runOpenAiLive({
@@ -908,7 +940,7 @@ async function run(modelPath, {
       }
     }
 
-    if (requireTools) {
+    if (requireTools || disconnectOnly) {
       report.phase = 'post-disconnect drain';
       const deadline = Date.now() + 15_000;
       let pool;
@@ -970,6 +1002,8 @@ async function main() {
     assert.throws(() => parseArgs(['--model', 'model', '--cancel-stream']), /requires a cached catalog chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--idle-eviction']), /requires a cached catalog chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--require-tools']), /requires a cached catalog chat model/);
+    assert.throws(() => parseArgs(['--model', 'model', '--probe-responses']), /requires a cached catalog chat model/);
+    assert.throws(() => parseArgs(['--model', 'model', '--disconnect-only']), /requires a cached catalog chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--switch-model', 'other']), /Variant switching requires/);
     assert.equal(parseArgs(['--model', 'model', '--embeddings', '--retrieval', 'dataset.json']).retrieval, 'dataset.json');
     assert.throws(() => parseArgs(['--model', 'model', '--retrieval', 'dataset.json']), /requires --embeddings/);
@@ -978,7 +1012,7 @@ async function main() {
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--concurrent] [--cancel-stream] [--idle-eviction] [--require-tools] [--packaged-root <release-dir>] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--concurrent] [--cancel-stream] [--idle-eviction] [--require-tools] [--probe-responses] [--disconnect-only] [--packaged-root <release-dir>] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
   const report = await run(args.model, {
     copy: args.copy, restart: args.restart, embeddings: args.embeddings,
     retrieval: args.retrieval, catalogAlias: args.catalogAlias, catalogVariant: args.catalogVariant,
@@ -986,6 +1020,8 @@ async function main() {
     switchModel: args.switchModel, switchVariant: args.switchVariant,
     concurrent: args.concurrent, cancelStream: args.cancelStream, idleEviction: args.idleEviction,
     requireTools: args.requireTools,
+    probeResponses: args.probeResponses,
+    disconnectOnly: args.disconnectOnly,
     packagedRoot: args.packagedRoot,
   });
   console.log(JSON.stringify(report, null, 2));

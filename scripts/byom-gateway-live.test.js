@@ -181,6 +181,20 @@ describe('BYOM runner copy selection', () => {
     expect(() => parseArgs(['--model', 'model', '--require-tools']))
       .toThrow(/requires a cached catalog chat model/);
     expect(parseArgs([
+      '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1', '--probe-responses',
+    ])).toMatchObject({ probeResponses: true });
+    expect(() => parseArgs(['--model', 'model', '--probe-responses']))
+      .toThrow(/requires a cached catalog chat model/);
+    expect(parseArgs([
+      '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1', '--disconnect-only',
+    ])).toMatchObject({ disconnectOnly: true });
+    expect(() => parseArgs(['--model', 'model', '--disconnect-only']))
+      .toThrow(/requires a cached catalog chat model/);
+    expect(() => parseArgs([
+      '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1',
+      '--probe-responses', '--disconnect-only',
+    ])).toThrow(/without tool or disconnect probes/);
+    expect(parseArgs([
       '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1',
       '--packaged-root', 'target/release',
     ])).toMatchObject({ packagedRoot: path.resolve('target/release') });

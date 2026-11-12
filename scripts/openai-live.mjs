@@ -321,7 +321,7 @@ async function raceWithTimeout(pending, timeoutMs, timeoutResult) {
   }
 }
 
-async function disconnectStream(base, model, timeoutMs) {
+export async function disconnectStream(base, model, timeoutMs) {
   const controller = new AbortController();
   const pending = fetch(`${base}/chat/completions`, {
     method: 'POST',
