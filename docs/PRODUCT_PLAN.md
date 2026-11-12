@@ -512,6 +512,12 @@ The cached `config.json` has `quantization_config.embeds: true` and an
 8-bit input-embedding override; the portable export has `embeds: false`.
 Their `tokenizer.json`, `vocab.json`, and `merges.txt` match byte-for-byte,
 but the graphs and GenAI configs do not.
+The SDK/core 2.4.0 public catalog identifies the exact CUDA variant as
+`azureml://registries/azureml/models/qwen3-embedding-0.6b-cuda-gpu/versions/1`,
+with parent `azureml://registries/azureml/models/qwen3-embedding-0.6b/versions/1`,
+Apache-2.0 license, and declared `CUDAExecutionProvider`. These are catalog
+metadata, not a remote artifact digest or observed active-provider identity;
+the isolated metadata probe did not load or cache this variant.
 This proves the cached artifact is not the measured portable export; it does
 not identify the cached graph's source revision. An isolated SDK/core 2.4.0
 sidecar copied this exact cached variant into its own catalog cache (without
