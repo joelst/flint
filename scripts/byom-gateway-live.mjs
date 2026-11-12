@@ -22,13 +22,14 @@ const EMBEDDING_INPUTS = ['A cat rests on a windowsill.', 'A bicycle needs a new
 function parseArgs(argv) {
   const args = {
     model: null, selfTest: false, copy: false, restart: false, embeddings: false,
-    retrieval: null, catalogAlias: null, catalogVariant: null,
+    retrieval: null, catalogAlias: null, catalogVariant: null, preflight: false,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
     else if (argv[i] === '--copy') args.copy = true;
     else if (argv[i] === '--restart') args.restart = true;
     else if (argv[i] === '--embeddings') args.embeddings = true;
+    else if (argv[i] === '--preflight') args.preflight = true;
     else if (argv[i] === '--retrieval') {
       args.retrieval = argv[++i];
       if (!args.retrieval || args.retrieval.startsWith('--')) throw new Error('--retrieval requires a JSON dataset path.');
@@ -47,12 +48,13 @@ function parseArgs(argv) {
     else throw new Error(`Unknown argument: ${argv[i]}`);
   }
   if (args.retrieval && !args.embeddings) throw new Error('--retrieval requires --embeddings.');
+  if (args.preflight && args.embeddings) throw new Error('--preflight requires a chat model.');
   if (args.catalogAlias || args.catalogVariant) {
     if (!args.catalogAlias || !args.catalogVariant) {
       throw new Error('Catalog runs require both --catalog-alias and --catalog-variant.');
     }
-    if (args.copy || args.restart || !args.embeddings) {
-      throw new Error('Catalog runs cannot copy or restart an import and require --embeddings.');
+    if (args.copy || args.restart) {
+      throw new Error('Catalog runs cannot copy or restart an import.');
     }
   }
   return args;
@@ -306,7 +308,7 @@ function catalogCacheTarget(modelPath, variantId, home, appName) {
 
 async function run(modelPath, {
   copy = false, restart = false, embeddings = false, retrieval = null,
-  catalogAlias = null, catalogVariant = null,
+  catalogAlias = null, catalogVariant = null, preflight = false,
 } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
@@ -337,6 +339,7 @@ async function run(modelPath, {
     ipc: null,
     gateway: null,
     retrieval: null,
+    preflight: null,
     error: null,
     cleanupError: null,
     cleanupForced: false,
@@ -358,8 +361,9 @@ async function run(modelPath, {
     assertReply(await sidecar.send('init', { appName, logLevel: 'error' }), 'init');
     report.phase = 'first accelerator registration';
     const accelerators = assertReply(await sidecar.send('ensureAccelerators'), 'ensureAccelerators').result;
-    if (embeddings && !accelerators?.registeredEps?.includes('CUDAExecutionProvider')) {
-      throw new Error('CUDA provider was not registered for the embedding qualification.');
+    if ((embeddings || (catalogAlias && /-cuda-/i.test(catalogVariant)))
+      && !accelerators?.registeredEps?.includes('CUDAExecutionProvider')) {
+      throw new Error('CUDA provider was not registered for the selected qualification.');
     }
     if (!catalogAlias) {
       const addCommand = copy ? 'importModelFolder' : 'linkModelFolder';
@@ -430,6 +434,20 @@ async function run(modelPath, {
         throw new Error('Flint IPC completed without assistant text.');
       }
       report.ipc = { variantId: loaded.variantId, text: ipcText.slice(0, 240) };
+      if (preflight) {
+        report.phase = 'native structural preflight';
+        const oversized = [{ role: 'user', content: 'word '.repeat(40000) }];
+        const rejected = await sidecar.send('chatCompletion', {
+          model: modelAlias,
+          messages: oversized,
+          maxTokens: 32,
+        }, 3 * 60 * 1000);
+        if (rejected?.ok === true
+          || !/structural context limit by \d+ tokens \(requires \d+, limit \d+\)/.test(rejected.error ?? '')) {
+          throw new Error(`Oversized native chat was not rejected by structural preflight: ${JSON.stringify(rejected)}`);
+        }
+        report.preflight = { rejected: true, reason: rejected.error };
+      }
     }
 
     report.phase = 'gateway';
@@ -501,7 +519,9 @@ async function run(modelPath, {
       }
       report.gateway = {
         endpoint,
-        discoveredId: modelRows.find((model) => model.parent === modelAlias).id,
+        discoveredId: modelRows.find((model) => catalogAlias
+          ? model.id === catalogVariant || model.id === catalogVariant.split(':')[0]
+          : model.parent === modelAlias).id,
         bufferedText: bufferedText.slice(0, 240),
         streamedText: streamed.text.slice(0, 240),
         streamDone: streamed.done,
@@ -542,6 +562,8 @@ async function main() {
     assert.equal(parseArgs(['--model', 'model', '--copy']).copy, true);
     assert.equal(parseArgs(['--model', 'model', '--restart']).restart, true);
     assert.equal(parseArgs(['--model', 'model', '--embeddings']).embeddings, true);
+    assert.equal(parseArgs(['--model', 'model', '--preflight']).preflight, true);
+    assert.throws(() => parseArgs(['--model', 'model', '--embeddings', '--preflight']), /requires a chat model/);
     assert.equal(parseArgs(['--model', 'model', '--embeddings', '--retrieval', 'dataset.json']).retrieval, 'dataset.json');
     assert.throws(() => parseArgs(['--model', 'model', '--retrieval', 'dataset.json']), /requires --embeddings/);
     assert.throws(() => parseArgs(['--model']), /requires a folder/);
@@ -549,10 +571,11 @@ async function main() {
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--catalog-alias <alias> --catalog-variant <id>]');
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--catalog-alias <alias> --catalog-variant <id>]');
   const report = await run(args.model, {
     copy: args.copy, restart: args.restart, embeddings: args.embeddings,
     retrieval: args.retrieval, catalogAlias: args.catalogAlias, catalogVariant: args.catalogVariant,
+    preflight: args.preflight,
   });
   console.log(JSON.stringify(report, null, 2));
   if (report.error) process.exitCode = 2;

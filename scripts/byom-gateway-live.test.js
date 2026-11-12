@@ -138,9 +138,12 @@ describe('BYOM runner copy selection', () => {
       '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1', '--copy',
       '--embeddings',
     ])).toThrow(/cannot.*copy/i);
-    expect(() => parseArgs([
+    expect(parseArgs([
       '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1',
-    ])).toThrow(/require --embeddings/);
+      '--preflight',
+    ])).toMatchObject({ catalogAlias: 'a', preflight: true, embeddings: false });
+    expect(() => parseArgs(['--model', 'model', '--embeddings', '--preflight']))
+      .toThrow(/requires a chat model/);
   });
 });
 

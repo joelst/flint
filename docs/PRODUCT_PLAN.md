@@ -316,9 +316,14 @@ The 2.1.0 contracts, re-run on 2.4.0:
   recognized by the gateway classifier.
 - Native ChatSession paths use `preflightRequest` when the SDK exposes it and
   refuse requests that exceed the structural token limit before inference.
-  Qualify the result against real models. Preserve whole-turn packing,
-  reply reserve and untrusted-envelope rules; structural fit does not reserve
-  runtime memory.
+  An isolated cached Qwen2.5 0.5B CUDA catalog run on SDK/core 2.4.0
+  and physical GPU 1 passed ordinary IPC chat and gateway buffered/streaming
+  chat. Its 40,000-word IPC request was rejected by native structural preflight:
+  40,062 required tokens versus a 32,768-token limit (7,294 deficit).
+  The source's ten file hashes were unchanged and graceful sidecar shutdown
+  was confirmed. This does not qualify packaged-app admission or prove native
+  memory reservation. Preserve whole-turn packing, reply reserve and
+  untrusted-envelope rules; structural fit does not reserve runtime memory.
 
 #### Required evidence and release decision
 
