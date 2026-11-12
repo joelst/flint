@@ -403,7 +403,10 @@ returned IPC and gateway buffered/streaming answers; stream cancellation
 returned `certainty: cancelled` without post-acknowledgement deltas or a
 residual lease, and later chat succeeded. All ten source hashes were unchanged
 and shutdown was confirmed. This is staged-resource model evidence, not an
-installed GUI run, code signing, updater signing, or rollback proof.
+installed GUI run, code signing, updater signing, or rollback proof. A separate
+staged-runtime GPU-1 run kept the variant pinned past the one-minute idle
+threshold, evicted it on unpin, and reloaded it via gateway chat with no
+residual lease; source hashes and graceful shutdown were again confirmed.
 Fresh-process restart with the same isolated app home passed link and copy
 re-discovery, IPC and gateway chat/streaming, removal, source-hash comparison,
 and confirmed shutdown without re-import. One earlier copy/restart attempt
