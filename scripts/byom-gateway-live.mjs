@@ -27,7 +27,7 @@ function parseArgs(argv) {
     retrieval: null, catalogAlias: null, catalogVariant: null, preflight: false,
     admissionErrors: false, switchModel: null, switchVariant: null, concurrent: false,
     cancelStream: false, idleEviction: false, requireTools: false, probeResponses: false,
-    disconnectOnly: false, activeEviction: false, coexistModel: null,
+    disconnectOnly: false, activeEviction: false, gatewayActiveEviction: false, coexistModel: null,
     coexistAlias: null, coexistVariant: null, packagedRoot: null,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -44,6 +44,10 @@ function parseArgs(argv) {
     else if (argv[i] === '--probe-responses') args.probeResponses = true;
     else if (argv[i] === '--disconnect-only') args.disconnectOnly = true;
     else if (argv[i] === '--active-eviction') args.activeEviction = true;
+    else if (argv[i] === '--gateway-active-eviction') {
+      args.activeEviction = true;
+      args.gatewayActiveEviction = true;
+    }
     else if (argv[i] === '--packaged-root') {
       const value = argv[++i];
       if (!value || value.startsWith('--')) throw new Error('--packaged-root requires a release resource directory.');
@@ -362,11 +366,12 @@ function cosine(a, b) {
   return dot / (normA * normB);
 }
 
-async function complete(endpoint, body, stream = false) {
+async function complete(endpoint, body, stream = false, onDelta = null, signal = undefined) {
   const response = await fetch(`${endpoint}/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ ...body, stream }),
+    signal,
   });
   if (!response.ok) {
     throw new Error(`Gateway chat returned HTTP ${response.status}: ${await response.text()}`);
@@ -390,7 +395,9 @@ async function complete(endpoint, body, stream = false) {
       }
       const event = JSON.parse(data);
       if (event.error) throw new Error(event.error.message || 'Gateway stream failed.');
-      text += event.choices?.[0]?.delta?.content || '';
+      const delta = event.choices?.[0]?.delta?.content || '';
+      text += delta;
+      if (delta) onDelta?.(delta);
     }
   }
   return { text, done };
@@ -413,7 +420,7 @@ async function run(modelPath, {
   catalogAlias = null, catalogVariant = null, preflight = false, admissionErrors = false,
   switchModel = null, switchVariant = null, concurrent = false, cancelStream = false,
   idleEviction = false, requireTools = false, probeResponses = false,
-  disconnectOnly = false, activeEviction = false, coexistModel = null,
+  disconnectOnly = false, activeEviction = false, gatewayActiveEviction = false, coexistModel = null,
   coexistAlias = null, coexistVariant = null, packagedRoot = null,
 } = {}) {
   if (process.platform !== 'win32') {
@@ -966,20 +973,23 @@ async function run(modelPath, {
         const firstDelta = new Promise((resolve) => { firstDeltaResolve = resolve; });
         let sawDelta = false;
         let streamSettled = false;
-        const streaming = sidecar.send('chatCompletion', {
-          model: modelAlias,
-          messages: [
-            { role: 'system', content: 'You are a list generator. Output list items only, never instructions or a summary.' },
-            { role: 'user', content: 'List 1000 distinct astronomy facts in numbered sentences. Start with fact 1 and continue as long as possible.' },
-          ],
-          maxTokens: 8192,
-          stream: true,
-        }, 5 * 60 * 1000, (message) => {
-          if (!sawDelta && typeof message.delta === 'string' && message.delta) {
+        const messages = [
+          { role: 'system', content: 'You are a list generator. Output list items only, never instructions or a summary.' },
+          { role: 'user', content: 'List 1000 distinct astronomy facts in numbered sentences. Start with fact 1 and continue as long as possible.' },
+        ];
+        const onDelta = (delta) => {
+          if (!sawDelta && typeof delta === 'string' && delta) {
             sawDelta = true;
             firstDeltaResolve();
           }
-        });
+        };
+        const streaming = gatewayActiveEviction
+          ? complete(endpoint, {
+            model: modelAlias, messages, max_tokens: 8192,
+          }, true, onDelta, AbortSignal.timeout(5 * 60 * 1000))
+          : sidecar.send('chatCompletion', {
+            model: modelAlias, messages, maxTokens: 8192, stream: true,
+          }, 5 * 60 * 1000, (message) => onDelta(message.delta));
         void streaming.then(
           () => { streamSettled = true; },
           () => { streamSettled = true; },
@@ -999,7 +1009,14 @@ async function run(modelPath, {
           maxResidentEnabled: true, maxResident: 1,
         }), 'enable resident cap').result;
         const activeWhenCapped = !streamSettled;
-        assertReply(await streaming, 'active chatCompletion');
+        const streamed = await streaming;
+        if (gatewayActiveEviction) {
+          if (!streamed.done || !streamed.text.trim()) {
+            throw new Error('The active gateway stream did not emit text and [DONE].');
+          }
+        } else {
+          assertReply(streamed, 'active chatCompletion');
+        }
         if (!activeWhenCapped
           || !capped?.evicted?.some((entry) => entry.alias === coexistAlias && entry.reason === 'cap')
           || capped.evicted.some((entry) => entry.alias === modelAlias)) {
@@ -1022,6 +1039,7 @@ async function run(modelPath, {
           throw new Error('The resident cap did not evict the completed low-priority stream model.');
         }
         report.activeEviction = {
+          transport: gatewayActiveEviction ? 'gateway' : 'ipc',
           inFlightWhenCapped: primary.inFlight,
           evictedWhileStreaming: coexistAlias,
           remainingVariant: after.models[0].variantId,
@@ -1131,7 +1149,7 @@ async function main() {
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--concurrent] [--cancel-stream] [--idle-eviction] [--require-tools] [--probe-responses] [--disconnect-only] [--active-eviction --coexist-model <folder> --coexist-alias <alias> --coexist-variant <id>] [--packaged-root <release-dir>] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--concurrent] [--cancel-stream] [--idle-eviction] [--require-tools] [--probe-responses] [--disconnect-only] [--active-eviction | --gateway-active-eviction] [--coexist-model <folder> --coexist-alias <alias> --coexist-variant <id>] [--packaged-root <release-dir>] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
   const report = await run(args.model, {
     copy: args.copy, restart: args.restart, embeddings: args.embeddings,
     retrieval: args.retrieval, catalogAlias: args.catalogAlias, catalogVariant: args.catalogVariant,
@@ -1141,7 +1159,8 @@ async function main() {
     requireTools: args.requireTools,
     probeResponses: args.probeResponses,
     disconnectOnly: args.disconnectOnly,
-    activeEviction: args.activeEviction, coexistModel: args.coexistModel,
+    activeEviction: args.activeEviction, gatewayActiveEviction: args.gatewayActiveEviction,
+    coexistModel: args.coexistModel,
     coexistAlias: args.coexistAlias, coexistVariant: args.coexistVariant,
     packagedRoot: args.packagedRoot,
   });

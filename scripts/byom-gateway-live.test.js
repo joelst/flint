@@ -198,6 +198,11 @@ describe('BYOM runner copy selection', () => {
       activeEviction: true, coexistModel: path.resolve('other/v2'),
       coexistAlias: 'b', coexistVariant: 'w:2',
     });
+    expect(parseArgs([
+      '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1',
+      '--gateway-active-eviction', '--coexist-model', 'other/v2', '--coexist-alias', 'b',
+      '--coexist-variant', 'w:2',
+    ])).toMatchObject({ activeEviction: true, gatewayActiveEviction: true });
     expect(() => parseArgs([
       '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1',
       '--active-eviction', '--coexist-model', 'other/v2', '--coexist-alias', 'a',
