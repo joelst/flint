@@ -442,6 +442,11 @@ chat after the switch, kept only the selected variant resident with no
 activity lease, preserved both ten-file model sources, and shut down without
 force. This is staged resource qualification, not installed-app model
 switching or observed execution-provider identity.
+A staged-runtime GPU-1 Qwen2.5 0.5B CUDA run also settled two simultaneously
+submitted IPC chats and two gateway chats with nonempty replies. The pool had
+no residual activity lease, all ten source hashes were unchanged, and
+shutdown was confirmed. This is submission/settlement evidence, not proof
+that native generations executed in parallel.
 Fresh-process restart with the same isolated app home passed link and copy
 re-discovery, IPC and gateway chat/streaming, removal, source-hash comparison,
 and confirmed shutdown without re-import. One earlier copy/restart attempt
