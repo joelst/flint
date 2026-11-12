@@ -435,6 +435,10 @@ A separate staged tool run that skipped both optional routes passed, drained,
 unloaded and shut down cleanly with unchanged source hashes. The native
 session/unload failure remains an open stability concern; neither optional
 route is qualified by the required-only run.
+Three more isolated staged Phi tool/disconnect runs passed the required
+checks, post-disconnect lease drain, source-hash comparison and graceful
+shutdown. This narrows the failure to an intermittent or combined-path case,
+not a verified cause or a proof of native quiescence.
 Two isolated staged Phi runs invoked `/v1/responses` without tool or
 disconnect probes. Both returned HTTP 500 but then unloaded and shut down
 cleanly with all nine source hashes unchanged. The optional route remains
@@ -458,6 +462,30 @@ submitted IPC chats and two gateway chats with nonempty replies. The pool had
 no residual activity lease, all ten source hashes were unchanged, and
 shutdown was confirmed. This is submission/settlement evidence, not proof
 that native generations executed in parallel.
+An administrative extraction of the unsigned 0.11.0 MSI (not an installation)
+contained the executable, bundled Node, sidecar and native SDK. Its extracted
+`Flint.exe` passed the runtime-readiness smoke; its extracted Node and sidecar
+served GPU-1 Qwen2.5 CUDA IPC and buffered/streaming gateway chat, preserved
+all ten source hashes and shut down cleanly. The extracted image was removed
+afterward. This checks the actual MSI payload rather than only the build
+staging tree; it does not prove signed installation or GUI model operation.
+A separate `0.11.0-1` evaluation workflow built draft, pre-release artifacts
+from commit `417544b` on Windows and macOS; both jobs passed. The downloaded
+Windows MSI and NSIS matched their GitHub SHA-256 asset digests and had valid
+Authenticode signatures. Their detached updater signatures matched
+`latest.json` and verified against Flint's configured public key; changing
+the MSI digest caused verification to fail. The manifest includes both
+Windows installers and the macOS updater platforms. An administrative
+extraction of the signed MSI supplied a signed `Flint.exe` that passed runtime
+readiness. Its bundled Node, sidecar and SDK passed GPU-1 Qwen2.5 IPC and
+gateway chat/stream/cancellation, Llama 3.2 copy/restart and link/restart,
+Qwen3 embedding float/base64 parity, and Phi-4 Mini forced tool/follow-up
+and disconnect checks. Each isolated run preserved its source hashes and
+shut down without force. This is signed **payload** qualification, not an
+installed GUI run. The release remains a draft pre-release, so Flint's
+`releases/latest` updater cannot see it; installation, updater, and rollback
+remain untested on this candidate. The existing local installation was not
+modified.
 Fresh-process restart with the same isolated app home passed link and copy
 re-discovery, IPC and gateway chat/streaming, removal, source-hash comparison,
 and confirmed shutdown without re-import. One earlier copy/restart attempt
