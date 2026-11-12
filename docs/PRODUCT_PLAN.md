@@ -214,12 +214,12 @@ do not combine a runtime replacement or storage-format change with this upgrade.
   Qwen2.5 0.5B variant still served afterward. Its ten source files retained
   their hashes and shutdown was confirmed.
   This does not close the remaining error, recovery, or installed-app cases.
-  A separate isolated GPU-1 run copied both cached Qwen2.5 0.5B CUDA and CPU
-  variants. Loading the CPU variant after CUDA and sending another gateway
-  alias request returned a nonempty answer; the pool then contained only
-  `qwen2.5-0.5b-instruct-generic-cpu:4`, with no activity lease. Both source
-  folders retained their hashes, and shutdown was confirmed. This checks a
-  same-alias switch, not concurrent inference or an installed-app model swap.
+  Separate isolated GPU-1 runs copied both cached Qwen2.5 0.5B CUDA and CPU
+  variants. Switching CUDA to CPU and CPU to CUDA, then sending a gateway alias
+  request, returned nonempty answers. The pool contained only the requested
+  variant after each switch, with no activity lease. Both source folders
+  retained their hashes and shutdown was confirmed in each direction. This
+  checks same-alias switching, not concurrent inference or installed-app swaps.
 
 **5. Native 2.1.0–2.4.0 feature completion**
 

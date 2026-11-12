@@ -395,7 +395,8 @@ async function run(modelPath, {
     assertReply(await sidecar.send('init', { appName, logLevel: 'error' }), 'init');
     report.phase = 'first accelerator registration';
     const accelerators = assertReply(await sidecar.send('ensureAccelerators'), 'ensureAccelerators').result;
-    if ((embeddings || (catalogAlias && /-cuda-/i.test(catalogVariant)))
+    if ((embeddings || (catalogAlias && /-cuda-/i.test(catalogVariant))
+      || (switchVariant && /-cuda-/i.test(switchVariant)))
       && !accelerators?.registeredEps?.includes('CUDAExecutionProvider')) {
       throw new Error('CUDA provider was not registered for the selected qualification.');
     }
@@ -694,10 +695,12 @@ async function run(modelPath, {
     assertReply(await sidecar.send('unload', { alias: modelAlias }), 'unload');
     if (!catalogAlias) assertReply(await sidecar.send('deleteModel', { alias: modelAlias }), 'deleteModel');
     const finalFiles = await snapshotFolder(modelPath);
-    report.sourceUnchanged = JSON.stringify(sourceBefore) === JSON.stringify(finalFiles);
-    if (!report.sourceUnchanged) throw new Error('The source model files changed during the test.');
-    if (switchModel && JSON.stringify(switchBefore) !== JSON.stringify(await snapshotFolder(switchModel))) {
-      throw new Error('The switch source model files changed during the test.');
+    const primaryUnchanged = JSON.stringify(sourceBefore) === JSON.stringify(finalFiles);
+    const switchUnchanged = !switchModel ||
+      JSON.stringify(switchBefore) === JSON.stringify(await snapshotFolder(switchModel));
+    report.sourceUnchanged = primaryUnchanged && switchUnchanged;
+    if (!report.sourceUnchanged) {
+      throw new Error(`${!primaryUnchanged ? 'Primary' : 'Switch'} source model files changed during the test.`);
     }
     if (linkedPath && fs.existsSync(linkedPath)) {
       throw new Error('Flint did not remove the isolated model assets during cleanup.');
