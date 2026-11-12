@@ -25,7 +25,7 @@ function parseArgs(argv) {
     model: null, selfTest: false, copy: false, restart: false, embeddings: false,
     retrieval: null, catalogAlias: null, catalogVariant: null, preflight: false,
     admissionErrors: false, switchModel: null, switchVariant: null, concurrent: false,
-    cancelStream: false,
+    cancelStream: false, idleEviction: false,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
@@ -36,6 +36,7 @@ function parseArgs(argv) {
     else if (argv[i] === '--admission-errors') args.admissionErrors = true;
     else if (argv[i] === '--concurrent') args.concurrent = true;
     else if (argv[i] === '--cancel-stream') args.cancelStream = true;
+    else if (argv[i] === '--idle-eviction') args.idleEviction = true;
     else if (argv[i] === '--switch-model' || argv[i] === '--switch-variant') {
       const option = argv[i];
       const value = argv[++i];
@@ -70,6 +71,9 @@ function parseArgs(argv) {
   }
   if (args.cancelStream && (!args.catalogAlias || args.embeddings)) {
     throw new Error('--cancel-stream requires a cached catalog chat model.');
+  }
+  if (args.idleEviction && (!args.catalogAlias || args.embeddings)) {
+    throw new Error('--idle-eviction requires a cached catalog chat model.');
   }
   if (args.switchModel || args.switchVariant) {
     if (!args.switchModel || !args.switchVariant || !args.catalogAlias || args.embeddings) {
@@ -345,6 +349,7 @@ async function run(modelPath, {
   copy = false, restart = false, embeddings = false, retrieval = null,
   catalogAlias = null, catalogVariant = null, preflight = false, admissionErrors = false,
   switchModel = null, switchVariant = null, concurrent = false, cancelStream = false,
+  idleEviction = false,
 } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
@@ -383,6 +388,7 @@ async function run(modelPath, {
     switch: null,
     concurrent: null,
     cancelStream: null,
+    idleEviction: null,
     error: null,
     cleanupError: null,
     cleanupForced: false,
@@ -767,6 +773,46 @@ async function run(modelPath, {
         }
         report.admissionErrors = { ...statuses, residentVariantId: loaded.variantId, healthyAfter: true };
       }
+      if (idleEviction) {
+        report.phase = 'idle eviction';
+        assertReply(await sidecar.send('setModelPriorities', {
+          priorities: [{ alias: modelAlias, priority: 'pinned' }],
+        }), 'pin model');
+        const configured = assertReply(await sidecar.send('setEvictionConfig', {
+          idleUnloadEnabled: true, idleTimeoutMs: 60_000,
+        }), 'enable idle eviction').result;
+        if (configured?.config?.idleTimeoutMs !== 60_000) {
+          throw new Error('The one-minute idle eviction threshold was not applied.');
+        }
+        await new Promise((resolve) => setTimeout(resolve, 61_000));
+        const pinned = assertReply(await sidecar.send('poolStatus'), 'pinned poolStatus').result;
+        if (pinned?.models?.length !== 1 || pinned.models[0].variantId !== loaded.variantId
+          || pinned.models[0].priority !== 'pinned' || pinned.models[0].inFlight !== 0) {
+          throw new Error('The pinned model did not survive the idle eviction threshold.');
+        }
+        const unpinned = assertReply(await sidecar.send('setModelPriorities', {
+          priorities: [{ alias: modelAlias, priority: 'normal' }],
+        }), 'unpin model').result;
+        if (!unpinned?.evicted?.some((entry) => entry.alias === modelAlias && entry.reason === 'idle')) {
+          throw new Error('The idle model was not evicted immediately after unpinning.');
+        }
+        const empty = assertReply(await sidecar.send('poolStatus'), 'evicted poolStatus').result;
+        if (empty?.models?.length !== 0) throw new Error('The evicted model remained resident.');
+        assertReply(await sidecar.send('setEvictionConfig', {
+          idleUnloadEnabled: false,
+        }), 'disable idle eviction');
+        const recovered = await complete(endpoint, request);
+        if (typeof recovered?.choices?.[0]?.message?.content !== 'string'
+          || !recovered.choices[0].message.content.trim()) {
+          throw new Error('The gateway did not serve a reply after idle eviction.');
+        }
+        const reloaded = assertReply(await sidecar.send('poolStatus'), 'reloaded poolStatus').result;
+        if (reloaded?.models?.length !== 1 || reloaded.models[0].variantId !== loaded.variantId
+          || reloaded.models[0].inFlight !== 0) {
+          throw new Error('Gateway recovery after idle eviction changed residency or left a lease.');
+        }
+        report.idleEviction = { thresholdMs: 60_000, pinnedSurvived: true, evictedOnUnpin: true, gatewayRecovered: true };
+      }
       if (switchVariant) {
         report.phase = 'same-alias variant switch';
         const switched = assertReply(await sidecar.send('load', {
@@ -833,6 +879,7 @@ async function main() {
     assert.throws(() => parseArgs(['--model', 'model', '--admission-errors']), /requires a cached catalog chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--concurrent']), /requires a cached catalog chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--cancel-stream']), /requires a cached catalog chat model/);
+    assert.throws(() => parseArgs(['--model', 'model', '--idle-eviction']), /requires a cached catalog chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--switch-model', 'other']), /Variant switching requires/);
     assert.equal(parseArgs(['--model', 'model', '--embeddings', '--retrieval', 'dataset.json']).retrieval, 'dataset.json');
     assert.throws(() => parseArgs(['--model', 'model', '--retrieval', 'dataset.json']), /requires --embeddings/);
@@ -841,13 +888,13 @@ async function main() {
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--concurrent] [--cancel-stream] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--concurrent] [--cancel-stream] [--idle-eviction] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
   const report = await run(args.model, {
     copy: args.copy, restart: args.restart, embeddings: args.embeddings,
     retrieval: args.retrieval, catalogAlias: args.catalogAlias, catalogVariant: args.catalogVariant,
     preflight: args.preflight, admissionErrors: args.admissionErrors,
     switchModel: args.switchModel, switchVariant: args.switchVariant,
-    concurrent: args.concurrent, cancelStream: args.cancelStream,
+    concurrent: args.concurrent, cancelStream: args.cancelStream, idleEviction: args.idleEviction,
   });
   console.log(JSON.stringify(report, null, 2));
   if (report.error) process.exitCode = 2;

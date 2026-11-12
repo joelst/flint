@@ -227,6 +227,12 @@ do not combine a runtime replacement or storage-format change with this upgrade.
   and shutdown was confirmed. Simultaneous submission does not prove that the
   native runtime generated tokens in parallel or that long-running leases
   overlap safely.
+  An isolated GPU-1 run kept the cached CUDA variant resident while pinned
+  for more than its configured one-minute idle threshold. Unpinning evicted
+  it immediately with reason `idle`; the pool emptied, and gateway chat by
+  alias reloaded it and returned an answer without leaving an activity lease.
+  All ten source hashes were unchanged, and shutdown was confirmed. This
+  does not qualify eviction during an active stream or after a restart.
 
 **5. Native 2.1.0–2.4.0 feature completion**
 
