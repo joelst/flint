@@ -407,6 +407,13 @@ installed GUI run, code signing, updater signing, or rollback proof. A separate
 staged-runtime GPU-1 run kept the variant pinned past the one-minute idle
 threshold, evicted it on unpin, and reloaded it via gateway chat with no
 residual lease; source hashes and graceful shutdown were again confirmed.
+Against the same staged Node, sidecar, and SDK, isolated Llama 3.2 3B
+copy/restart and metadata-bearing link/restart runs rediscovered the model
+after a fresh-process restart and returned meaningful IPC and buffered/
+streaming gateway answers. The copy's seven source files and the link's eight
+source files retained their hashes; link deletion removed the junction
+without changing its target, and both runs shut down without forced cleanup.
+These runs still do not test installation or GUI model operations.
 Fresh-process restart with the same isolated app home passed link and copy
 re-discovery, IPC and gateway chat/streaming, removal, source-hash comparison,
 and confirmed shutdown without re-import. One earlier copy/restart attempt
