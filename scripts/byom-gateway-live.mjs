@@ -25,7 +25,7 @@ function parseArgs(argv) {
     model: null, selfTest: false, copy: false, restart: false, embeddings: false,
     retrieval: null, catalogAlias: null, catalogVariant: null, preflight: false,
     admissionErrors: false, switchModel: null, switchVariant: null, concurrent: false,
-    cancelStream: false, idleEviction: false,
+    cancelStream: false, idleEviction: false, packagedRoot: null,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
@@ -37,6 +37,11 @@ function parseArgs(argv) {
     else if (argv[i] === '--concurrent') args.concurrent = true;
     else if (argv[i] === '--cancel-stream') args.cancelStream = true;
     else if (argv[i] === '--idle-eviction') args.idleEviction = true;
+    else if (argv[i] === '--packaged-root') {
+      const value = argv[++i];
+      if (!value || value.startsWith('--')) throw new Error('--packaged-root requires a release resource directory.');
+      args.packagedRoot = path.resolve(value);
+    }
     else if (argv[i] === '--switch-model' || argv[i] === '--switch-variant') {
       const option = argv[i];
       const value = argv[++i];
@@ -146,18 +151,23 @@ function listenOnFreePort() {
   });
 }
 
-function startSidecar(home, appName, stderrLines) {
-  const child = spawn(process.execPath, ['sidecar/foundry-sidecar.js'], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      HOME: home,
-      USERPROFILE: home,
-      APPDATA: path.join(home, 'AppData', 'Roaming'),
-      LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+function startSidecar(home, appName, stderrLines, packagedRoot) {
+  const child = spawn(
+    packagedRoot ? path.join(packagedRoot, 'node.exe') : process.execPath,
+    [packagedRoot ? path.join(packagedRoot, 'sidecar', 'foundry-sidecar.js') : 'sidecar/foundry-sidecar.js'],
+    {
+      cwd: packagedRoot || repoRoot,
+      env: {
+        ...process.env,
+        ...(packagedRoot ? { NODE_PATH: packagedRoot } : {}),
+        HOME: home,
+        USERPROFILE: home,
+        APPDATA: path.join(home, 'AppData', 'Roaming'),
+        LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
     },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  );
   const pending = new Map();
   let nextId = 1;
   let readyResolve;
@@ -349,7 +359,7 @@ async function run(modelPath, {
   copy = false, restart = false, embeddings = false, retrieval = null,
   catalogAlias = null, catalogVariant = null, preflight = false, admissionErrors = false,
   switchModel = null, switchVariant = null, concurrent = false, cancelStream = false,
-  idleEviction = false,
+  idleEviction = false, packagedRoot = null,
 } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
@@ -359,6 +369,14 @@ async function run(modelPath, {
   }
   if (switchModel && (!path.isAbsolute(switchModel) || !fs.statSync(switchModel).isDirectory())) {
     throw new Error('--switch-model must name an existing model directory.');
+  }
+  if (packagedRoot) {
+    for (const resource of ['node.exe', path.join('sidecar', 'foundry-sidecar.js'),
+      path.join('foundry-local-sdk', 'package.json')]) {
+      if (!fs.statSync(path.join(packagedRoot, resource), { throwIfNoEntry: false })?.isFile()) {
+        throw new Error(`Packaged runtime is missing ${resource}.`);
+      }
+    }
   }
   if (flintIsRunning()) {
     throw new Error('Quit Flint before this spike creates an isolated Foundry runtime.');
@@ -373,6 +391,7 @@ async function run(modelPath, {
   const report = {
     modelPath,
     mode: catalogAlias ? 'catalog-cache-copy' : (copy ? 'copy' : 'link'),
+    runtime: packagedRoot ? 'staged-bundle' : 'repository',
     catalogVariant,
     task: embeddings ? 'embeddings' : 'chat',
     cudaDevice: process.env.CUDA_VISIBLE_DEVICES ?? null,
@@ -411,7 +430,7 @@ async function run(modelPath, {
       fs.mkdirSync(path.dirname(isolated), { recursive: true });
       fs.cpSync(switchModel, isolated, { recursive: true, errorOnExist: true, force: false });
     }
-    sidecar = startSidecar(home, appName, stderrLines);
+    sidecar = startSidecar(home, appName, stderrLines, packagedRoot);
     await sidecar.ready;
     report.phase = 'first init';
     assertReply(await sidecar.send('init', { appName, logLevel: 'error' }), 'init');
@@ -442,7 +461,7 @@ async function run(modelPath, {
       report.phase = 'pre-restart shutdown';
       const cleanup = await stopSidecar(sidecar);
       if (cleanup.error) throw new Error(`Pre-restart sidecar shutdown failed: ${cleanup.error}`);
-      sidecar = startSidecar(home, appName, stderrLines);
+      sidecar = startSidecar(home, appName, stderrLines, packagedRoot);
       await sidecar.ready;
       report.phase = 'restart init';
       assertReply(await sidecar.send('init', { appName, logLevel: 'error' }), 'restart init');
@@ -888,13 +907,14 @@ async function main() {
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--concurrent] [--cancel-stream] [--idle-eviction] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--concurrent] [--cancel-stream] [--idle-eviction] [--packaged-root <release-dir>] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
   const report = await run(args.model, {
     copy: args.copy, restart: args.restart, embeddings: args.embeddings,
     retrieval: args.retrieval, catalogAlias: args.catalogAlias, catalogVariant: args.catalogVariant,
     preflight: args.preflight, admissionErrors: args.admissionErrors,
     switchModel: args.switchModel, switchVariant: args.switchVariant,
     concurrent: args.concurrent, cancelStream: args.cancelStream, idleEviction: args.idleEviction,
+    packagedRoot: args.packagedRoot,
   });
   console.log(JSON.stringify(report, null, 2));
   if (report.error) process.exitCode = 2;

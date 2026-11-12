@@ -80,6 +80,18 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 | `npm run run:built` | Launch a release build without installing MSI |
 | `cd src-tauri && cargo check` | Rust/Tauri compile check |
 
+For a target-specific temporary-version build, pass the same version to the
+strict verifier:
+
+```powershell
+npm run verify:bundle -- --target x86_64-pc-windows-msvc --require-build --version 0.11.0
+```
+
+Without `--version`, the verifier checks the tracked `package.json` version.
+Pass `--packaged-root <release-dir>` to `scripts/byom-gateway-live.mjs` to
+exercise the staged `node.exe`, sidecar, and SDK with an isolated model cache.
+This tests staged resources, not the installed GUI or an installer signature.
+
 ---
 
 ## Architecture (short)

@@ -393,6 +393,17 @@ registration, IPC chat with HTTP off, gateway discovery, buffered/streaming chat
 unload/delete, and confirmed graceful shutdown. All seven original source files
 and all eight metadata-bearing source files retained their hashes. Local
 Windows results do not prove the Linux/macOS jobs pass.
+An unsigned 0.11.0 temporary-version Windows x64 MSI and NSIS build from
+`3511336` completed; bundled Node/native SDK smoke and the built app's runtime
+readiness smoke passed. Strict bundle verification with `--version 0.11.0`
+checked both installers and staged resources; tracked `package.json` still
+says 0.10.1. The isolated live runner launched that build's staged Node and
+sidecar (not repository Node) on physical GPU 1. Cached Qwen2.5 0.5B CUDA
+returned IPC and gateway buffered/streaming answers; stream cancellation
+returned `certainty: cancelled` without post-acknowledgement deltas or a
+residual lease, and later chat succeeded. All ten source hashes were unchanged
+and shutdown was confirmed. This is staged-resource model evidence, not an
+installed GUI run, code signing, updater signing, or rollback proof.
 Fresh-process restart with the same isolated app home passed link and copy
 re-discovery, IPC and gateway chat/streaming, removal, source-hash comparison,
 and confirmed shutdown without re-import. One earlier copy/restart attempt

@@ -175,6 +175,12 @@ describe('BYOM runner copy selection', () => {
     ])).toThrow(/requires a cached catalog chat model/);
     expect(parseArgs([
       '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1',
+      '--packaged-root', 'target/release',
+    ])).toMatchObject({ packagedRoot: path.resolve('target/release') });
+    expect(() => parseArgs(['--model', 'model', '--packaged-root']))
+      .toThrow(/requires a release resource directory/);
+    expect(parseArgs([
+      '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1',
       '--switch-model', 'catalog/v2', '--switch-variant', 'v:2',
     ])).toMatchObject({
       catalogAlias: 'a', switchModel: path.resolve('catalog/v2'), switchVariant: 'v:2',

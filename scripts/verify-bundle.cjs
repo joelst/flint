@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const { validateKoffiNative } = require('./stage-koffi-native.cjs');
+const { isStrictSemver } = require('./release-metadata.cjs');
 const {
   describeInvalidNativeFile,
   platformKeyForTriple,
@@ -21,6 +22,7 @@ const root = path.resolve(__dirname, '..');
 function parseArgs(argv) {
   let target = process.env.FLINT_VERIFY_TARGET || null;
   let requireBuild = false;
+  let version = null;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--target') {
@@ -30,12 +32,15 @@ function parseArgs(argv) {
       target = arg.slice('--target='.length);
     } else if (arg === '--require-build') {
       requireBuild = true;
+    } else if (arg === '--version') {
+      version = argv[++i];
+      if (!isStrictSemver(version)) throw new Error('--version requires a valid semver version.');
     }
   }
-  return { target: target || null, requireBuild };
+  return { target: target || null, requireBuild, version };
 }
 
-const { target: buildTarget, requireBuild } = parseArgs(process.argv.slice(2));
+const { target: buildTarget, requireBuild, version: buildVersion } = parseArgs(process.argv.slice(2));
 const targetPlatformKey = buildTarget ? platformKeyForTriple(buildTarget) : null;
 if (buildTarget && !targetPlatformKey) {
   console.error(`Unknown --target triple: ${buildTarget}`);
@@ -185,11 +190,13 @@ if (fs.existsSync(releaseDir)) {
   // Prefer definitive checks; size is only a coarse safety net.
   // NSIS compresses much better than MSI (good builds: MSI ~24MB, NSIS ~17MB;
   // broken without core: MSI ~6MB, NSIS ~4MB).
-  let appVersion = null;
-  try {
-    appVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
-  } catch {
-    /* ignore */
+  let appVersion = buildVersion;
+  if (!appVersion) {
+    try {
+      appVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+    } catch {
+      /* ignore */
+    }
   }
   const versionNeedle = appVersion ? `_${appVersion}_` : null;
 
