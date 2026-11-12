@@ -206,10 +206,13 @@ do not combine a runtime replacement or storage-format change with this upgrade.
   off a successful inference stream.
   An isolated SDK/core 2.4.0 catalog-chat run on physical GPU 1 returned
   HTTP 404 for both an unknown alias and an unknown version of a known variant.
-  Malformed chat JSON returned 400 and a JSON chat body over the gateway's
-  32-MiB cap returned 413. These refusals added no resident model or activity
-  lease, and the original Qwen2.5 0.5B variant still served chat afterward.
-  Its ten source files retained their hashes and shutdown was confirmed.
+  Malformed chat JSON returned 400 and a declared JSON chat length over the
+  gateway's 32-MiB cap returned 413 before the body was read. With exclusive
+  admission acquired after drain, gateway chat returned 503; releasing it
+  restored a successful chat (200).
+  These refusals added no resident model or activity lease, and the original
+  Qwen2.5 0.5B variant still served afterward. Its ten source files retained
+  their hashes and shutdown was confirmed.
   This does not close the remaining error, recovery, or installed-app cases.
 
 **5. Native 2.1.0–2.4.0 feature completion**

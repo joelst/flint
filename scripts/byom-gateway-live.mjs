@@ -569,20 +569,63 @@ async function run(modelPath, {
         }
         await malformed.body?.cancel();
         statuses.malformedJson = malformed.status;
-        const oversized = await fetch(`${endpoint}/chat/completions`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            model: modelAlias,
-            messages: [{ role: 'user', content: 'w'.repeat(DEFAULT_MAX_BUFFERED_BODY) }],
-          }),
-          signal: AbortSignal.timeout(3 * 60 * 1000),
+        const oversizedStatus = await new Promise((resolve, reject) => {
+          const oversized = http.request(`${endpoint}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'content-length': String(DEFAULT_MAX_BUFFERED_BODY + 1),
+            },
+            signal: AbortSignal.timeout(30_000),
+          }, (response) => {
+            response.once('error', reject);
+            response.once('end', () => resolve(response.statusCode));
+            response.resume();
+          });
+          oversized.once('error', reject);
+          oversized.end('x');
         });
-        if (oversized.status !== 413) {
-          throw new Error(`Oversized chat JSON returned HTTP ${oversized.status} instead of 413.`);
+        if (oversizedStatus !== 413) {
+          throw new Error(`Oversized declared chat JSON returned HTTP ${oversizedStatus} instead of 413.`);
         }
-        await oversized.body?.cancel();
-        statuses.oversizedJson = oversized.status;
+        statuses.oversizedJson = oversizedStatus;
+        const acquired = assertReply(await sidecar.send('setBenchmarkExclusive', {
+          exclusive: true,
+        }), 'setBenchmarkExclusive').result;
+        let admissionFailure = null;
+        try {
+          if (acquired?.exclusive !== true || acquired.drained !== true) {
+            throw new Error('Benchmark-exclusive admission was not confirmed after drain.');
+          }
+          const denied = await fetch(`${endpoint}/chat/completions`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(request),
+            signal: AbortSignal.timeout(3 * 60 * 1000),
+          });
+          if (denied.status !== 503) {
+            throw new Error(`Benchmark-exclusive gateway chat returned HTTP ${denied.status} instead of 503.`);
+          }
+          await denied.body?.cancel();
+          statuses.benchmarkExclusive = denied.status;
+        } catch (error) {
+          admissionFailure = error;
+        }
+        try {
+          assertReply(await sidecar.send('setBenchmarkExclusive', {
+            exclusive: false,
+          }), 'release setBenchmarkExclusive');
+        } catch (releaseFailure) {
+          if (admissionFailure) {
+            throw new AggregateError(
+              [admissionFailure, releaseFailure],
+              `${admissionFailure.message}; benchmark release failed: ${releaseFailure.message}`,
+              { cause: admissionFailure },
+            );
+          }
+          throw releaseFailure;
+        }
+        if (admissionFailure) throw admissionFailure;
         const pool = assertReply(await sidecar.send('poolStatus'), 'poolStatus').result;
         if (pool?.models?.length !== 1 || pool.models[0].alias !== modelAlias
           || pool.models[0].variantId !== loaded.variantId || pool.models[0].inFlight !== 0) {
