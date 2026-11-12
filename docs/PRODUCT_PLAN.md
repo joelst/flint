@@ -318,7 +318,8 @@ The 2.1.0 contracts, re-run on 2.4.0:
   refuse requests that exceed the structural token limit before inference.
   An isolated cached Qwen2.5 0.5B CUDA catalog run on SDK/core 2.4.0
   and physical GPU 1 passed ordinary IPC chat and gateway buffered/streaming
-  chat. Its 40,000-word IPC request was rejected by native structural preflight:
+  chat. Its 40,000-word IPC request was rejected in both buffered and
+  streaming modes by native structural preflight:
   40,062 required tokens versus a 32,768-token limit (7,294 deficit).
   The source's ten file hashes were unchanged and graceful sidecar shutdown
   was confirmed. This does not qualify packaged-app admission or prove native

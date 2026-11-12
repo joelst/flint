@@ -437,16 +437,21 @@ async function run(modelPath, {
       if (preflight) {
         report.phase = 'native structural preflight';
         const oversized = [{ role: 'user', content: 'word '.repeat(40000) }];
-        const rejected = await sidecar.send('chatCompletion', {
-          model: modelAlias,
-          messages: oversized,
-          maxTokens: 32,
-        }, 3 * 60 * 1000);
-        if (rejected?.ok === true
-          || !/structural context limit by \d+ tokens \(requires \d+, limit \d+\)/.test(rejected.error ?? '')) {
-          throw new Error(`Oversized native chat was not rejected by structural preflight: ${JSON.stringify(rejected)}`);
+        const reasons = {};
+        for (const stream of [false, true]) {
+          const rejected = await sidecar.send('chatCompletion', {
+            model: modelAlias,
+            messages: oversized,
+            maxTokens: 32,
+            stream,
+          }, 3 * 60 * 1000);
+          if (rejected?.ok === true
+            || !/structural context limit by \d+ tokens \(requires \d+, limit \d+\)/.test(rejected.error ?? '')) {
+            throw new Error(`Oversized native ${stream ? 'streaming' : 'buffered'} chat was not rejected by structural preflight: ${JSON.stringify(rejected)}`);
+          }
+          reasons[stream ? 'streaming' : 'buffered'] = rejected.error;
         }
-        report.preflight = { rejected: true, reason: rejected.error };
+        report.preflight = reasons;
       }
     }
 
