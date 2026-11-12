@@ -985,6 +985,9 @@ async function run(modelPath, {
     }
   }
   if (report.cleanupError && !report.error) report.error = report.cleanupError;
+  if (report.responses && report.responses.status !== 200 && !report.error) {
+    report.error = `Optional responses route returned HTTP ${report.responses.status}.`;
+  }
   return report;
 }
 
