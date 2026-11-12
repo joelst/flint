@@ -1,4 +1,6 @@
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   createBuildEnv,
@@ -9,6 +11,16 @@ import {
 } from './build-local-version.cjs';
 
 describe('local versioned build arguments', () => {
+  it('rejects an invalid installer verification version before scanning the build', () => {
+    const verifier = path.join(path.dirname(fileURLToPath(import.meta.url)), 'verify-bundle.cjs');
+    const result = spawnSync(process.execPath, [verifier, '--version', 'invalid'], {
+      encoding: 'utf8',
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('--version requires a valid semver version.');
+  });
+
   it('uses an ephemeral config override and keeps local builds unsigned', () => {
     expect(JSON.parse(createTauriConfig('0.10.0'))).toEqual({ version: '0.10.0' });
     expect(createTauriBuildArgs('C:\\temp\\tauri-version.json')).toEqual([
