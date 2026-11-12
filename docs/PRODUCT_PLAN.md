@@ -466,9 +466,20 @@ little-endian float32 base64 for explicit base64 requests; float requests and
 upstream errors retain their prior paths. Focused red/green gateway tests cover
 both resident and autoloaded catalog models. A direct SDK/core 2.4.0 GPU-1
 request through the patched endpoint returned two finite 1,024-component
-base64 vectors with HTTP 200 and confirmed sidecar cleanup. The repeat
-Continue index could not launch while the VS Code Insiders updater mutex was
-held, so matching persisted hashes after this fix remain to be verified.
+base64 vectors with HTTP 200 and confirmed sidecar cleanup. A post-fix paired
+Continue 2.0.0 run used an isolated portable VS Code 1.146.0 profile and the
+same cached catalog variant on physical GPU 1. Its one two-input request
+specified `encoding_format: base64` (request SHA-256
+`63516bf8c3554622b9b4c081cdb865fcffd0a3645b7775eef926f8fc2f72a685`)
+and received HTTP 200 with two 1,024-component vectors. The two
+`lance_db_cache` rows also held 1,024 components; their little-endian float32
+SHA-256 hashes exactly matched the decoded HTTP responses in order:
+`f4e94b17222bd0a3a82f8947f28d42d9d49f14e66b15a1296da855f0bc6e8f6f`
+and `95280885f7ec48fe9d42f061e881f2e2567843f64c67268c8db37c90fa08057e`.
+The index lock was released and both the isolated IDE and sidecar shut down,
+with native cleanup confirmed. This closes the cached catalog stored-vector
+dimension/byte-parity gate for that controlled two-document index, not
+large-workspace retrieval or installed-app behavior.
 The portable BYOM embedding export was tested separately with Continue 2.0.0:
 the client requested `encoding_format: base64`, which the local-model gateway
 previously rejected with HTTP 400. After adding float32 little-endian base64
@@ -476,7 +487,7 @@ responses, an isolated two-document index received two 1,024-component vectors
 over HTTP and persisted two 1,024-component `lance_db_cache` rows. Both stored
 float32 hashes exactly matched the paired HTTP response bytes and the index
 lock was released. This closes the BYOM-side dimension question. The paired cached catalog
-failure and its still-pending Continue rerun are described above.
+failure and its successful post-fix Continue rerun are described above.
 The SDK/core 2.4.0 catalog also exposes `qwen3-embedding-0.6b` and
 `qwen3-embedding-8b`; their cached variants are CUDA-only. CUDA EP assets exist
 in the local cache. Explicit CUDA registration succeeded; the cached Qwen3
@@ -506,9 +517,8 @@ its 1,024-component vectors reached **Recall@10 0.83256** and **nDCG@10
 portable export 0.83489 and 0.70395, respectively; these are measurements of
 different graphs, not interchangeable scores or evidence of provider identity.
 The source's 12 file hashes were unchanged, IPC and gateway smoke vectors
-agreed, and graceful shutdown was confirmed. The cached artifact's provenance,
-active execution provider, and post-fix Continue persisted-vector parity
-remain unverified. Reproduction inputs and commands are in the
+agreed, and graceful shutdown was confirmed. The cached artifact's provenance
+and active execution provider remain unverified. Reproduction inputs and commands are in the
 [embedding recipe note](./spikes/qwen3-embedding-olive-recipe.md#retrieval-evaluation).
 With physical GPU 1 selected by UUID, an isolated sidecar's normal unfiltered
 registration reported TensorRT-RTX, CUDA, and WebGPU ready with no failed
@@ -517,7 +527,7 @@ providers. The cached Qwen3 0.6B CUDA variant then returned two
 vectors through gateway alias requests. It was explicitly unloaded and
 shutdown reported confirmed cleanup. Load still reported
 `acceleration.active: null`; these vectors do not establish which provider
-executed inference or prove post-fix Continue persisted-vector parity.
+executed inference.
 A source-pinned Qwen3 0.6B INT4 build used upstream revision
 `97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3` and the local Olive recipe checkout
 at `1ebab74ab474869c53575954fda0772cee723ecf`. Its isolated toolchain pinned
