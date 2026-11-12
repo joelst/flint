@@ -24,7 +24,7 @@ function parseArgs(argv) {
   const args = {
     model: null, selfTest: false, copy: false, restart: false, embeddings: false,
     retrieval: null, catalogAlias: null, catalogVariant: null, preflight: false,
-    admissionErrors: false, switchModel: null, switchVariant: null,
+    admissionErrors: false, switchModel: null, switchVariant: null, concurrent: false,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
@@ -33,6 +33,7 @@ function parseArgs(argv) {
     else if (argv[i] === '--embeddings') args.embeddings = true;
     else if (argv[i] === '--preflight') args.preflight = true;
     else if (argv[i] === '--admission-errors') args.admissionErrors = true;
+    else if (argv[i] === '--concurrent') args.concurrent = true;
     else if (argv[i] === '--switch-model' || argv[i] === '--switch-variant') {
       const option = argv[i];
       const value = argv[++i];
@@ -61,6 +62,9 @@ function parseArgs(argv) {
   if (args.preflight && args.embeddings) throw new Error('--preflight requires a chat model.');
   if (args.admissionErrors && (!args.catalogAlias || args.embeddings)) {
     throw new Error('--admission-errors requires a cached catalog chat model.');
+  }
+  if (args.concurrent && (!args.catalogAlias || args.embeddings)) {
+    throw new Error('--concurrent requires a cached catalog chat model.');
   }
   if (args.switchModel || args.switchVariant) {
     if (!args.switchModel || !args.switchVariant || !args.catalogAlias || args.embeddings) {
@@ -330,7 +334,7 @@ function catalogCacheTarget(modelPath, variantId, home, appName) {
 async function run(modelPath, {
   copy = false, restart = false, embeddings = false, retrieval = null,
   catalogAlias = null, catalogVariant = null, preflight = false, admissionErrors = false,
-  switchModel = null, switchVariant = null,
+  switchModel = null, switchVariant = null, concurrent = false,
 } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
@@ -367,6 +371,7 @@ async function run(modelPath, {
     preflight: null,
     admissionErrors: null,
     switch: null,
+    concurrent: null,
     error: null,
     cleanupError: null,
     cleanupForced: false,
@@ -569,6 +574,38 @@ async function run(modelPath, {
         streamedText: streamed.text.slice(0, 240),
         streamDone: streamed.done,
       };
+      if (concurrent) {
+        report.phase = 'concurrent chat submissions';
+        const ipcReplies = await Promise.allSettled(Array.from({ length: 2 }, () =>
+          sidecar.send('chatCompletion', {
+            model: modelAlias, messages: prompt, maxTokens: 32,
+          }, 3 * 60 * 1000),
+        ));
+        for (const reply of ipcReplies) {
+          if (reply.status !== 'fulfilled') throw reply.reason;
+          const text = assertReply(reply.value, 'concurrent chatCompletion').result
+            ?.choices?.[0]?.message?.content;
+          if (typeof text !== 'string' || !text.trim()) {
+            throw new Error('Concurrent IPC chat returned no assistant text.');
+          }
+        }
+        const gatewayReplies = await Promise.allSettled(Array.from({ length: 2 }, () =>
+          complete(endpoint, request),
+        ));
+        for (const reply of gatewayReplies) {
+          if (reply.status !== 'fulfilled') throw reply.reason;
+          if (typeof reply.value?.choices?.[0]?.message?.content !== 'string'
+            || !reply.value.choices[0].message.content.trim()) {
+            throw new Error('Concurrent gateway chat returned no assistant text.');
+          }
+        }
+        const pool = assertReply(await sidecar.send('poolStatus'), 'concurrent poolStatus').result;
+        if (pool?.models?.length !== 1 || pool.models[0].variantId !== loaded.variantId
+          || pool.models[0].inFlight !== 0) {
+          throw new Error('Concurrent chat changed residency or left an activity lease.');
+        }
+        report.concurrent = { ipc: ipcReplies.length, gateway: gatewayReplies.length, inFlightAfter: 0 };
+      }
       if (admissionErrors) {
         report.phase = 'gateway model admission';
         const failures = [
@@ -733,6 +770,7 @@ async function main() {
     assert.equal(parseArgs(['--model', 'model', '--preflight']).preflight, true);
     assert.throws(() => parseArgs(['--model', 'model', '--embeddings', '--preflight']), /requires a chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--admission-errors']), /requires a cached catalog chat model/);
+    assert.throws(() => parseArgs(['--model', 'model', '--concurrent']), /requires a cached catalog chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--switch-model', 'other']), /Variant switching requires/);
     assert.equal(parseArgs(['--model', 'model', '--embeddings', '--retrieval', 'dataset.json']).retrieval, 'dataset.json');
     assert.throws(() => parseArgs(['--model', 'model', '--retrieval', 'dataset.json']), /requires --embeddings/);
@@ -741,12 +779,13 @@ async function main() {
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--concurrent] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
   const report = await run(args.model, {
     copy: args.copy, restart: args.restart, embeddings: args.embeddings,
     retrieval: args.retrieval, catalogAlias: args.catalogAlias, catalogVariant: args.catalogVariant,
     preflight: args.preflight, admissionErrors: args.admissionErrors,
     switchModel: args.switchModel, switchVariant: args.switchVariant,
+    concurrent: args.concurrent,
   });
   console.log(JSON.stringify(report, null, 2));
   if (report.error) process.exitCode = 2;

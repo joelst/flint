@@ -151,6 +151,11 @@ describe('BYOM runner copy selection', () => {
     expect(() => parseArgs(['--model', 'model', '--admission-errors']))
       .toThrow(/requires a cached catalog chat model/);
     expect(parseArgs([
+      '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1', '--concurrent',
+    ])).toMatchObject({ concurrent: true, embeddings: false });
+    expect(() => parseArgs(['--model', 'model', '--concurrent']))
+      .toThrow(/requires a cached catalog chat model/);
+    expect(parseArgs([
       '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1',
       '--switch-model', 'catalog/v2', '--switch-variant', 'v:2',
     ])).toMatchObject({

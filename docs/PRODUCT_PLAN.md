@@ -220,6 +220,13 @@ do not combine a runtime replacement or storage-format change with this upgrade.
   variant after each switch, with no activity lease. Both source folders
   retained their hashes and shutdown was confirmed in each direction. This
   checks same-alias switching, not concurrent inference or installed-app swaps.
+  Another isolated GPU-1 catalog run completed two simultaneously submitted
+  IPC chats and two simultaneously submitted gateway chats against the cached
+  CUDA variant. All four returned nonempty answers; the pool retained the
+  selected variant with `inFlight: 0`, all ten source hashes were unchanged,
+  and shutdown was confirmed. Simultaneous submission does not prove that the
+  native runtime generated tokens in parallel or that long-running leases
+  overlap safely.
 
 **5. Native 2.1.0–2.4.0 feature completion**
 
