@@ -302,6 +302,28 @@ function validateEmbeddings(response) {
   return vectors;
 }
 
+function validateBase64Embeddings(response, floats) {
+  const rows = response?.data;
+  if (!Array.isArray(rows) || rows.length !== floats.length) {
+    throw new Error('Base64 embedding response has the wrong number of vectors.');
+  }
+  for (let index = 0; index < rows.length; index++) {
+    const encoded = rows[index]?.embedding;
+    if (typeof encoded !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+      throw new Error(`Base64 embedding ${index} is not encoded text.`);
+    }
+    const bytes = Buffer.from(encoded, 'base64');
+    if (bytes.length !== floats[index].length * 4 || bytes.toString('base64') !== encoded) {
+      throw new Error(`Base64 embedding ${index} has an invalid float32 payload.`);
+    }
+    for (let component = 0; component < floats[index].length; component++) {
+      if (bytes.readFloatLE(component * 4) !== Math.fround(floats[index][component])) {
+        throw new Error(`Base64 embedding ${index} differs from its float response at ${component}.`);
+      }
+    }
+  }
+}
+
 function cosine(a, b) {
   const dot = a.reduce((sum, component, index) => sum + component * b[index], 0);
   const normA = Math.hypot(...a);
@@ -623,6 +645,16 @@ async function run(modelPath, {
       if (!agreement.every((score) => Number.isFinite(score) && score > 0.99)) {
         throw new Error(`Gateway and IPC embeddings disagree: ${JSON.stringify(agreement)}`);
       }
+      const base64Response = await fetch(`${endpoint}/embeddings`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: modelAlias, input: EMBEDDING_INPUTS, encoding_format: 'base64' }),
+        signal: AbortSignal.timeout(3 * 60 * 1000),
+      });
+      if (!base64Response.ok) {
+        throw new Error(`Gateway base64 embeddings returned HTTP ${base64Response.status}: ${await base64Response.text()}`);
+      }
+      validateBase64Embeddings(await base64Response.json(), gatewayVectors);
       report.gateway = {
         endpoint,
         discoveredId: modelRows.find((model) => catalogAlias
@@ -631,6 +663,7 @@ async function run(modelPath, {
         count: gatewayVectors.length,
         dimensions: gatewayVectors[0].length,
         ipcCosine: agreement,
+        base64MatchesFloat32: true,
       };
       if (retrieval) {
         report.phase = 'retrieval quality';
@@ -920,7 +953,7 @@ async function main() {
   if (report.error) process.exitCode = 2;
 }
 
-export { catalogCacheTarget, parseArgs, stopSidecar, validateEmbeddings };
+export { catalogCacheTarget, parseArgs, stopSidecar, validateBase64Embeddings, validateEmbeddings };
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {

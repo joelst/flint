@@ -1,7 +1,9 @@
 // @vitest-environment node
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { catalogCacheTarget, parseArgs, stopSidecar, validateEmbeddings } from './byom-gateway-live.mjs';
+import {
+  catalogCacheTarget, parseArgs, stopSidecar, validateBase64Embeddings, validateEmbeddings,
+} from './byom-gateway-live.mjs';
 
 afterEach(() => vi.useRealTimers());
 
@@ -189,6 +191,23 @@ describe('BYOM runner copy selection', () => {
       '--model', 'catalog/v1', '--catalog-alias', 'a', '--catalog-variant', 'v:1',
       '--switch-model', 'catalog/v1', '--switch-variant', 'v:1',
     ])).toThrow(/different versioned model id/);
+  });
+});
+
+describe('gateway embedding parity', () => {
+  it('accepts float32 little-endian base64 vectors matching float responses', () => {
+    const bytes = Buffer.alloc(8);
+    bytes.writeFloatLE(0.1, 0);
+    bytes.writeFloatLE(-2.5, 4);
+    expect(() => validateBase64Embeddings(
+      { data: [{ embedding: bytes.toString('base64') }] }, [[0.1, -2.5]],
+    )).not.toThrow();
+    expect(() => validateBase64Embeddings(
+      { data: [{ embedding: bytes.toString('base64') }] }, [[0.2, -2.5]],
+    )).toThrow(/differs/);
+    expect(() => validateBase64Embeddings(
+      { data: [{ embedding: 'AAAA' }] }, [[0.1, -2.5]],
+    )).toThrow(/invalid float32 payload/);
   });
 });
 

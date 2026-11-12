@@ -414,6 +414,13 @@ streaming gateway answers. The copy's seven source files and the link's eight
 source files retained their hashes; link deletion removed the junction
 without changing its target, and both runs shut down without forced cleanup.
 These runs still do not test installation or GUI model operations.
+The staged-runtime cached Qwen3 0.6B CUDA embedding variant returned two
+1,024-component IPC and gateway vectors on physical GPU 1 (cosine agreement
+greater than 0.99999999999999); explicit gateway `encoding_format: base64`
+decoded to the exact float32 values of the gateway float response. All twelve
+source-file hashes were unchanged and shutdown was confirmed without force.
+The load reported no active-provider identity; these results do not establish
+which execution provider performed the inference.
 Fresh-process restart with the same isolated app home passed link and copy
 re-discovery, IPC and gateway chat/streaming, removal, source-hash comparison,
 and confirmed shutdown without re-import. One earlier copy/restart attempt
