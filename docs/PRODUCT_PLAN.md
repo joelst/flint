@@ -428,9 +428,13 @@ the native runtime reported one session still using the model after a CUDA
 generator error, and once Flint reported a request still in flight. Waiting
 for the activity lease to drain before unload yielded two subsequent clean
 runs with all nine source hashes unchanged and confirmed shutdown. The client
-disconnect itself does not establish native quiescence, and the first native
-session/unload failure remains an open stability concern. Optional model-by-id
-and `/v1/responses` probes failed; neither is qualified by this run.
+disconnect itself does not establish native quiescence. Those runs also sent
+optional model-by-id (404) and `/v1/responses` (500) probes before disconnect,
+so the cause of the native CUDA generator/session error is not isolated.
+A separate staged tool run that skipped both optional routes passed, drained,
+unloaded and shut down cleanly with unchanged source hashes. The native
+session/unload failure remains an open stability concern; neither optional
+route is qualified by the required-only run.
 Fresh-process restart with the same isolated app home passed link and copy
 re-discovery, IPC and gateway chat/streaming, removal, source-hash comparison,
 and confirmed shutdown without re-import. One earlier copy/restart attempt

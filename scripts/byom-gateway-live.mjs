@@ -702,7 +702,7 @@ async function run(modelPath, {
       if (requireTools) {
         report.phase = 'gateway tool round trip';
         const qualification = await runOpenAiLive({
-          base: endpoint, model: catalogVariant, requireTools: true,
+          base: endpoint, model: catalogVariant, requireTools: true, skipOptional: true,
         });
         if (!qualification.requiredOk) {
           throw new Error(`Gateway tool qualification failed: ${JSON.stringify(qualification.checks.filter(

@@ -432,13 +432,15 @@ export async function runOpenAiLive(options) {
         ? `${model} is in GET /v1/models.`
         : `${model} is not in GET /v1/models. Chat still uses the requested id.`,
     ));
-    const retrieved = await readResponse(`${base}/models/${encodeURIComponent(model)}`, { method: 'GET' }, 30_000);
-    checks.push(check(
-      'model-get',
-      false,
-      retrieved.status === 200,
-      `GET /v1/models/${model} HTTP ${retrieved.status}.`,
-    ));
+    if (!options.skipOptional) {
+      const retrieved = await readResponse(`${base}/models/${encodeURIComponent(model)}`, { method: 'GET' }, 30_000);
+      checks.push(check(
+        'model-get',
+        false,
+        retrieved.status === 200,
+        `GET /v1/models/${model} HTTP ${retrieved.status}.`,
+      ));
+    }
   }
 
   const missing = await readResponse(`${base}/chat/completions`, {
@@ -594,17 +596,19 @@ export async function runOpenAiLive(options) {
     ));
   }
 
-  const responses = await readResponse(`${base}/responses`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model, input: READY_PROMPT }),
-  }, timeoutMs);
-  checks.push(check(
-    'responses',
-    false,
-    responses.status === 200 && responses.json && typeof responses.json === 'object',
-    `POST /v1/responses HTTP ${responses.status}.`,
-  ));
+  if (!options.skipOptional) {
+    const responses = await readResponse(`${base}/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model, input: READY_PROMPT }),
+    }, timeoutMs);
+    checks.push(check(
+      'responses',
+      false,
+      responses.status === 200 && responses.json && typeof responses.json === 'object',
+      `POST /v1/responses HTTP ${responses.status}.`,
+    ));
+  }
 
   const disconnected = await disconnectStream(base, model, timeoutMs);
   checks.push(check('disconnect', true, disconnected.ok, disconnected.detail));

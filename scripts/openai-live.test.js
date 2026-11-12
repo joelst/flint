@@ -144,6 +144,23 @@ afterEach(() => {
 });
 
 describe('openai-live qualification gates', () => {
+  it('can isolate required tool checks from optional model and responses routes', async () => {
+    installGateway({ requireToolChoice: true });
+    const report = await runOpenAiLive({
+      base: 'http://127.0.0.1:5272/v1',
+      model: MODEL,
+      requireTools: true,
+      skipOptional: true,
+      timeoutMs: 1000,
+    });
+
+    expect(report.requiredOk).toBe(true);
+    expect(check(report, 'tools')).toMatchObject({ required: true, ok: true });
+    expect(check(report, 'disconnect')).toMatchObject({ required: true, ok: true });
+    expect(fetch.mock.calls.map(([url]) => String(url))).not.toContain('http://127.0.0.1:5272/v1/responses');
+    expect(fetch.mock.calls.map(([url]) => String(url))).not.toContain(`http://127.0.0.1:5272/v1/models/${MODEL}`);
+  });
+
   it('requires a listed model, complete usage, and a tool-result turn with a tool-free final answer', async () => {
     const toolResultRequests = installGateway();
     const report = await runOpenAiLive({
