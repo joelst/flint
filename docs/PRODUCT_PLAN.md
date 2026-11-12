@@ -421,6 +421,16 @@ decoded to the exact float32 values of the gateway float response. All twelve
 source-file hashes were unchanged and shutdown was confirmed without force.
 The load reported no active-provider identity; these results do not establish
 which execution provider performed the inference.
+Staged-runtime Phi-4 Mini CUDA on physical GPU 1 passed IPC and gateway chat,
+usage, streaming, a forced tool call, tool-result follow-up, and client
+disconnect. An immediate unload after disconnect failed in two runs: once
+the native runtime reported one session still using the model after a CUDA
+generator error, and once Flint reported a request still in flight. Waiting
+for the activity lease to drain before unload yielded two subsequent clean
+runs with all nine source hashes unchanged and confirmed shutdown. The client
+disconnect itself does not establish native quiescence, and the first native
+session/unload failure remains an open stability concern. Optional model-by-id
+and `/v1/responses` probes failed; neither is qualified by this run.
 Fresh-process restart with the same isolated app home passed link and copy
 re-discovery, IPC and gateway chat/streaming, removal, source-hash comparison,
 and confirmed shutdown without re-import. One earlier copy/restart attempt
