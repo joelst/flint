@@ -25,6 +25,7 @@ function parseArgs(argv) {
     model: null, selfTest: false, copy: false, restart: false, embeddings: false,
     retrieval: null, catalogAlias: null, catalogVariant: null, preflight: false,
     admissionErrors: false, switchModel: null, switchVariant: null, concurrent: false,
+    cancelStream: false,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--self-test') args.selfTest = true;
@@ -34,6 +35,7 @@ function parseArgs(argv) {
     else if (argv[i] === '--preflight') args.preflight = true;
     else if (argv[i] === '--admission-errors') args.admissionErrors = true;
     else if (argv[i] === '--concurrent') args.concurrent = true;
+    else if (argv[i] === '--cancel-stream') args.cancelStream = true;
     else if (argv[i] === '--switch-model' || argv[i] === '--switch-variant') {
       const option = argv[i];
       const value = argv[++i];
@@ -65,6 +67,9 @@ function parseArgs(argv) {
   }
   if (args.concurrent && (!args.catalogAlias || args.embeddings)) {
     throw new Error('--concurrent requires a cached catalog chat model.');
+  }
+  if (args.cancelStream && (!args.catalogAlias || args.embeddings)) {
+    throw new Error('--cancel-stream requires a cached catalog chat model.');
   }
   if (args.switchModel || args.switchVariant) {
     if (!args.switchModel || !args.switchVariant || !args.catalogAlias || args.embeddings) {
@@ -166,7 +171,11 @@ function startSidecar(home, appName, stderrLines) {
     try { message = JSON.parse(line); } catch { return; }
     if (message?.ready === true) readyResolve();
     const entry = pending.get(message?.id);
-    if (!entry || message.progress !== undefined || message.stream) return;
+    if (!entry || message.progress !== undefined) return;
+    if (message.stream) {
+      entry.onStream?.(message);
+      return;
+    }
     pending.delete(message.id);
     entry.resolve(message);
   });
@@ -185,7 +194,7 @@ function startSidecar(home, appName, stderrLines) {
     pending.clear();
   });
 
-  function send(cmd, payload = {}, timeoutMs = 10 * 60 * 1000) {
+  function send(cmd, payload = {}, timeoutMs = 10 * 60 * 1000, onStream) {
     const id = nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -193,6 +202,7 @@ function startSidecar(home, appName, stderrLines) {
         reject(new Error(`Sidecar command ${cmd} timed out after ${timeoutMs} ms.`));
       }, timeoutMs);
       pending.set(id, {
+        onStream,
         resolve: (message) => {
           clearTimeout(timer);
           resolve(message);
@@ -334,7 +344,7 @@ function catalogCacheTarget(modelPath, variantId, home, appName) {
 async function run(modelPath, {
   copy = false, restart = false, embeddings = false, retrieval = null,
   catalogAlias = null, catalogVariant = null, preflight = false, admissionErrors = false,
-  switchModel = null, switchVariant = null, concurrent = false,
+  switchModel = null, switchVariant = null, concurrent = false, cancelStream = false,
 } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('The Foundry Local native SDK live spike requires Windows.');
@@ -372,6 +382,7 @@ async function run(modelPath, {
     admissionErrors: null,
     switch: null,
     concurrent: null,
+    cancelStream: null,
     error: null,
     cleanupError: null,
     cleanupForced: false,
@@ -477,6 +488,56 @@ async function run(modelPath, {
         throw new Error('Flint IPC completed without assistant text.');
       }
       report.ipc = { variantId: loaded.variantId, text: ipcText.slice(0, 240) };
+      if (cancelStream) {
+        report.phase = 'stream cancellation';
+        let cancelAck = null;
+        let firstDelta = '';
+        let deltasAfterAck = 0;
+        let acknowledged = false;
+        const streaming = sidecar.send('chatCompletion', {
+          model: modelAlias,
+          messages: [{ role: 'user', content: 'Count from 1 to 200, one number per line.' }],
+          maxTokens: 256,
+          stream: true,
+        }, 3 * 60 * 1000, (message) => {
+          if (!firstDelta && typeof message.delta === 'string' && message.delta) {
+            firstDelta = message.delta;
+            cancelAck = sidecar.send('cancelChatRequest', { requestId: message.id }).then((reply) => {
+              assertReply(reply, 'cancelChatRequest');
+              acknowledged = true;
+            });
+            void cancelAck.catch(() => {});
+          } else if (acknowledged && message.delta) {
+            deltasAfterAck++;
+          }
+        });
+        const terminal = await streaming;
+        if (!cancelAck) throw new Error('No streaming delta arrived before the terminal response.');
+        await cancelAck;
+        if (terminal.ok === true || terminal.certainty !== 'cancelled' || terminal.result !== undefined) {
+          throw new Error(`Canceled stream returned a successful or unclassified terminal response: ${JSON.stringify(terminal)}`);
+        }
+        if (deltasAfterAck !== 0) throw new Error(`${deltasAfterAck} stream deltas arrived after cancellation was acknowledged.`);
+        const pool = assertReply(await sidecar.send('poolStatus'), 'cancel poolStatus').result;
+        if (pool?.models?.length !== 1 || pool.models[0].variantId !== loaded.variantId
+          || pool.models[0].inFlight !== 0) {
+          throw new Error('Canceled stream left an activity lease or changed residency.');
+        }
+        const healthy = assertReply(await sidecar.send('chatCompletion', {
+          model: modelAlias, messages: prompt, maxTokens: 32,
+        }, 3 * 60 * 1000), 'post-cancel chatCompletion').result;
+        if (typeof healthy?.choices?.[0]?.message?.content !== 'string'
+          || !healthy.choices[0].message.content.trim()) {
+          throw new Error('The model did not serve a reply after cancellation.');
+        }
+        report.cancelStream = {
+          firstDelta: firstDelta.slice(0, 80),
+          terminalCertainty: terminal.certainty,
+          deltasAfterAck,
+          inFlightAfter: 0,
+          healthyAfter: true,
+        };
+      }
       if (preflight) {
         report.phase = 'native structural preflight';
         const oversized = [{ role: 'user', content: 'word '.repeat(40000) }];
@@ -771,6 +832,7 @@ async function main() {
     assert.throws(() => parseArgs(['--model', 'model', '--embeddings', '--preflight']), /requires a chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--admission-errors']), /requires a cached catalog chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--concurrent']), /requires a cached catalog chat model/);
+    assert.throws(() => parseArgs(['--model', 'model', '--cancel-stream']), /requires a cached catalog chat model/);
     assert.throws(() => parseArgs(['--model', 'model', '--switch-model', 'other']), /Variant switching requires/);
     assert.equal(parseArgs(['--model', 'model', '--embeddings', '--retrieval', 'dataset.json']).retrieval, 'dataset.json');
     assert.throws(() => parseArgs(['--model', 'model', '--retrieval', 'dataset.json']), /requires --embeddings/);
@@ -779,13 +841,13 @@ async function main() {
     console.log('BYOM live runner self-test passed.');
     return;
   }
-  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--concurrent] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
+  if (!args.model) throw new Error('Usage: node .\\scripts\\byom-gateway-live.mjs --model <onnx-genai-folder> [--copy] [--restart] [--embeddings] [--retrieval <dataset.json>] [--preflight] [--admission-errors] [--concurrent] [--cancel-stream] [--catalog-alias <alias> --catalog-variant <id>] [--switch-model <folder> --switch-variant <id>]');
   const report = await run(args.model, {
     copy: args.copy, restart: args.restart, embeddings: args.embeddings,
     retrieval: args.retrieval, catalogAlias: args.catalogAlias, catalogVariant: args.catalogVariant,
     preflight: args.preflight, admissionErrors: args.admissionErrors,
     switchModel: args.switchModel, switchVariant: args.switchVariant,
-    concurrent: args.concurrent,
+    concurrent: args.concurrent, cancelStream: args.cancelStream,
   });
   console.log(JSON.stringify(report, null, 2));
   if (report.error) process.exitCode = 2;

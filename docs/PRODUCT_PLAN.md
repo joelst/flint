@@ -283,8 +283,11 @@ The 2.1.0 contracts, re-run on 2.4.0:
 
 - IPC ChatSession one-shot and streaming paths now forward the request-owned
   `AbortSignal`; streaming retains its activity lease through the terminal
-  `response`. Automated tests cover that fence. A direct real-model SDK adapter
-  cancellation and concurrent-completion probe is recorded below; still
+  `response`. After a canceled stream settles, IPC returns `certainty: cancelled`
+  rather than a successful partial completion; deltas sent before cancellation
+  remain visible. Automated tests cover that fence and terminal outcome.
+  A direct real-model SDK adapter cancellation and concurrent-completion probe
+  is recorded below; still
   qualify sidecar IPC completion/cancel races, actual queued requests,
   legacy-client fallback, and sidecar gateway wiring independently. A real
   streaming and buffered client-disconnect check passed through a direct
@@ -448,14 +451,20 @@ A real SDK 2.4.0 sidecar run on cached `qwen2.5-0.5b-instruct-cuda-gpu:4`,
 restricted to the RTX 4080 by UUID, returned `42` over IPC. A streaming IPC
 request was cancelled after its first delta; cancellation was acknowledged,
 no later deltas arrived, a concurrent request returned `42`, and the pool
-reported `inFlight: 0` after settlement. The terminal cancellation reply was
-success-shaped without a certainty field, so this is not native-quiescence
-proof. With a temporary test-only preloader restricting provider discovery to
-CUDA (the current `~/.flint/ep` cache has no TensorRT provider), sidecar service
-startup and loopback gateway chat also succeeded. `GET /v1/models` returned
-versioned variant ids without parent aliases; gateway chat by friendly alias
-returned `42`. Graceful sidecar shutdown exited cleanly. The preloader bypasses
-normal all-provider startup and does not qualify that release path.
+reported `inFlight: 0` after settlement. That probe preceded the corrected
+terminal cancellation reply and was not native-quiescence proof. With a
+temporary test-only preloader restricting provider discovery to CUDA (the
+current `~/.flint/ep` cache has no TensorRT provider), sidecar service startup
+and loopback gateway chat also succeeded. `GET /v1/models` returned versioned
+variant ids without parent aliases; gateway chat by friendly alias returned
+`42`. Graceful sidecar shutdown exited cleanly. The preloader bypassed normal
+all-provider startup and did not qualify that release path.
+An isolated rerun with the same cached CUDA variant on physical GPU 1 returned
+`certainty: cancelled` after its first delta, emitted no deltas after the
+cancel acknowledgement, and ended with `inFlight: 0`. A subsequent IPC chat
+and gateway buffered/streaming chats succeeded. All ten source-file hashes
+were unchanged, and sidecar shutdown was confirmed without force. This
+establishes sidecar settlement and recovery, not native inference quiescence.
 A second real SDK 2.4.0 sidecar run on cached
 `Phi-4-mini-instruct-cuda-gpu:5`, restricted to physical GPU 1 and using the
 same test-only CUDA discovery filter, returned the enum-constrained

@@ -4416,16 +4416,26 @@ rl.on('line', async (line) => {
               cancelledNatively ? null : streamFailure,
             );
             if (combinedFailure) throw combinedFailure;
+            if (canceledRequests.has(id)) {
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
-            const wasCanceled = canceledRequests.has(id);
-            const compactedToolCalls = wasCanceled
-              ? []
-              : finalizeToolCallChoices(toolCallsByChoice, finishReasons);
+            if (canceledRequests.has(id)) {
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
+            const compactedToolCalls = finalizeToolCallChoices(toolCallsByChoice, finishReasons);
             const chatFinishReason = finishReasons.get(0) ?? null;
-            const publishedFinishReason = wasCanceled ? null : chatFinishReason;
             const normalizedStreamResult = validateCompletedChatResponse(normalizeChatResponse({
               choices: [{
-                finish_reason: publishedFinishReason,
+                finish_reason: chatFinishReason,
                 message: {
                   role: 'assistant',
                   content,

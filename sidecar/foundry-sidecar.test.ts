@@ -337,6 +337,7 @@ describe('foundry-sidecar protocol basics', () => {
       })}\n`);
       expect((await waitForLine(proc, (msg) => msg.id === 40)).ok).toBe(true);
 
+      const streamedDonePromise = waitForLine(proc, (msg) => msg.id === 41 && !msg.stream);
       proc.stdin.write(`${JSON.stringify({
         id: 41,
         cmd: 'chatCompletion',
@@ -345,14 +346,6 @@ describe('foundry-sidecar protocol basics', () => {
         stream: true,
       })}\n`);
       await waitForLine(proc, (msg) => msg.id === 41 && msg.stream === true);
-      const cancelAckPromise = waitForLine(proc, (msg) => msg.id === 44);
-      const streamedDonePromise = waitForLine(proc, (msg) => msg.id === 41 && msg.ok === true);
-      void cancelAckPromise.catch(() => {});
-      void streamedDonePromise.catch(() => {});
-      proc.stdin.write(`${JSON.stringify({
-        id: 44, cmd: 'cancelChatRequest', requestId: 41
-      })}\n`);
-      expect((await cancelAckPromise).ok).toBe(true);
       const streamed = await streamedDonePromise;
       expect(streamed.ok).toBe(true);
       expect(streamed.result.nativeStreaming).toBe(true);
@@ -4780,7 +4773,7 @@ describe('chatCompletion ChatSession path', () => {
     expect(events()).toContain('session-chat-disposed');
   }, 30000);
 
-  it('does not publish a partial tool call or terminal snapshot after cancellation', async () => {
+  it('drains late tool calls without publishing a successful terminal snapshot after cancellation', async () => {
     await startSidecar('session-stream-fixture');
     setStreamSteps([
       {
@@ -4831,10 +4824,10 @@ describe('chatCompletion ChatSession path', () => {
     expect((await cancelReply).ok).toBe(true);
     writeFileSync(cancelSignalPath, '');
     const res = await chatted;
-    expect(res.ok).toBe(true);
-    expect(res.result.choices[0].message.content).toBe('partial text');
-    expect(res.result.choices[0].message.tool_calls).toBeUndefined();
-    expect(res.result.choices[0].finish_reason).toBeNull();
+    expect(res.ok).not.toBe(true);
+    expect(res.certainty).toBe('cancelled');
+    expect(res.result).toBeUndefined();
+    expect(String(res.error)).toMatch(/native inference may have continued/);
     expect(events()).toContain('cancel-drained');
   }, 30000);
 
@@ -4908,9 +4901,12 @@ describe('chatCompletion ChatSession path', () => {
 
     writeFileSync(cancelSignalPath, '');
     const result = await chatted;
-    expect(result).toMatchObject({ ok: true });
-    expect(result.result.choices[0].message.content).toBe('partial native answer');
-    expect(result.result.choices[0].finish_reason).toBeNull();
+    expect(result).toMatchObject({
+      certainty: 'cancelled',
+      error: expect.stringMatching(/native inference may have continued/),
+    });
+    expect(result.ok).not.toBe(true);
+    expect(result.result).toBeUndefined();
     expect(events()).toContain('native-cancel-settled');
     expect(events()).toContain('session-chat-disposed');
     expect(await exclusive).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
@@ -4958,10 +4954,10 @@ describe('chatCompletion ChatSession path', () => {
     expect((await cancelReply).ok).toBe(true);
     writeFileSync(cancelSignalPath, '');
     const res = await chatted;
-    expect(res.ok).toBe(true);
-    expect(res.result.choices[0].message.content).toBe('partial text');
-    expect(res.result.choices[0].message.tool_calls).toBeUndefined();
-    expect(res.result.choices[0].finish_reason).toBeNull();
+    expect(res.ok).not.toBe(true);
+    expect(res.certainty).toBe('cancelled');
+    expect(res.result).toBeUndefined();
+    expect(String(res.error)).toMatch(/native inference may have continued/);
     expect(events()).toContain('session-chat-disposed');
   }, 30000);
 
@@ -5116,7 +5112,7 @@ describe('chatCompletion ChatSession path', () => {
 
   it('suppresses tool-call deltas that arrive after the stream is canceled', async () => {
     await startSidecar('session-stream-tool-cancel');
-    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok === true, 10000);
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && !msg.stream, 10000);
     send({
       id: 3,
       cmd: 'chatCompletion',
@@ -5134,14 +5130,9 @@ describe('chatCompletion ChatSession path', () => {
     await reply(4);
     writeFileSync(cancelSignalPath, '');
     const res = await chatted;
-    expect(res.ok).toBe(true);
-    expect(res.result.choices[0].message.tool_calls).toBeUndefined();
-    // The fixture's only finish_reason-bearing chunk ('tool_calls') is yielded after the
-    // cancel signal, alongside the suppressed tool_calls delta. Recording finish_reason
-    // from that drained chunk would report finish_reason: 'tool_calls' on a message with
-    // no tool_calls -- a self-contradictory result. Nothing legitimate arrived before
-    // cancellation, so finish_reason must stay unset.
-    expect(res.result.choices[0].finish_reason).toBeNull();
+    expect(res.ok).not.toBe(true);
+    expect(res.certainty).toBe('cancelled');
+    expect(res.result).toBeUndefined();
   }, 30000);
 
   it('fails a streaming ChatSession that emits no openai-json output', async () => {
