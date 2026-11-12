@@ -1,4 +1,5 @@
 // @vitest-environment node
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { catalogCacheTarget, parseArgs, stopSidecar, validateEmbeddings } from './byom-gateway-live.mjs';
 
@@ -145,14 +146,16 @@ describe('BYOM runner copy selection', () => {
 
 describe('isolated catalog cache', () => {
   it('copies only the selected variant into the temporary catalog cache layout', () => {
-    expect(catalogCacheTarget('C:\\source\\Microsoft\\qwen3-embedding-0.6b-cuda-gpu-1\\v1',
-      'qwen3-embedding-0.6b-cuda-gpu:1', 'C:\\scratch', 'flint-live'))
-      .toBe('C:\\scratch\\.flint-live\\cache\\models\\Microsoft\\qwen3-embedding-0.6b-cuda-gpu-1\\v1');
-    expect(() => catalogCacheTarget('C:\\source\\Microsoft\\qwen3-embedding-0.6b-cuda-gpu-2\\v1',
-      'qwen3-embedding-0.6b-cuda-gpu:1', 'C:\\scratch', 'flint-live'))
+    const home = path.resolve('scratch');
+    const variant = 'qwen3-embedding-0.6b-cuda-gpu-1';
+    const model = path.join('source', 'Microsoft', variant, 'v1');
+    expect(catalogCacheTarget(model, 'qwen3-embedding-0.6b-cuda-gpu:1', home, 'flint-live'))
+      .toBe(path.join(home, '.flint-live', 'cache', 'models', 'Microsoft', variant, 'v1'));
+    expect(() => catalogCacheTarget(path.join('source', 'Microsoft', 'qwen3-embedding-0.6b-cuda-gpu-2', 'v1'),
+      'qwen3-embedding-0.6b-cuda-gpu:1', home, 'flint-live'))
       .toThrow(/does not match/);
-    expect(() => catalogCacheTarget('C:\\source\\Microsoft\\qwen3-embedding-0.6b-cuda-gpu-1\\v2',
-      'qwen3-embedding-0.6b-cuda-gpu:1', 'C:\\scratch', 'flint-live'))
+    expect(() => catalogCacheTarget(path.join('source', 'Microsoft', variant, 'v2'),
+      'qwen3-embedding-0.6b-cuda-gpu:1', home, 'flint-live'))
       .toThrow(/does not match/);
   });
 });
