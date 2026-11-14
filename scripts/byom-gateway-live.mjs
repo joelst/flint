@@ -1017,8 +1017,10 @@ async function run(modelPath, {
         } else {
           assertReply(streamed, 'active chatCompletion');
         }
-        if (!activeWhenCapped
-          || !capped?.evicted?.some((entry) => entry.alias === coexistAlias && entry.reason === 'cap')
+        if (!activeWhenCapped) {
+          throw new Error('The streaming request ended before the eviction cap was applied.');
+        }
+        if (!capped?.evicted?.some((entry) => entry.alias === coexistAlias && entry.reason === 'cap')
           || capped.evicted.some((entry) => entry.alias === modelAlias)) {
           throw new Error(`The cap did not protect the streaming model: ${JSON.stringify(capped?.evicted ?? null)}.`);
         }
@@ -1076,7 +1078,8 @@ async function run(modelPath, {
       let pool;
       do {
         pool = assertReply(await sidecar.send('poolStatus'), 'post-disconnect poolStatus').result;
-        if (pool?.models?.length !== 1 || pool.models[0].variantId !== loaded.variantId) {
+        const expectedVariant = activeEviction ? coexistVariant : loaded.variantId;
+        if (pool?.models?.length !== 1 || pool.models[0].variantId !== expectedVariant) {
           throw new Error('The disconnected stream changed model residency.');
         }
         if (pool.models[0].inFlight === 0) break;

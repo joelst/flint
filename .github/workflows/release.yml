@@ -305,9 +305,15 @@ jobs:
           }
           $installDir = Join-Path $env:RUNNER_TEMP 'flint-installed'
           $log = Join-Path $env:RUNNER_TEMP 'flint-msi-install.log'
-          & msiexec.exe /i $msi[0].FullName "INSTALLDIR=$($installDir)" /qn /norestart /l*v $log
-          if ($LASTEXITCODE -ne 0) {
-            throw "MSI installation failed with exit code $($LASTEXITCODE). See $($log)."
+          $installer = Start-Process -FilePath 'msiexec.exe' -ArgumentList @(
+            '/i', ('"' + $msi[0].FullName + '"'), ('INSTALLDIR="' + $installDir + '"'),
+            '/qn', '/norestart', '/l*v', ('"' + $log + '"')
+          ) -PassThru -Wait
+          if ($installer.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $log -PathType Leaf) {
+              Get-Content -LiteralPath $log -Tail 35
+            }
+            throw "MSI installation failed with exit code $($installer.ExitCode)."
           }
           $exe = Join-Path $installDir 'Flint.exe'
           if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
