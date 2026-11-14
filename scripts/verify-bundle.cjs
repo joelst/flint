@@ -163,26 +163,28 @@ if (!fs.existsSync(sdkRoot)) {
   expectedFiles = checkPayloadAt('node_modules', sdkRoot);
 }
 
-// Staged Tauri resource tree (present after a local release build)
-// Flattened map-form: <release>/foundry-local-sdk
-const stagedSdk = path.join(releaseDir, 'foundry-local-sdk');
+// macOS resources are inside the .app; Windows stages them beside the executable.
+const resourceDir = platformKey.startsWith('darwin-')
+  ? path.join(releaseDir, 'bundle', 'macos', 'Flint.app', 'Contents', 'Resources')
+  : releaseDir;
+const stagedSdk = path.join(resourceDir, 'foundry-local-sdk');
 if (fs.existsSync(releaseDir)) {
-  console.log(`Checking release resource staging (${path.relative(root, releaseDir)})...`);
-  checkKoffiAt('staged resources', path.join(releaseDir, 'koffi'), path.join(releaseDir, '@koromix'));
+  console.log(`Checking bundled resources (${path.relative(root, resourceDir)})...`);
+  checkKoffiAt('bundled resources', path.join(resourceDir, 'koffi'), path.join(resourceDir, '@koromix'));
   for (const file of requiredSidecarSources) {
-    if (!fs.existsSync(path.join(releaseDir, 'sidecar', file))) {
-      bad(`staged resources missing sidecar/${file}`);
+    if (!fs.existsSync(path.join(resourceDir, 'sidecar', file))) {
+      bad(`bundled resources missing sidecar/${file}`);
     } else {
-      ok(`staged resources include sidecar/${file}`);
+      ok(`bundled resources include sidecar/${file}`);
     }
   }
   if (!fs.existsSync(stagedSdk)) {
     bad(
-      'no staged foundry-local-sdk under target/release (expected foundry-local-sdk/) — run tauri build'
+      `no bundled foundry-local-sdk under ${path.relative(root, resourceDir)} — run tauri build`
     );
   } else {
     checkPayloadAt(
-      `staged resources (${path.relative(root, stagedSdk)})`,
+      `bundled resources (${path.relative(root, stagedSdk)})`,
       stagedSdk,
     );
   }

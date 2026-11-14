@@ -412,7 +412,15 @@ Phi-4 Mini CUDA chat/usage/streaming, required tool call, tool-result follow-up
 and disconnect. GPU visibility was restricted to physical GPU 1; the active
 execution provider was not independently reported. The no-metadata source
 was a temporary seven-file copy of the previously verified imported Llama
-folder, not a new upstream download. A Windows dev launch reached service
+folder, not a new upstream download. An isolated Windows run using staged
+Node and sidecar with the checkout SDK at 2.4.1 transcribed a synthetic
+16-kHz WAV ("The blue fox walks at noon.") with cached Whisper Tiny
+`openai-whisper-tiny-cuda-gpu:3`; its seven text segments had no native
+timestamps. Cached `qwen3-vl-2b-instruct-cuda-gpu:2` described a synthetic
+PNG's red circle correctly through IPC ChatSession (26 prompt / 8 completion
+tokens). Both models unloaded and the sidecar shut down cleanly; active
+provider identity was not reported, and neither run proves packaged-app
+speech or vision. A Windows dev launch reached service
 ready and loaded a cached chat model; 18 Windows UI screenshots were refreshed
 with the 0.11.0 build-version override. These checks do not qualify an
 installed GUI, clean-machine behavior, signing, updater/rollback, or macOS
