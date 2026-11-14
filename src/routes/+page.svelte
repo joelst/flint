@@ -9765,27 +9765,6 @@ Output only the summary text, no preamble.`;
                   {/if}
                 </p>
               {/if}
-              <div class="accel-panel-row">
-                <label for="shared-host">
-                  <input
-                    id="shared-host"
-                    type="checkbox"
-                    checked={sharedHost}
-                    onchange={(e) => setSharedHost((e.currentTarget as HTMLInputElement).checked)}
-                  />
-                  Shared Foundry host
-                </label>
-              </div>
-              <p class="muted">
-                Off by default. Applies the next time this runtime starts. Flint keeps its own cache
-                and does not fall back to an in-process manager if the shared host fails.
-                {#if sharedHost !== sharedHostApplied}
-                  Restart Flint for this to take effect.
-                {/if}
-                {#if sharedHostSaveFailed}
-                  The choice could not be saved.
-                {/if}
-              </p>
             </div>
 
             {#if modelUpdateCount > 0}
@@ -13039,6 +13018,30 @@ Output only the summary text, no preamble.`;
 
           <div class="settings-section">
             <h3>Startup</h3>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name" id="shared-host-label">Shared Foundry host</span>
+                <span class="setting-desc">
+                  Off by default. Applies the next time this runtime starts. Flint keeps its own cache
+                  and does not fall back to an in-process manager if the shared host fails.
+                  {#if sharedHost !== sharedHostApplied}
+                    Restart Flint for this to take effect.
+                  {/if}
+                  {#if sharedHostSaveFailed}
+                    The choice could not be saved.
+                  {/if}
+                </span>
+              </div>
+              <label class="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={sharedHost}
+                  onchange={(e) => setSharedHost((e.currentTarget as HTMLInputElement).checked)}
+                  aria-labelledby="shared-host-label"
+                />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
             <div class="setting-row">
               <div class="setting-info">
                 <span class="setting-name" id="auto-start-service-label">Start local service automatically</span>
