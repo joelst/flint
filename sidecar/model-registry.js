@@ -128,16 +128,16 @@ export function indexableLocalModel (model) {
   const alias = typeof aliasValue === 'string' ? aliasValue : '';
   if (!id || !alias) return model;
   const cachedState = readCachedState(model);
-  const cached = cachedState.readable ? cachedState.cached : true;
+  const unreadable = !cachedState.readable && cachedState.failed;
+  const cached = cachedState.readable ? cachedState.cached : !unreadable;
   return {
     alias,
     id,
     info: readField(() => model?.info),
-    isCached: cached,
+    ...(unreadable ? {} : { isCached: cached }),
     variants: [{
       id,
-      isCached: cached,
-      info: { cached },
+      ...(unreadable ? {} : { isCached: cached, info: { cached } }),
     }],
   };
 }
@@ -193,22 +193,24 @@ export function isCachedModel (model) {
 
 /**
  * @param {{isCached?: boolean, info?: {cached?: boolean}}|null|undefined} model
- * @returns {{cached: boolean, readable: boolean}}
+ * @returns {{cached: boolean, readable: boolean, failed?: boolean}}
  */
 function readCachedState (model) {
+  let failed = false;
   try {
     const cached = model?.isCached;
     if (typeof cached === 'boolean') return { cached, readable: true };
   } catch {
+    failed = true;
     // Fall through to the plain info snapshot.
   }
   try {
     const cached = model?.info?.cached;
     return typeof cached === 'boolean'
       ? { cached, readable: true }
-      : { cached: false, readable: false };
+      : { cached: false, readable: false, failed };
   } catch {
-    return { cached: false, readable: false };
+    return { cached: false, readable: false, failed: true };
   }
 }
 

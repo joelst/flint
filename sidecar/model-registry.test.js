@@ -168,7 +168,33 @@ describe('buildCachedModelIndex', () => {
       const catalog = normalizeCatalogModels(merged);
       expect(resolveModelId(buildModelIndex(catalog.models), 'phi')).not.toBeNull();
       expect(resolveModelId(buildModelIndex(catalog.models), 'llama')).not.toBeNull();
+      expect(catalog.complete).toBe(false);
+      expect(resolveModelId(buildModelIndex(catalog.models), 'broken-local')).toBeNull();
       expect(normalizeCachedModels(merged).models).toContainEqual({ alias: 'llama', id: 'llama:1' });
+    });
+
+    it('does not advertise a local registration with unreadable cache state as downloaded', () => {
+      const local = {
+        alias: 'unverified-local',
+        id: 'unverified-local:1',
+        get isCached() { throw new Error('native cache state unavailable'); },
+        info: { task: 'embeddings' },
+      };
+      const confirmed = {
+        alias: 'confirmed-local',
+        id: 'confirmed-local:1',
+        get isCached() { throw new Error('native cache state unavailable'); },
+        info: { cached: true },
+      };
+      const healthy = { alias: 'healthy-local', id: 'healthy-local:1', isCached: true };
+      const merged = mergeLocalRegistrations([], [local, confirmed, healthy]);
+      const snapshot = normalizeCatalogModels(merged);
+      const index = buildModelIndex(snapshot.models);
+
+      expect(snapshot.complete).toBe(false);
+      expect(resolveModelId(index, 'unverified-local')).toBeNull();
+      expect(resolveModelId(index, 'confirmed-local')).not.toBeNull();
+      expect(resolveModelId(index, 'healthy-local')).not.toBeNull();
     });
   });
 
