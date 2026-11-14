@@ -422,18 +422,19 @@ tokens). Both models unloaded and the sidecar shut down cleanly; active
 provider identity was not reported, and neither run proves packaged-app
 speech or vision. A Windows dev launch reached service
 ready and loaded a cached chat model; 18 Windows UI screenshots were refreshed
-with the 0.11.0 build-version override. Draft `v0.11.0-5` Windows installers
-have valid Authenticode signatures, and its MSI, NSIS, and macOS updater files
-have valid artifact and trusted-comment signatures; their bytes match GitHub's
-SHA-256 digests. Administrative extraction of that signed MSI yielded a signed,
-runtime-ready executable, but **it was not installed**. An isolated run of its
-packaged Node and sidecar on physical GPU 1 passed Phi-4 Mini CUDA IPC/gateway
-chat, streaming, forced tools, disconnect, and a two-model active gateway cap:
-the in-flight Phi stream stayed resident while the other model was evicted;
-the completed stream then yielded its slot. Source hashes were unchanged.
-PR CI passes on the SDK 2.4.1 revision, while hosted signed-MSI installation
-smoke remains unqualified. Clean-machine GUI/model behavior, updater/rollback,
-and macOS screenshot capture are still open release gates.
+with the 0.11.0 build-version override. Draft `v0.11.0-6` passed both hosted
+release jobs: the signed MSI installed to a temporary directory on the Windows
+runner, its installed executable had valid Authenticode and reported runtime
+ready. Both Windows installers have valid Authenticode, and the MSI, NSIS, and
+macOS updater files have valid artifact/trusted-comment signatures matching
+`latest.json`; downloaded bytes match GitHub's SHA-256 digests. The earlier
+signed `v0.11.0-5` MSI was **extracted, not installed** for an isolated model
+probe: its packaged Node and sidecar on physical GPU 1 passed Phi-4 Mini CUDA
+IPC/gateway chat, streaming, forced tools, disconnect, and a two-model active
+gateway cap. The in-flight Phi stream stayed resident while the other model
+was evicted; the completed stream then yielded its slot. Source hashes were
+unchanged. PR CI passes on the 2.4.1 revision. Installed-GUI BYOM/model
+behavior, updater/rollback, and macOS screenshot capture remain open gates.
 
 **Current local qualification (SDK 2.4.0):** `npm run check`, `npm run build`,
 `npm run test:coverage`, IPC-contract and Markdown-link verification pass.
