@@ -10,16 +10,6 @@ Verify an item against the tree before acting on it.
 [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md). This file is deferred and post-1.0 only.
 Do not add 1.0 work here; that duplicates the plan and the two will drift.
 
-## Current execution priorities
-
-Finish the **0.10.0** qualification gates in
-[PRODUCT_PLAN.md](./PRODUCT_PLAN.md): packaged Benchmark Preview dogfood,
-confirmation that the shipped public web-retrieval helper still matches its
-boundary, infrastructure/release validation, and the generated release review. Then
-continue the remaining 1.0 process gates: signed clean-machine Windows dogfood,
-stable updater evidence, and pinned
-integration versions. Defer wholesale Foundry runtime replacement.
-
 **Linux work is deferred:** preserve existing checks and mappings. Continue
 Linux-specific work only where it is already part of another feature; shared
 Windows/macOS fixes do not establish Linux release support. 1.0 production is
@@ -75,9 +65,73 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       remain byte-preserving pass-through. Broader endpoint capability conformance
       remains open.
 - [ ] **Recorded BYOM embedding recipe** — gateway autoload and `embedTexts` are
-      present (PRODUCT_PLAN Wave 9). Catalog still has zero embedding models. A
-      Flint-tested onnxruntime-genai embedding folder (repo, revision, dimension,
-      core pin) is still required before Continue's indexer can be marked verified.
+      present (PRODUCT_PLAN Wave 9). The cached Qwen3 0.6B catalog model passed
+      `/v1/embeddings` and `embedTexts` IPC; the cached 8B model passed both
+      paths as well. An isolated SDK 2.4.0 local-registration probe using a
+      temporary external copy of the cached 0.6B folder returned two finite
+      1,024-dimensional vectors with CUDA masked to GPU 1. Cache metadata
+      identifies the export as
+      `azureml://registries/azureml/models/qwen3-embedding-0.6b-cuda-gpu/versions/1`
+      with Apache-2.0 licensing; the candidate upstream
+      [Qwen/Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/tree/97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3)
+      is pinned to that Hub revision, and Flint pins SDK/core 2.4.0. Available
+      metadata does not tie the registry export to that source commit. The
+      pinned candidate procedure is recorded in
+      [the Olive recipe note](./spikes/qwen3-embedding-olive-recipe.md); fresh
+      pinned-environment replay and BYOM embedding smoke passed. The portable
+      export also reached SciFact Recall@10 0.83489 and nDCG@10 0.70395 over
+      the full corpus and 300 judged test queries through Flint on GPU 1;
+      the cached registry artifact's provenance and quality remain unproven.
+      A temporary build
+      using the pinned model snapshot and recipe commit was imported and
+      validated through sidecar 2.4.0 gateway and IPC; detailed evidence is in
+      PRODUCT_PLAN. The upstream checked-in recipe required disabling
+      input-embedding quantization and temporarily hiding the optional TensorRT
+      provider DLL, so it is not reproducible from its checked-in configuration.
+      Microsoft maintains
+      an [Olive CUDA recipe at pinned repository commit
+      `1ebab74`](https://github.com/microsoft/olive-recipes/tree/1ebab74ab474869c53575954fda0772cee723ecf/Qwen-Qwen3-Embedding-0.6B/cuda)
+      that builds an ONNX GenAI INT4 model from this upstream model, but its
+      config omits the Hugging Face revision and its README installs Olive from
+      `main`; it also requires copying `config_sentence_transformers.json` and
+      correcting `tie_word_embeddings` after export. Treat it as a candidate
+      recipe, not as evidence for the existing AzureML artifact. Its
+      `requirements.txt` pins only
+      `onnxruntime-genai-cuda==0.12.2` and `transformers==4.52.4`; `olive-ai`,
+      `onnxruntime-gpu`, and the other tooling dependencies are unpinned.
+      Continue source review at commit
+      [`5522c6f`](https://github.com/continuedev/continue/commit/5522c6f44ca0ac3528b37244818fbfa39b5af470)
+      indicates local indexing does not require a Continue account: the VS Code
+      adapter provides local IDE settings with an empty user token, and the
+      indexer builds when an embed-role model and an indexing context provider
+      are configured. The codebase provider requests embeddings, full-text, and
+      chunk indexes; remote chunk-cache lookup is optional and missing chunks
+      are computed locally. An isolated VS Code Insiders profile running
+      Continue 2.0.0 completed a codebase index through Flint's real SDK/core
+      2.4.0 gateway using the `codebase` context provider and an explicit
+      `embed`-role model. With cached
+      `qwen3-embedding-0.6b-cuda-gpu:1` on physical GPU 1 and a CUDA-only
+      provider filter, it sent 101 `/v1/embeddings` requests and populated
+      3,179 vector-cache rows across 782 indexed paths; pool `inFlight` returned
+      to zero and the indexing lock was released. This verifies Continue
+      indexing through Flint's local endpoint, not normal all-provider
+      startup, ranked-retrieval quality for the cached artifact, or packaged-app
+      behavior. The separately replayed BYOM export passed a source-pinned
+      SciFact retrieval evaluation; cached catalog-export provenance remains open.
+      An isolated Continue 2.0.0 run against that BYOM export required base64
+      embeddings. After Flint supported float32 base64 for local models,
+      the paired HTTP response and two persisted cache rows matched at 1,024
+      components and identical float32 hashes. The earlier unpaired
+      256-component observation from the cached catalog artifact is still open.
+      The [onnx-community ONNX export](https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/tree/c25a394dd583836952667c12f008335071b3f43d)
+      explicitly targets Transformers.js and is not a tested ONNX Runtime GenAI
+      folder, so it does not close the recipe gate. The upstream
+      [0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/discussions/18)
+      and [8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B/discussions/13)
+      ONNX conversion discussions likewise show SBERT/Optimum exports, not
+      ONNX Runtime GenAI folders. The separate
+      [onnx-community/Qwen3-8B-ONNX](https://huggingface.co/onnx-community/Qwen3-8B-ONNX)
+      recipe is for the Qwen3-8B chat model, not its embedding variant.
 
 ## Dependencies
 
@@ -185,6 +239,15 @@ first per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) — these are not 1.0 work.
       endpoint).
 - [ ] **Curated ONNX catalog** — Flint-validated imports (pinned repo/revision, tested
       EP, required files). See [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) "After 1.0".
+- [ ] **Windows ML Server (watch)** — Windows-only, and only after llama.cpp
+      compatibility and the experimental server API settle. `WinMLServer.exe` is a
+      closed binary from the `Microsoft.Windows.AI.MachineLearning` package. It can
+      serve a GGUF, or an ONNX language model, on loopback with a bearer key that
+      changes every start. If that API settles, Flint could supervise the process
+      beside the Foundry sidecar and keep Foundry's gateway on its own port. The
+      Windows ML CLI may also help prepare an ONNX folder before Foundry
+      registration. The open
+      question for registration itself is [spikes/foundry-2.1.0-spike.md](./spikes/foundry-2.1.0-spike.md).
 
 ## Control CLI — not planned
 

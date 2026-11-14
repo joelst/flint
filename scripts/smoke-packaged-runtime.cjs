@@ -10,6 +10,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { isRuntimeSmokeSuccessful } = require('./runtime-smoke-result.cjs');
 
 const root = path.resolve(__dirname, '..');
 
@@ -43,8 +44,8 @@ function main() {
   }
   const output = `${result.stdout || ''}\n${result.stderr || ''}`;
   if (output.trim()) console.log(output.trim());
-  if (result.status !== 0) {
-    throw new Error(`Runtime smoke failed with exit ${result.status}`);
+  if (!isRuntimeSmokeSuccessful(result)) {
+    throw new Error(`Runtime smoke did not report readiness (exit ${result.status})`);
   }
   console.log('[smoke-packaged-runtime] ready');
 }

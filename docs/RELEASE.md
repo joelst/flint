@@ -205,6 +205,12 @@ This runs the fixed workflow under the `release` environment while checking out 
 - macOS: `.dmg` / app zip
 - Updater: `latest.json`, `*.sig`
 
+For numeric prerelease identifiers and stable builds, the Windows release job
+installs the signed MSI into its temporary directory, verifies the installed
+executable's signature, and requires the installed runtime to report ready.
+This does not test the installed GUI, model inference, NSIS installation, or
+updater/rollback; qualify those separately before publishing a stable release.
+
 ---
 
 ## 5. Cut a real release

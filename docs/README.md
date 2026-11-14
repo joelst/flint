@@ -48,11 +48,14 @@ or deferred plans kept for the analysis they contain, not measured data
 | [POOL_SPIKE.md](./POOL_SPIKE.md) | Model pool co-residency spike protocol (complete; retained for re-runs) |
 | [pool-spike-results/](./pool-spike-results/) | Canonical pool-spike result |
 | [spikes/node-bundle-spike.md](./spikes/node-bundle-spike.md) | Bundled-Node packaging size/approach spike (referenced from [DEVELOPMENT.md](./DEVELOPMENT.md)) |
+| [spikes/qwen3-embedding-olive-recipe.md](./spikes/qwen3-embedding-olive-recipe.md) | Pinned Qwen3 embedding BYOM build candidate; clean replay and retrieval quality remain open |
+| [spikes/foundry-2.1.0-spike.md](./spikes/foundry-2.1.0-spike.md) | SDK 2.1.0 registration measurements and real external-model BYOM evidence; the native listener does not route local registrations. |
 
 ## Planning process
 
 - **Operator runbook for an installed app:** [ADMIN.md](./ADMIN.md).
 - **Implementation sequencing and acceptance gates:** [PRODUCT_PLAN.md](./PRODUCT_PLAN.md).
+- **SDK 2.4.1, real BYOM, and the non-catalog ONNX model spike:** [SDK/BYOM shipping plan](./PRODUCT_PLAN.md#sdk-241-and-real-byom-shipping-plan).
 - **Forward plan through 1.0 and the 1.0 release bar:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).
   1.0 production is Windows; macOS Apple Silicon is evaluation-only.
 - **Release history:** [CHANGELOG.md](../CHANGELOG.md).

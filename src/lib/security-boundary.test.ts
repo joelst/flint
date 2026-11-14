@@ -229,7 +229,9 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('Allow all URLs');
     expect(page).toContain('askDomainApproval(host, url, originId ?? "", hop === "redirect")');
     expect(page).toContain('hop: "request" | "redirect"');
-    expect(page).toContain('webToolRounds < maxWebToolRounds');
+    expect(page).toContain('offerAnotherWebToolRound(');
+    expect(tools).toContain('input.webToolRounds < input.maxWebToolRounds');
+    expect(tools).toContain('!input.contentToolAnswer');
     expect(page).toContain('authorizeSearch');
     expect(page).toContain('webConsentQueue = [...webConsentQueue, { kind: "search"');
     expect(page).toContain('webConsentQueue = [...webConsentQueue, { kind: "domain"');

@@ -7,6 +7,7 @@
 // Node or the native runtime, matching its siblings.
 
 import { MAX_REQUEST_IMAGES, parseImageDataUrl } from './image-dimensions.js';
+import { unsupportedFrequencyPenaltyMessage } from './chat-parameter-policy.js';
 
 // Model output is untrusted for logging purposes: it carries generated text, tool-call
 // arguments and echoed prompt content. V8's JSON.parse errors quote an excerpt of the
@@ -24,6 +25,40 @@ function parseOpenAiJson (text, description) {
   } catch {
     throw new Error(
       `${description} returned output that is not valid JSON (${utf8Encoder.encode(text).length} bytes).`,
+    );
+  }
+}
+
+function abortError () {
+  const error = new Error('The operation was aborted.');
+  error.name = 'AbortError';
+  return error;
+}
+
+async function preflightNativeRequest (session, request, signal) {
+  if (typeof session?.preflightRequest !== 'function' || signal?.aborted) return;
+  let result;
+  try {
+    result = await session.preflightRequest(request);
+  } catch (error) {
+    if (signal?.aborted) throw abortError();
+    throw error;
+  }
+  if (signal?.aborted) throw abortError();
+  const tokenCounts = [
+    result?.promptTokens,
+    result?.outputReserveTokens,
+    result?.requiredTokens,
+    result?.contextLimitTokens,
+    result?.deficitTokens,
+  ];
+  if (!result || typeof result.fits !== 'boolean'
+    || !tokenCounts.every((value) => Number.isSafeInteger(value) && value >= 0)) {
+    throw new Error('Foundry Local returned an invalid request preflight result.');
+  }
+  if (!result.fits) {
+    throw new Error(
+      `Request exceeds the model's structural context limit by ${result.deficitTokens} tokens (requires ${result.requiredTokens}, limit ${result.contextLimitTokens}).`,
     );
   }
 }
@@ -60,6 +95,8 @@ export function mergeSessionCleanupFailure (primaryFailure, cleanupFailure) {
 // Zero is the OpenAI-defined neutral value for both penalties, so omitting it preserves
 // semantics. Foundry Local 2.0.1 misapplies an explicitly serialized frequency_penalty of 0
 // for some models (notably Gemma 4 E2B), causing otherwise normal replies to degenerate.
+// Foundry Local 2.1.0 rejects a nonzero frequency_penalty in chat_completions_converter.cc
+// because ORT repetition_penalty has different semantics. Never send frequency_penalty.
 export function normalizeChatPenalty (value) {
   return Number.isFinite(value) && value !== 0 ? value : undefined;
 }
@@ -192,11 +229,13 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
   const supportsMultipart = typeof Item.message === 'function'
     && typeof Item.imageFromData === 'function';
   const settings = {};
+  const assertFrequencyPenaltySupported = () => {
+    const error = unsupportedFrequencyPenaltyMessage(settings.frequencyPenalty);
+    if (error) throw new Error(error);
+  };
   const serializeSettings = () => {
     const out = {};
-    const frequencyPenalty = normalizeChatPenalty(settings.frequencyPenalty);
     const presencePenalty = normalizeChatPenalty(settings.presencePenalty);
-    if (frequencyPenalty !== undefined) out.frequency_penalty = frequencyPenalty;
     if (Number.isFinite(settings.maxTokens)) out.max_tokens = settings.maxTokens;
     if (presencePenalty !== undefined) out.presence_penalty = presencePenalty;
     if (Number.isFinite(settings.temperature)) out.temperature = settings.temperature;
@@ -209,9 +248,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
   };
   const serializeNativeSettings = () => {
     const search = {};
-    const frequencyPenalty = normalizeChatPenalty(settings.frequencyPenalty);
     const presencePenalty = normalizeChatPenalty(settings.presencePenalty);
-    if (frequencyPenalty !== undefined) search.frequencyPenalty = frequencyPenalty;
     if (Number.isFinite(settings.maxTokens)) search.maxOutputTokens = settings.maxTokens;
     if (presencePenalty !== undefined) search.presencePenalty = presencePenalty;
     if (Number.isFinite(settings.temperature)) search.temperature = settings.temperature;
@@ -294,6 +331,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
     settings,
     supportsMultipart,
     async completeChat (messages, tools, options = {}) {
+      assertFrequencyPenaltySupported();
       const multipart = hasMultipartMessages(messages);
       const requestJson = {
         model: chatModel.id,
@@ -311,7 +349,11 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
           ? buildNativeRequest(messages, tools, options)
           : new Request().addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
         session = new ChatSession(chatModel);
-        const response = await session.processRequest(request);
+        await preflightNativeRequest(session, request, options.signal);
+        const response = await session.processRequest(
+          request,
+          options.signal ? { signal: options.signal } : undefined,
+        );
         if (multipart) {
           result = nativeResult(response);
         } else {
@@ -322,16 +364,19 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
           result = parseOpenAiJson(text, `Chat completion for model '${chatModel.id}'`);
         }
       } catch (err) {
-        failure = new Error(
-          `Chat completion failed for model '${chatModel.id}': ${err?.message || err}`,
-          { cause: err },
-        );
+        failure = err?.name === 'AbortError'
+          ? err
+          : new Error(
+            `Chat completion failed for model '${chatModel.id}': ${err?.message || err}`,
+            { cause: err },
+          );
       }
       failure = disposeSession(session, failure);
       if (failure) throw failure;
       return result;
     },
     completeStreamingChat (messages, tools, options = {}) {
+      assertFrequencyPenaltySupported();
       const multipart = hasMultipartMessages(messages);
       const requestJson = {
         model: chatModel.id,
@@ -347,17 +392,22 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
           let session;
           let failure = null;
           let receivedOutput = false;
+          let iterationCompleted = false;
+          let responsePromise = null;
           try {
             const request = multipart
               ? buildNativeRequest(messages, tools, options)
               : new Request().addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
             session = new ChatSession(chatModel);
-            const stream = session.processStreamingRequest(request);
-            const responsePromise = multipart ? Promise.resolve(stream.response) : null;
-            // A consumer may stop iteration at a yield. Attach a rejection handler immediately
-            // so the SDK's terminal response cannot become an unhandled rejection while the
-            // generator unwinds and disposes the session.
-            responsePromise?.catch(() => {});
+            await preflightNativeRequest(session, request, options.signal);
+            const stream = session.processStreamingRequest(
+              request,
+              options.signal ? { signal: options.signal } : undefined,
+            );
+            responsePromise = Promise.resolve(stream.response);
+            // Handle rejection immediately; finally awaits this terminal response even after
+            // cancellation or an early consumer return before disposing the session.
+            responsePromise.catch(() => {});
             for await (const item of stream) {
               if (item?.type !== 'text' || item.textType === 'reasoning' || !item.text) continue;
               if (multipart) {
@@ -374,6 +424,9 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
                 yield parseOpenAiJson(item.text, `Streaming chat completion for model '${chatModel.id}'`);
               }
             }
+            iterationCompleted = true;
+            const response = await responsePromise;
+            assertNativeResponseSucceeded(response);
             if (!receivedOutput) {
               throw new Error(
                 multipart
@@ -382,8 +435,6 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
               );
             }
             if (multipart) {
-              const response = await responsePromise;
-              assertNativeResponseSucceeded(response);
               const usage = nativeUsage(response?.usage);
               yield {
                 choices: [{
@@ -409,6 +460,20 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
             // try/catch but still runs `finally`, so cleanup - and surfacing a cleanup
             // failure - only happens reliably from inside it, not just on normal
             // completion or a thrown error.
+            if (responsePromise) {
+              try {
+                await responsePromise;
+              } catch (responseError) {
+                if (!failure && iterationCompleted) {
+                  failure = responseError?.name === 'AbortError'
+                    ? responseError
+                    : new Error(
+                        `Streaming chat completion failed for model '${chatModel.id}': ${responseError?.message || responseError}`,
+                        { cause: responseError },
+                      );
+                }
+              }
+            }
             failure = disposeSession(session, failure, {
               onDiagnostic,
               abortDiagnosticCode: 'chat-session-dispose-after-abort',

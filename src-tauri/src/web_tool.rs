@@ -87,7 +87,10 @@ fn trusted_helper_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
     if !canonical_script.starts_with(&canonical_base) {
         return Err("The web tool resolved outside Flint's trusted resource directory".to_string());
     }
-    Ok((canonical_script, canonical_base))
+    Ok((
+        crate::runtime_manager::node_compatible_path(&canonical_script)?,
+        crate::runtime_manager::node_compatible_path(&canonical_base)?,
+    ))
 }
 
 fn read_capped<R: Read>(mut reader: R, limit: usize) -> Result<Vec<u8>, String> {

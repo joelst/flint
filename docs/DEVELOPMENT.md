@@ -40,7 +40,12 @@ npm run verify:bundle
 
 Spike A (2026-08-10): MSI ~**54 MB** / NSIS ~**38 MB** with bundled Node (~+30 / +20 MB vs pre-spike 0.3.1 artifacts). Details: [spikes/node-bundle-spike.md](./spikes/node-bundle-spike.md).
 
-**CI:** `cargo check` and Tauri builds require `src-tauri/binaries/node-<triple>` to exist (`externalBin`). Workflows run `npm run ci:deps` (not plain `npm ci`) so the Foundry native cache is restored before staging Node.
+**CI:** `cargo check` and Tauri builds require `src-tauri/binaries/node-<triple>` to exist (`externalBin`) and `npm run stage:koffi` to create the native-binding resource tree. Workflows run `npm run ci:deps` (not plain `npm ci`) so the Foundry native cache is restored before staging Node. Before running Cargo directly, stage both Node and koffi; `tauri dev` and `tauri build` stage koffi automatically.
+
+On Windows x64, the staging tests also load the real native binding from an
+isolated flattened resource tree without `node_modules` or `NODE_PATH`.
+The sidecar resolves the bundled koffi entry beside it; development uses the
+installed dependency. A broken bundled binding is reported, not bypassed.
 
 `ensure:foundry` prefers the **build target**, not the host:
 
@@ -59,6 +64,7 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 | `npm install` | Install dependencies (+ host Foundry native cores) |
 | `npm run ensure:foundry` | Ensure Foundry cores for host or build target |
 | `npm run ensure:node` | Download/stage bundled Node for Tauri externalBin |
+| `npm run stage:koffi` | Stage native koffi packages required by Tauri resources and Windows x64 CUDA setup |
 | `npm run smoke:node` | Prove staged Node 22 + foundry-local-sdk native load |
 | `npm run tauri dev` | Dev app (hot reload + sidecar) |
 | `npm run check` | Svelte/TS check |
@@ -73,6 +79,18 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 | `npm run verify:release -- 0.9.0 --channel=stable` | Verify package/Tauri/Cargo versions and stable-channel metadata |
 | `npm run run:built` | Launch a release build without installing MSI |
 | `cd src-tauri && cargo check` | Rust/Tauri compile check |
+
+For a target-specific temporary-version build, pass the same version to the
+strict verifier:
+
+```powershell
+npm run verify:bundle -- --target x86_64-pc-windows-msvc --require-build --version 0.11.0
+```
+
+Without `--version`, the verifier checks the tracked `package.json` version.
+Pass `--packaged-root <release-dir>` to `scripts/byom-gateway-live.mjs` to
+exercise the staged `node.exe`, sidecar, and SDK with an isolated model cache.
+This tests staged resources, not the installed GUI or an installer signature.
 
 ---
 
@@ -139,7 +157,7 @@ config is removed after the build, and `package.json`, `src-tauri/tauri.conf.jso
 `src-tauri/Cargo.toml` remain unchanged:
 
 ```bash
-npm run tauri:build:local:version -- 0.10.0
+npm run tauri:build:local:version -- 0.11.0
 ```
 
 Forward additional Tauri build options after the version, for example
@@ -211,23 +229,24 @@ on every development OS. SVG generation is intentionally excluded.
 ## Screenshots
 
 README and docs screenshots go stale after UI changes (nav labels, theme, branding).
-The Windows and macOS PNGs in `images/` were recaptured for the 0.10.0 candidate.
+Use the next release version when recapturing them; do not claim a version for
+existing PNGs without inspecting them.
 
 To refresh them:
 
 1. Launch the dev build with the version the screenshots should show. Help and
    Settings render `VITE_FLINT_BUILD_VERSION` when it is set, and otherwise
-   `package.json`. Set it to the next release (currently `0.10.0`) in the same
+   `package.json`. Set it to the next release (currently `0.11.0`) in the same
    terminal that starts the dev build, before Vite starts. That does not change
    `package.json`, `src-tauri/tauri.conf.json`, or `src-tauri/Cargo.toml`.
    On Windows, also enable WebView2's remote debugging port so its content can be
    driven over the Chrome DevTools Protocol (CDP):
    ```powershell
-   $env:VITE_FLINT_BUILD_VERSION = "0.10.0"
+   $env:VITE_FLINT_BUILD_VERSION = "0.11.0"
    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
    .\build-local.ps1 -Command "npm run tauri dev"
    ```
-   On macOS, run `VITE_FLINT_BUILD_VERSION=0.10.0 npm run tauri dev`. The terminal
+   On macOS, run `VITE_FLINT_BUILD_VERSION=0.11.0 npm run tauri dev`. The terminal
    that invokes the capture script needs Accessibility and Screen Recording
    permission.
 2. Once the window is visible and connected, in another terminal run:

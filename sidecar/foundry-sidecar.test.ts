@@ -6,8 +6,9 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { killAndWait } from './test-process.js';
+import { PINNED_FOUNDRY_CORE_VERSION, PINNED_FOUNDRY_SDK_VERSION } from './foundry-runtime-pin.js';
 import { TINY_PNG_DATA_URL } from './test-fixtures/images';
 
 function closeServer(server: Server): Promise<void> {
@@ -158,6 +159,10 @@ describe('foundry-sidecar protocol basics', () => {
       const cancel = await waitForLine(proc, (msg) => msg.id === 1);
       expect(cancel.ok).toBe(true);
 
+      proc.stdin.write(`${JSON.stringify({ id: 8, cmd: 'cancelDownload', requestId: 123 })}\n`);
+      const cancelDownload = await waitForLine(proc, (msg) => msg.id === 8);
+      expect(cancelDownload).toMatchObject({ ok: true, result: { accepted: false } });
+
       proc.stdin.write(`${JSON.stringify({ id: 2, cmd: 'unknownCommand' })}\n`);
       const unknown = await waitForLine(proc, (msg) => msg.id === 2);
       expect(String(unknown.error)).toContain('Unknown command');
@@ -246,14 +251,16 @@ describe('foundry-sidecar protocol basics', () => {
     writeFileSync(loaderPath, `
       const sdk = \`
         class FakeModel {
-          constructor() { this.id = 'fake-variant'; this.loaded = false; }
+          constructor(provider = 'CPUExecutionProvider') {
+            this.id = 'fake-variant'; this.loaded = false; this.provider = provider;
+          }
           async load() {
             process.stdout.write('fake model load stdout noise\\\\n');
             console.log('fake model load console noise');
             this.loaded = true;
           }
           isLoaded() { return this.loaded; }
-          getExecutionProvider() { return 'CPUExecutionProvider'; }
+          getExecutionProvider() { return this.provider; }
           createChatClient() {
             return {
               async *completeStreamingChat() {
@@ -275,9 +282,9 @@ describe('foundry-sidecar protocol basics', () => {
         class FakeManager {
           constructor() {
             this.catalog = {
-              getModel: async () => {
+              getModel: async (alias) => {
                 process.stdout.write('fake catalog getModel stdout noise\\\\n');
-                return new FakeModel();
+                return new FakeModel(alias === 'unknown-provider-model' ? null : 'CPUExecutionProvider');
               },
               getModels: async () => [],
             };
@@ -330,6 +337,7 @@ describe('foundry-sidecar protocol basics', () => {
       })}\n`);
       expect((await waitForLine(proc, (msg) => msg.id === 40)).ok).toBe(true);
 
+      const streamedDonePromise = waitForLine(proc, (msg) => msg.id === 41 && !msg.stream);
       proc.stdin.write(`${JSON.stringify({
         id: 41,
         cmd: 'chatCompletion',
@@ -338,14 +346,6 @@ describe('foundry-sidecar protocol basics', () => {
         stream: true,
       })}\n`);
       await waitForLine(proc, (msg) => msg.id === 41 && msg.stream === true);
-      const cancelAckPromise = waitForLine(proc, (msg) => msg.id === 44);
-      const streamedDonePromise = waitForLine(proc, (msg) => msg.id === 41 && msg.ok === true);
-      void cancelAckPromise.catch(() => {});
-      void streamedDonePromise.catch(() => {});
-      proc.stdin.write(`${JSON.stringify({
-        id: 44, cmd: 'cancelChatRequest', requestId: 41
-      })}\n`);
-      expect((await cancelAckPromise).ok).toBe(true);
       const streamed = await streamedDonePromise;
       expect(streamed.ok).toBe(true);
       expect(streamed.result.nativeStreaming).toBe(true);
@@ -389,6 +389,19 @@ describe('foundry-sidecar protocol basics', () => {
         tokensOut: 3,
         executionProvider: 'CPUExecutionProvider',
       });
+      proc.stdin.write(`${JSON.stringify({ id: 45, cmd: 'load', alias: 'unknown-provider-model' })}\n`);
+      const unknownProviderLoad = await waitForLine(proc, (msg) => msg.id === 45);
+      expect(unknownProviderLoad).toMatchObject({
+        ok: true,
+        result: { acceleration: { active: null } },
+      });
+      const logDir = join(homeDir, '.flint', 'logs');
+      const logFile = readdirSync(logDir).find((name) => name.endsWith('.log'));
+      expect(logFile).toBeDefined();
+      await vi.waitFor(
+        () => expect(readFileSync(join(logDir, logFile!), 'utf8')).toContain('"accel":"unknown"'),
+        { timeout: 5000 }
+      );
       nonJsonStdout.stop();
       expect(nonJsonStdout.lines).toEqual([]);
       expect(stderrText).toContain('FLINT_DIAG info fake model load console noise');
@@ -1014,7 +1027,7 @@ describe('foundry-sidecar protocol basics', () => {
         maxTokens: 123,
         topP: 0.6,
         topK: 30,
-        frequencyPenalty: 0.4,
+        frequencyPenalty: 0,
         presencePenalty: -0.4,
         randomSeed: 12,
       })}\n`);
@@ -1025,7 +1038,6 @@ describe('foundry-sidecar protocol basics', () => {
         maxTokens: 123,
         topP: 0.6,
         topK: 30,
-        frequencyPenalty: 0.4,
         presencePenalty: -0.4,
         randomSeed: 12,
       });
@@ -1056,7 +1068,7 @@ describe('foundry-sidecar protocol basics', () => {
         maxTokens: 55,
         topP: 0.5,
         topK: 10,
-        frequencyPenalty: -0.5,
+        frequencyPenalty: 0,
         presencePenalty: 0.5,
         randomSeed: 3,
       })}\n`);
@@ -1069,7 +1081,6 @@ describe('foundry-sidecar protocol basics', () => {
         maxTokens: 55,
         topP: 0.5,
         topK: 10,
-        frequencyPenalty: -0.5,
         presencePenalty: 0.5,
         randomSeed: 3,
       });
@@ -1218,13 +1229,17 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     holdDownload = false,
     holdUnload = false,
     failUnload = false,
+    downloadCached = true,
+    recordCacheRemoval = false,
   ) {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-gateway-fence-home-'));
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
     const corePath = join(homeDir, 'fake-core.dylib');
+    const cacheRemovalMarker = join(homeDir, 'cache-removal-called');
     writeFileSync(corePath, '');
     writeFileSync(loaderPath, `
       const sdk = \`
+        import { writeFileSync } from 'node:fs';
         class FakeModel {
           constructor() { this.id = 'fake-variant'; this.loaded = false; }
           async load() {
@@ -1239,10 +1254,13 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
             this.loaded = true;
           }
           isLoaded() { return this.loaded; }
-          get isCached() { return true; }
-          async download() {
+          get isCached() { return ${JSON.stringify(downloadCached)}; }
+          ${recordCacheRemoval
+            ? `removeFromCache() { writeFileSync(process.env.FLINT_TEST_CACHE_REMOVAL_MARKER, ''); }`
+            : ''}
+          async download(_progressCallback, signal) {
             if (${JSON.stringify(holdDownload)}) {
-              await fetch('http://127.0.0.1:${upstreamPort}/hold-download');
+              await fetch('http://127.0.0.1:${upstreamPort}/hold-download', { signal });
             }
           }
           async unload() {
@@ -1319,9 +1337,10 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
         USERPROFILE: homeDir,
         FLINT_FOUNDRY_CORE_PATH: corePath,
         FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS: String(drainMs),
+        FLINT_TEST_CACHE_REMOVAL_MARKER: cacheRemovalMarker,
       },
     });
-    return { proc, homeDir };
+    return { proc, homeDir, cacheRemovalMarker };
   }
 
   /** Starts the sidecar and its gateway, returning the process, its temp home dir (for
@@ -1335,8 +1354,10 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     holdDownload = false,
     holdUnload = false,
     failUnload = false,
+    downloadCached = true,
+    recordCacheRemoval = false,
   ) {
-    const { proc, homeDir } = spawnGatewaySidecar(
+    const { proc, homeDir, cacheRemovalMarker } = spawnGatewaySidecar(
       upstreamPort,
       drainMs,
       catalogModels,
@@ -1345,6 +1366,8 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       holdDownload,
       holdUnload,
       failUnload,
+      downloadCached,
+      recordCacheRemoval,
     );
     await waitForLine(proc, (msg) => msg.ready === true);
     proc.stdin.write(`${JSON.stringify({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
@@ -1356,7 +1379,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     const started = await waitForLine(proc, (msg) => msg.id === 2, 15000);
     if (!started.ok) throw new Error(`startService failed: ${started.error}`);
     const gatewayPort = Number(new URL(started.endpoint).port);
-    return { proc, homeDir, gatewayPort };
+    return { proc, homeDir, gatewayPort, cacheRemovalMarker };
   }
 
   it('rejects a new gateway request while exclusive, and admits again after release', async () => {
@@ -1555,6 +1578,67 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
       expect(exclusiveSettledAt).toBeGreaterThanOrEqual(inFlightSettledAt);
     } finally {
+      if (proc) await killAndWait(proc);
+      await closeServer(upstream);
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it.each([
+    { cacheState: 'partial', downloadCached: false, expectCacheRemoval: true },
+    { cacheState: 'verified', downloadCached: true, expectCacheRemoval: false },
+  ])('cancels a native model download and handles $cacheState cache safely', async ({
+    downloadCached,
+    expectCacheRemoval,
+  }) => {
+    let downloadStartedResolve: (() => void) | null = null;
+    const downloadStarted = new Promise<void>((resolve) => { downloadStartedResolve = resolve; });
+    let releaseUpstream: (() => void) | null = null;
+    const upstreamHeld = new Promise<void>((resolve) => { releaseUpstream = resolve; });
+    const upstream = createServer((req, res) => {
+      if (req.url !== '/hold-download') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      downloadStartedResolve?.();
+      void upstreamHeld.then(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+      });
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(
+        upstreamPort, 200, [], false, null, true, false, false, downloadCached, true,
+      );
+      proc = started.proc;
+      homeDir = started.homeDir;
+
+      const downloadDone = waitForLine(proc, (msg) => msg.id === 75, 3000);
+      proc.stdin.write(`${JSON.stringify({ id: 75, cmd: 'download', alias: 'fake-model' })}\n`);
+      await downloadStarted;
+
+      proc.stdin.write(`${JSON.stringify({ id: 76, cmd: 'cancelDownload', requestId: 75 })}\n`);
+      const cancel = await waitForLine(proc, (msg) => msg.id === 76, 3000);
+      expect(cancel).toMatchObject({ ok: true, result: { accepted: true } });
+      const downloadResult = await downloadDone;
+      expect(downloadResult).toMatchObject({
+        error: 'Model download was cancelled after native work settled.',
+        certainty: 'cancelled',
+      });
+      expect(existsSync(started.cacheRemovalMarker)).toBe(expectCacheRemoval);
+
+      proc.stdin.write(`${JSON.stringify({ id: 77, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+      expect(await waitForLine(proc, (msg) => msg.id === 77, 3000)).toMatchObject({
+        ok: true,
+        result: { exclusive: true, drained: true },
+      });
+    } finally {
+      releaseUpstream?.();
       if (proc) await killAndWait(proc);
       await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
@@ -2598,6 +2682,19 @@ describe('foundry-sidecar command schema validation', () => {
     }
   });
 
+  it('rejects unsupported nonzero frequency penalties before initialization', async () => {
+    proc.stdin.write(`${JSON.stringify({
+      id: 4650,
+      cmd: 'chatCompletion',
+      model: 'm',
+      messages: [],
+      frequencyPenalty: 0.4,
+    })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === 4650);
+    expect(String(res.error)).toContain('does not support a nonzero frequency penalty');
+    expect(String(res.error)).toContain('Set it to 0');
+  });
+
   it('rejects chatCompletion generation parameters outside their documented ranges', async () => {
     const cases: [Record<string, unknown>, RegExp][] = [
       [{ temperature: -0.1 }, /temperature.*between 0 and 2/],
@@ -2975,6 +3072,9 @@ describe('foundry-sidecar error propagation and resilience', () => {
     expect(res.ok).toBe(true);
     expect(res.result.initialized).toBe(false);
     expect(res.result.modelLoaded).toBe(false);
+    expect(res.result.foundrySdkPin).toBe(PINNED_FOUNDRY_SDK_VERSION);
+    expect(res.result.foundryCorePin).toBe(PINNED_FOUNDRY_CORE_VERSION);
+    expect(res.result.foundrySdkVersion).toBe(PINNED_FOUNDRY_SDK_VERSION);
   });
 
   it('getStatus reports benchmarkExclusive, reflecting setBenchmarkExclusive without requiring init', async () => {
@@ -3524,7 +3624,7 @@ describe('transcribeAudio AudioSession path', () => {
       language: 'en',
     });
     const res = await transcribed;
-    expect(res.error).toContain('Foundry Local SDK 2.0.1');
+    expect(res.error).toContain(`Foundry Local SDK ${PINNED_FOUNDRY_SDK_VERSION}`);
     expect(res.error).toContain('does not support audio processing');
     expect(events()).not.toContain('legacy-transcribe');
   }, 30000);
@@ -3795,7 +3895,7 @@ describe('chatCompletion ChatSession path', () => {
   //                           already are. Gating on the signal file (rather than a fixed
   //                           delay) makes the ordering deterministic instead of depending on
   //                           IPC round-trip speed on a loaded CI runner.
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-only-text-parts' | 'legacy-buffered-fixture' | 'legacy-buffered-only-fixture' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-finish-error' | 'session-stream-empty' | 'session-stream-finish-error' | 'session-stream-fixture' | 'session-stream-fixture-dispose-error' | 'session-stream-provider-cancel' | 'session-buffered-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-only-text-parts' | 'legacy-buffered-fixture' | 'legacy-buffered-only-fixture' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-finish-error' | 'session-stream-empty' | 'session-stream-finish-error' | 'session-stream-fixture' | 'session-stream-fixture-dispose-error' | 'session-stream-provider-cancel' | 'session-buffered-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel' | 'session-buffered-cancel' | 'session-stream-cancel';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only' || sdkMode === 'legacy-only-text-parts' || sdkMode === 'legacy-buffered-fixture' || sdkMode === 'legacy-buffered-only-fixture' || sdkMode === 'legacy-stream-only-fixture' || sdkMode === 'session-error-with-legacy';
     const legacyStreamOnly = sdkMode === 'legacy-stream-only-fixture';
@@ -3806,6 +3906,7 @@ describe('chatCompletion ChatSession path', () => {
       'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
       "const streamSteps = () => JSON.parse(fs.readFileSync(process.env.FLINT_TEST_STREAM_FIXTURE, 'utf8'));",
       "const awaitSignal = async () => { while (!fs.existsSync(process.env.FLINT_TEST_CANCEL_SIGNAL)) await new Promise((resolve) => setTimeout(resolve, 5)); };",
+      "const awaitAbort = async (signal) => { if (signal?.aborted) return; await new Promise((resolve) => signal?.addEventListener('abort', resolve, { once: true })); };",
       'class FakeModel {',
       "  constructor() { this.id = 'fake-variant'; this.loaded = false; }",
       "  async load() { const failure = streamSteps()[0]?.loadError; if (failure) { note('model-load-failed'); throw new Error(failure); } this.loaded = true; }",
@@ -3833,8 +3934,9 @@ describe('chatCompletion ChatSession path', () => {
       '    this.model = model;',
       '  }',
       `  dispose() { note('session-chat-disposed'); if (['session-dispose-error', 'session-error-dispose', 'session-stream-fixture-dispose-error'].includes(${JSON.stringify(sdkMode)})) throw new Error('native ChatSession disposal failed'); }`,
-      '  async processRequest(req) {',
+      '  async processRequest(req, options) {',
       "    note('session-chat');",
+      `    if (${JSON.stringify(sdkMode)} === 'session-buffered-cancel') { await awaitAbort(options?.signal); note('native-cancel-requested'); await awaitSignal(); note('native-cancel-settled'); const error = new Error('native request cancelled'); error.name = 'AbortError'; throw error; }`,
       `    if (['session-error', 'session-error-with-legacy', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native processRequest failed');`,
       `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
       `    if (${JSON.stringify(sdkMode)} === 'session-finish-error' && req.items[0]?.type === 'message') return { output: [{ type: 'message', role: 'assistant', content: 'partial native answer' }], finishReason: 'error' };`,
@@ -3854,7 +3956,8 @@ describe('chatCompletion ChatSession path', () => {
       '      }],',
       '    };',
       '  }',
-      '  processStreamingRequest(req) {',
+      '  processStreamingRequest(req, options) {',
+      `    if (${JSON.stringify(sdkMode)} === 'session-stream-cancel') return { async *[Symbol.asyncIterator]() { note('session-chat'); yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'partial native answer' } }] }) }; await awaitAbort(options?.signal); note('native-cancel-requested'); await awaitSignal(); note('native-cancel-settled'); const error = new Error('native stream cancelled'); error.name = 'AbortError'; throw error; }, response: Promise.resolve({ output: [] }) };`,
       `    if (req.items[0]?.type === 'message') return { async *[Symbol.asyncIterator]() { note('session-chat'); yield { type: 'text', textType: 'default', text: 'native ' }; yield { type: 'text', textType: 'default', text: 'vision reply' }; }, response: Promise.resolve({ output: [], usage: { promptTokens: 9, completionTokens: 3, totalTokens: 12 }, finishReason: ${JSON.stringify(sdkMode === 'session-stream-finish-error' ? 'error' : 'stop')} }) };`,
       '    const requestJson = JSON.parse(req.items[0].text);',
       '    note(`request:${JSON.stringify(requestJson)}`);',
@@ -3906,6 +4009,13 @@ describe('chatCompletion ChatSession path', () => {
   const send = (msg: object) => proc.stdin.write(`${JSON.stringify(msg)}\n`);
   const reply = (id: number) => waitForLine(proc, (msg) => msg.id === id, 10000);
   const setStreamSteps = (steps: object[]) => writeFileSync(streamFixturePath, JSON.stringify(steps));
+  const waitForChatEvent = async (event: string) => {
+    const deadline = Date.now() + 5000;
+    while (!events().includes(event)) {
+      if (Date.now() > deadline) throw new Error(`Timed out waiting for ${event}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
 
   async function startSidecar(sdkMode: ChatFakeSdkMode) {
     homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-chatsession-'));
@@ -4001,7 +4111,7 @@ describe('chatCompletion ChatSession path', () => {
       cmd: 'chatCompletion',
       model: 'fake-model',
       messages: [{ role: 'user', content: 'use the tool' }],
-      frequencyPenalty: 0.25,
+      frequencyPenalty: 0,
       presencePenalty: -0.5,
       topP: 0.8,
       topK: 12,
@@ -4024,7 +4134,7 @@ describe('chatCompletion ChatSession path', () => {
     expect(request.tools[0].function.name).toBe('read_status');
     expect(request.tool_choice).toEqual({ type: 'function', function: { name: 'read_status' } });
     expect(request.response_format).toEqual({ type: 'json_object' });
-    expect(request.frequency_penalty).toBe(0.25);
+    expect(request.frequency_penalty).toBeUndefined();
     expect(request.presence_penalty).toBe(-0.5);
     expect(request.top_p).toBe(0.8);
     expect(request.metadata).toEqual({ top_k: '12', random_seed: '17' });
@@ -4663,7 +4773,7 @@ describe('chatCompletion ChatSession path', () => {
     expect(events()).toContain('session-chat-disposed');
   }, 30000);
 
-  it('does not publish a partial tool call or terminal snapshot after cancellation', async () => {
+  it('drains late tool calls without publishing a successful terminal snapshot after cancellation', async () => {
     await startSidecar('session-stream-fixture');
     setStreamSteps([
       {
@@ -4714,11 +4824,96 @@ describe('chatCompletion ChatSession path', () => {
     expect((await cancelReply).ok).toBe(true);
     writeFileSync(cancelSignalPath, '');
     const res = await chatted;
-    expect(res.ok).toBe(true);
-    expect(res.result.choices[0].message.content).toBe('partial text');
-    expect(res.result.choices[0].message.tool_calls).toBeUndefined();
-    expect(res.result.choices[0].finish_reason).toBeNull();
+    expect(res.ok).not.toBe(true);
+    expect(res.certainty).toBe('cancelled');
+    expect(res.result).toBeUndefined();
+    expect(String(res.error)).toMatch(/native inference may have continued/);
     expect(events()).toContain('cancel-drained');
+  }, 30000);
+
+  it('cancels native one-shot chat and holds admission until the native request settles', async () => {
+    await startSidecar('session-buffered-cancel');
+    const chatted = reply(60);
+    send({
+      id: 60,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'cancel this request' }],
+    });
+    await waitForChatEvent('session-chat');
+
+    const cancelled = reply(61);
+    send({ id: 61, cmd: 'cancelChatRequest', requestId: 60 });
+    expect((await cancelled).ok).toBe(true);
+    await waitForChatEvent('native-cancel-requested');
+
+    let exclusiveSettled = false;
+    const exclusive = reply(62).then((value) => {
+      exclusiveSettled = true;
+      return value;
+    });
+    send({ id: 62, cmd: 'setBenchmarkExclusive', exclusive: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(exclusiveSettled).toBe(false);
+    expect(events()).not.toContain('native-cancel-settled');
+
+    writeFileSync(cancelSignalPath, '');
+    await expect(chatted).resolves.toMatchObject({
+      certainty: 'cancelled',
+      error: expect.stringMatching(/native request has settled/),
+    });
+    expect(events()).toContain('native-cancel-settled');
+    expect(events()).toContain('session-chat-disposed');
+    expect(await exclusive).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+
+    const released = reply(63);
+    send({ id: 63, cmd: 'setBenchmarkExclusive', exclusive: false });
+    expect((await released).ok).toBe(true);
+  }, 30000);
+
+  it('cancels native streaming chat and retains its activity lease through native settlement', async () => {
+    await startSidecar('session-stream-cancel');
+    const streamed = waitForLine(proc, (msg) => msg.id === 64 && msg.stream === true, 10000);
+    const chatted = waitForLine(proc, (msg) => msg.id === 64 && !msg.stream, 10000);
+    send({
+      id: 64,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'cancel this stream' }],
+      stream: true,
+    });
+    await streamed;
+
+    const cancelled = reply(65);
+    send({ id: 65, cmd: 'cancelChatRequest', requestId: 64 });
+    expect((await cancelled).ok).toBe(true);
+    await waitForChatEvent('native-cancel-requested');
+
+    let exclusiveSettled = false;
+    const exclusive = reply(66).then((value) => {
+      exclusiveSettled = true;
+      return value;
+    });
+    send({ id: 66, cmd: 'setBenchmarkExclusive', exclusive: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(exclusiveSettled).toBe(false);
+    expect(events()).not.toContain('native-cancel-settled');
+
+    writeFileSync(cancelSignalPath, '');
+    const result = await chatted;
+    expect(result).toMatchObject({
+      certainty: 'cancelled',
+      error: expect.stringMatching(/native inference may have continued/),
+    });
+    expect(result.ok).not.toBe(true);
+    expect(result.result).toBeUndefined();
+    expect(events()).toContain('native-cancel-settled');
+    expect(events()).toContain('session-chat-disposed');
+    expect(await exclusive).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+
+    const released = reply(67);
+    send({ id: 67, cmd: 'setBenchmarkExclusive', exclusive: false });
+    expect((await released).ok).toBe(true);
   }, 30000);
 
   it('rechecks cancellation after provider detection before publishing the terminal stream result', async () => {
@@ -4759,10 +4954,10 @@ describe('chatCompletion ChatSession path', () => {
     expect((await cancelReply).ok).toBe(true);
     writeFileSync(cancelSignalPath, '');
     const res = await chatted;
-    expect(res.ok).toBe(true);
-    expect(res.result.choices[0].message.content).toBe('partial text');
-    expect(res.result.choices[0].message.tool_calls).toBeUndefined();
-    expect(res.result.choices[0].finish_reason).toBeNull();
+    expect(res.ok).not.toBe(true);
+    expect(res.certainty).toBe('cancelled');
+    expect(res.result).toBeUndefined();
+    expect(String(res.error)).toMatch(/native inference may have continued/);
     expect(events()).toContain('session-chat-disposed');
   }, 30000);
 
@@ -4917,7 +5112,7 @@ describe('chatCompletion ChatSession path', () => {
 
   it('suppresses tool-call deltas that arrive after the stream is canceled', async () => {
     await startSidecar('session-stream-tool-cancel');
-    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok === true, 10000);
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && !msg.stream, 10000);
     send({
       id: 3,
       cmd: 'chatCompletion',
@@ -4935,14 +5130,9 @@ describe('chatCompletion ChatSession path', () => {
     await reply(4);
     writeFileSync(cancelSignalPath, '');
     const res = await chatted;
-    expect(res.ok).toBe(true);
-    expect(res.result.choices[0].message.tool_calls).toBeUndefined();
-    // The fixture's only finish_reason-bearing chunk ('tool_calls') is yielded after the
-    // cancel signal, alongside the suppressed tool_calls delta. Recording finish_reason
-    // from that drained chunk would report finish_reason: 'tool_calls' on a message with
-    // no tool_calls -- a self-contradictory result. Nothing legitimate arrived before
-    // cancellation, so finish_reason must stay unset.
-    expect(res.result.choices[0].finish_reason).toBeNull();
+    expect(res.ok).not.toBe(true);
+    expect(res.certainty).toBe('cancelled');
+    expect(res.result).toBeUndefined();
   }, 30000);
 
   it('fails a streaming ChatSession that emits no openai-json output', async () => {
@@ -5612,9 +5802,11 @@ describe('accelerator registration queue', () => {
     'let calls = 0;',
     'class FakeManager {',
     '  constructor() { this.catalog = { getModel: async () => null, getModels: async () => [] }; }',
-    "  discoverEps() { return [{ name: 'CUDAExecutionProvider', isRegistered: false }]; }",
+    // WebGPU, not CUDA: this checks registration serialization. A CUDA name would
+    // enter the Windows runtime-directory preparer before downloadAndRegisterEps.
+    "  discoverEps() { return [{ name: 'WebGpuExecutionProvider', isRegistered: false }]; }",
     '  async downloadAndRegisterEps(_names, onProgress) {',
-    "    onProgress?.('CUDAExecutionProvider', undefined);",
+    "    onProgress?.('WebGpuExecutionProvider', undefined);",
     '    const call = ++calls;',
     "    note('start ' + call);",
     '    await new Promise((resolve) => setTimeout(resolve, 300));',

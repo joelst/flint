@@ -32,6 +32,7 @@ import {
   type NodeRuntimeMode,
 } from './sidecar-paths';
 import { readRuntimeGpu } from './runtime-gpu';
+import { initPayloadForSharedHost, type SharedHostInitPayload } from './shared-host';
 import {
   createProgressStallWatchdog,
   type ProgressStallWatchdog,
@@ -194,7 +195,16 @@ export function getSidecarGeneration(): number {
 }
 let currentEndpoint: string | undefined = undefined;
 /** Init payload of the last successful init, so a crash-respawned sidecar can be re-inited. */
-let lastInitPayload: { appName: string; logLevel: string } | null = null;
+let lastInitPayload: SharedHostInitPayload | null = null;
+/** Latest shared-host choice. A toggle during init must survive the post-init payload write. */
+let sharedHostPreference = false;
+
+export function rememberSharedHostPreference(enabled: boolean): void {
+  sharedHostPreference = enabled;
+  if (lastInitPayload) {
+    lastInitPayload = initPayloadForSharedHost(lastInitPayload, sharedHostPreference);
+  }
+}
 /** Latest frontend catalog policy, preserved across sidecar crash recovery. */
 let lastInitRefreshCatalog = true;
 export function setAutomaticCatalogRefreshEnabled(enabled: boolean): void {
@@ -417,9 +427,14 @@ export interface FlintSDKState {
   audioLaneModel?: string;
   pool: PoolEntry[];
   poolStats: PoolStats | null;
+  foundrySdkVersion: string | null;
+  foundryCoreVersion: string | null;
+  foundrySdkPin: string | null;
+  foundryCorePin: string | null;
+  foundryRuntimeReported: boolean;
   /** CUDA GPU selector the live runtime child was spawned with; null until a child has started. */
   runtimeGpuApplied: string | null;
-  /** Whether live CUDA visibility is configured, inherited, or unrestricted. */
+  /** Whether live CUDA visibility comes from a Flint choice, the inherited environment, or CUDA default. */
   runtimeGpuAppliedSource: 'configured' | 'inherited' | 'unrestricted' | null;
 }
 
@@ -476,6 +491,11 @@ const initialState: FlintSDKState = {
   audioLaneModel: undefined,
   pool: [],
   poolStats: null,
+  foundrySdkVersion: null,
+  foundryCoreVersion: null,
+  foundrySdkPin: null,
+  foundryCorePin: null,
+  foundryRuntimeReported: false,
   runtimeGpuApplied: null,
   runtimeGpuAppliedSource: null,
 };
@@ -579,6 +599,22 @@ function reportRuntimeProgressStall(cmd: SidecarCommandName) {
 
 function registerCatalogProgressHandler(id: number, cmd: SidecarCommandName) {
   registerProgressHandler(id, undefined, () => reportRuntimeProgressStall(cmd));
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function rememberFoundryRuntime(result: any) {
+  if (!result || typeof result !== 'object') return;
+  if (!('foundrySdkVersion' in result) && !('foundrySdkPin' in result)) return;
+  updateState({
+    foundrySdkVersion: stringOrNull(result.foundrySdkVersion),
+    foundryCoreVersion: stringOrNull(result.foundryCoreVersion),
+    foundrySdkPin: stringOrNull(result.foundrySdkPin),
+    foundryCorePin: stringOrNull(result.foundryCorePin),
+    foundryRuntimeReported: true,
+  });
 }
 
 function updateState(partial: Partial<FlintSDKState>) {
@@ -1442,6 +1478,7 @@ async function establishManagerReadiness(refreshCatalog: boolean): Promise<void>
   // A local status probe proves the manager is usable without calling listModels(), whose
   // Foundry Local implementation contacts Microsoft's remote model catalog.
   const status = await sendInternal('getStatus');
+  rememberFoundryRuntime(status.result);
   if (status.result) {
     currentEndpoint = status.result.endpoint;
     const loadedAliases = new Set(
@@ -1468,7 +1505,7 @@ async function establishManagerReadiness(refreshCatalog: boolean): Promise<void>
 }
 
 async function performInit(
-  payload: { appName: string; logLevel: string },
+  payload: SharedHostInitPayload,
   refreshCatalog: boolean,
 ) {
   initializing = true;
@@ -1485,7 +1522,8 @@ async function performInit(
     const stillOurChild = () =>
       generation === sidecarGeneration && !!sidecarProcess && sidecarReady;
 
-    await sendInternal('init', payload);
+    const initPayload = initPayloadForSharedHost(payload, sharedHostPreference);
+    await sendInternal('init', initPayload);
     if (!stillOurChild()) {
       throw new Error('Sidecar was replaced during initialization');
     }
@@ -1493,7 +1531,8 @@ async function performInit(
     if (!stillOurChild()) {
       throw new Error('Sidecar was replaced during initialization');
     }
-    lastInitPayload = payload;
+    // Read the preference again. A checkbox change during this init belongs to the next spawn.
+    lastInitPayload = initPayloadForSharedHost(payload, sharedHostPreference);
     managerInstance = true;
     updateRuntime({ manager: 'ready', models: 'unknown' });
     // The previous child's residency is meaningless. Refresh the catalog when allowed; otherwise
@@ -1517,7 +1556,7 @@ async function performInit(
  * can all reach for recovery simultaneously, so every path must share one attempt.
  */
 function ensureInitialized(
-  payload: { appName: string; logLevel: string },
+  payload: SharedHostInitPayload,
   refreshCatalog = lastInitRefreshCatalog,
 ): Promise<void> {
   if (managerInstance && managerReady) return Promise.resolve();
@@ -1571,6 +1610,9 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
   if (typeof config.refreshCatalog === 'boolean') {
     lastInitRefreshCatalog = config.refreshCatalog;
   }
+  if (typeof config.useSharedHost === 'boolean') {
+    sharedHostPreference = config.useSharedHost;
+  }
   if (initializeSDKPromise) return initializeSDKPromise;
   initializeSDKPromise = performInitializeSDK(config).finally(() => {
     initializeSDKPromise = null;
@@ -1579,7 +1621,10 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
 }
 
 async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
-  const initPayload = { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' };
+  const initPayload = {
+    appName: config.appName || 'flint',
+    logLevel: config.logLevel || 'info',
+  };
   const refreshCatalog =
     typeof config.refreshCatalog === 'boolean'
       ? config.refreshCatalog
@@ -1610,6 +1655,7 @@ async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
       } else {
         // Adopt whatever is actually running — including a service started before this init.
         const status = await send('getStatus');
+        rememberFoundryRuntime(status.result);
         if (status.result?.endpoint) {
           currentEndpoint = status.result.endpoint;
           updateState({ endpoint: status.result.endpoint, serviceRunning: true });
@@ -1662,6 +1708,7 @@ export async function refreshModels(
 
     // Also refresh status first so loaded-model state is accurate for UI + actions
     const status = await send('getStatus');
+    rememberFoundryRuntime(status.result);
     if (status.result) {
       currentEndpoint = status.result.endpoint;
       updateState({
@@ -1777,19 +1824,42 @@ export async function downloadModel(
   onProgress?: (p: number) => void,
   variantId?: string,
   onStall?: () => void,
+  onAssignedRequestId?: (id: number) => void,
 ) {
   const payload: any = { alias: model.alias };
   if (variantId) payload.variantId = variantId;
-  await sendInternal('download', payload, undefined, (id: number) => {
-    registerProgressHandler(
-      id,
-      onProgress,
-      onStall ?? (() => reportRuntimeProgressStall('download')),
-    );
-  });
+  try {
+    await sendInternal('download', payload, undefined, (id: number) => {
+      registerProgressHandler(
+        id,
+        onProgress,
+        onStall ?? (() => reportRuntimeProgressStall('download')),
+      );
+      onAssignedRequestId?.(id);
+    });
+  } catch (error) {
+    if (error instanceof SidecarOperationError && error.certainty === 'cancelled') {
+      try {
+        await refreshModels();
+      } catch (refreshError) {
+        throw new SidecarOperationError(
+          'download',
+          'cancelled',
+          'The download was cancelled, but Flint could not refresh the model cache state.',
+          new AggregateError([error, refreshError]),
+        );
+      }
+    }
+    throw error;
+  }
   // Sidecar sends progress messages via stdout; onAssignedId registers the handler above.
   // The pending promise resolves only on the final reply (see stdout processing).
   await refreshModels();
+}
+
+export async function cancelDownload(requestId: number): Promise<boolean> {
+  const response = await send('cancelDownload', { requestId });
+  return response.result?.accepted === true;
 }
 
 export async function loadModel(
@@ -1960,6 +2030,11 @@ export async function reconcileBenchmarkExclusive(
  * during startup does not block the rest of initialization -- worst case, this page's first
  * `applyMemorySettings` call is itself silently skipped as stale, same as before this existed.
  */
+export async function refreshFoundryRuntimeAbout(): Promise<void> {
+  const status = await send('getStatus');
+  rememberFoundryRuntime(status.result);
+}
+
 export async function getLastAppliedMemorySettingsSeq(): Promise<number | null> {
   try {
     const status = await send('getStatus');
@@ -2313,6 +2388,7 @@ export async function ensureServiceRunning(
 
     try {
       const status = await send('getStatus');
+      rememberFoundryRuntime(status.result);
       const endpoint = status.result?.endpoint;
       if (status.result?.serviceRunning && endpoint) {
         assertAuthorized();
@@ -2943,6 +3019,7 @@ export function resetSDK() {
   managerInstance = null;
   managerReady = false;
   lastInitPayload = null; // a deliberate reset must not auto-re-init on the next send
+  sharedHostPreference = false;
   lastInitRefreshCatalog = true;
   currentEndpoint = undefined;
   runtimeQuitRequested = false;

@@ -70,7 +70,24 @@ pub fn run() {
                 return Err(error.into());
             }
             if std::env::var("FLINT_RUNTIME_SMOKE").ok().as_deref() == Some("1") {
+                use tauri::Listener as _;
+
                 let handle = app.handle().clone();
+                handle.listen("flint://runtime-error", |event| {
+                    eprintln!(
+                        "[flint] runtime smoke error: {}",
+                        event.payload().chars().take(2048).collect::<String>()
+                    );
+                });
+                handle.listen("flint://runtime-stderr", |event| {
+                    eprintln!(
+                        "[flint] runtime smoke sidecar stderr: {}",
+                        event.payload().chars().take(2048).collect::<String>()
+                    );
+                });
+                handle.listen("flint://runtime-exit", |event| {
+                    eprintln!("[flint] runtime smoke exit: {}", event.payload());
+                });
                 std::thread::spawn(move || {
                     use tauri::Manager as _;
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
@@ -83,6 +100,7 @@ pub fn run() {
                                 return;
                             }
                             runtime_state::RuntimePhase::Exited => {
+                                std::thread::sleep(std::time::Duration::from_secs(5));
                                 eprintln!("[flint] runtime smoke: runtime exited before ready");
                                 handle.exit(1);
                                 return;

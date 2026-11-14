@@ -27,6 +27,8 @@ import http from 'node:http';
 import { Transform, pipeline } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { normalizeChatResponse } from './chat-response.js';
+import { encodeEmbeddingResponse } from './embedding-encoding.js';
+import { unsupportedFrequencyPenaltyMessage } from './chat-parameter-policy.js';
 import { buildInferenceMetrics } from './inference-metrics.js';
 import {
   stripHopByHopHeaders,
@@ -53,6 +55,7 @@ const MULTIPART_MODEL_MAX_CHARS = 256;
 // Usage is a small top-level object in OpenAI chat responses. Keep its independent
 // inspection bounded when the response itself is too large to normalize.
 const MAX_USAGE_METRICS_CHARS = 64 * 1024;
+const MAX_EMBEDDING_RESPONSE_BYTES = 32 * 1024 * 1024;
 const multipartModel = Symbol('multipartModel');
 const multipartPrefix = Symbol('multipartPrefix');
 const multipartEnded = Symbol('multipartEnded');
@@ -123,6 +126,15 @@ function extractLeadingMultipartModel (body, boundary, ended = false) {
  * @param {(id: string) => Promise<{alias: string, variantId: string|null}|null>} options.resolve
  * @param {(alias: string, variantId: string|null) => Promise<string|null|void>} options.load
  *        resolves to the variant id actually loaded, which the replay needs to name
+ * @param {(req: object, res: object, body: string, model: object) => Promise<void>} [options.serveLocal]
+ *        serves a local registration through the in-process SDK when Foundry's HTTP router
+ *        cannot expose that registration
+ * @param {(req: object, res: object, body: string, model: object) => Promise<void>} [options.serveLocalEmbeddings]
+ *        serves embeddings for a local registration through the in-process SDK
+ * @param {(alias: string, variantId: string|null) => Promise<string|null>} [options.getLoadedModel]
+ *        returns the resident variant id without loading; used when remote autoload is disabled
+ * @param {() => Promise<object[]>} [options.listLocalModels]
+ *        returns cached local registrations to append to the native `/v1/models` listing
  * @param {(level: string, msg: string) => void} [options.log]
  * @param {(model: string, phase: 'start'|'end', booking?: unknown) => unknown} [options.onActivity]
  *        called around every request that names a model, so the owner can keep a model
@@ -148,6 +160,10 @@ export function createGateway (options) {
     upstreamPort,
     resolve,
     load,
+    serveLocal,
+    serveLocalEmbeddings,
+    getLoadedModel,
+    listLocalModels = async () => [],
     log = () => {},
     onActivity = () => {},
     onAccess = () => {},
@@ -217,6 +233,10 @@ export function createGateway (options) {
   }
 
   const server = http.createServer({ joinDuplicateHeaders: false }, (req, res) => {
+    res.once('finish', () => {
+      // The socket becomes idle after finish; shutdown's first idle sweep ran earlier.
+      if (closePromise) setImmediate(() => server.closeIdleConnections?.());
+    });
     handleRequest(req, res).catch(err => {
       log('warn', `Gateway request error: ${err?.message ?? err}`);
       if (!res.headersSent) {
@@ -273,7 +293,16 @@ export function createGateway (options) {
     const mayAutoload = autoload && autoloadAllowedFor(req);
     let buffered = await maybeBufferBody(req, res, mayAutoload);
     if (buffered === ABORTED) return;
-    if (buffered !== null) buffered = normalizeChatRequestPenalties(req.url, buffered);
+    if (buffered !== null) {
+      const normalized = normalizeChatRequestPenalties(req.url, buffered);
+      if (normalized.error) {
+        res.writeHead(400, { 'content-type': 'application/json', connection: 'close' });
+        res.end(openAiError(normalized.error, 'invalid_request_error'));
+        req.resume();
+        return;
+      }
+      buffered = normalized.body;
+    }
 
     // Populated only for chat completions, streamed or not, by parsing the response the
     // proxy is already decoding for SSE/JSON normalization — never a separate buffering pass.
@@ -388,10 +417,20 @@ export function createGateway (options) {
     // Upstream's rejection must name the model we sent, which is the rewritten id when a
     // rewrite was applied, not the client's own wording.
     const sentModel = known ?? requested;
+    const localFallbackMayBeNeeded = isChatCompletionPath(req.url) || isEmbeddingsPath(req.url);
+    let encodeEmbeddings = false;
+    if (isEmbeddingsPath(req.url) && buffered !== null) {
+      try {
+        encodeEmbeddings = JSON.parse(buffered)?.encoding_format === 'base64';
+      } catch {
+        // The native route remains responsible for reporting invalid JSON requests.
+      }
+    }
     const attempt = await forward(req, res, outgoing, {
-      captureNotLoaded: mayAutoload,
+      captureNotLoaded: mayAutoload || localFallbackMayBeNeeded,
       sentModel,
       metrics,
+      encodeEmbeddings,
     });
     if (attempt === SENT) return;
 
@@ -404,6 +443,9 @@ export function createGateway (options) {
       // Nothing to load: hand back what upstream said rather than inventing an error.
       return respondBuffered(res, attempt.status, attempt.headers, attempt.body);
     }
+    if (!mayAutoload && target.local !== true) {
+      return respondBuffered(res, attempt.status, attempt.headers, attempt.body);
+    }
     // `requested` can be a versionless variant id that aliases a resident model even when
     // the catalog resolves it to a different version. Move the activity lease to the exact
     // resolved id before loading so the switch does not mistake this request for work against
@@ -414,13 +456,43 @@ export function createGateway (options) {
 
     const gen = generation;
     let loadedId = null;
-    try {
-      loadedId = await loadOnce(target.alias, target.variantId);
-    } catch (err) {
-      log('warn', `Gateway autoload failed for ${target.alias}: ${err?.message ?? err}`);
-      return respondBuffered(res, attempt.status, attempt.headers, attempt.body);
+    if (target.local === true && !mayAutoload) {
+      loadedId = await getLoadedModel?.(target.alias, target.variantId) ?? null;
+      if (!loadedId) {
+        return respondBuffered(res, attempt.status, attempt.headers, attempt.body);
+      }
+    } else {
+      try {
+        loadedId = await loadOnce(target.alias, target.variantId);
+      } catch (err) {
+        log('warn', `Gateway autoload failed for ${target.alias}: ${err?.message ?? err}`);
+        return respondBuffered(res, attempt.status, attempt.headers, attempt.body);
+      }
     }
     if (gen !== generation || res.writableEnded || res.destroyed) return;
+
+    if (target.local === true) {
+      const canonical = typeof loadedId === 'string' && loadedId ? loadedId : target.variantId;
+      if (canonical && !setActivityModel(canonical)) {
+        return respondUnloading(req, res, canonical);
+      }
+      const localHandler = isEmbeddingsPath(req.url) ? serveLocalEmbeddings : serveLocal;
+      if (typeof localHandler !== 'function') {
+        res.writeHead(501, { 'content-type': 'application/json' });
+        res.end(openAiError('Local model inference is unavailable through this gateway.', 'server_error'));
+        return;
+      }
+      if (buffered === null) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(openAiError('A buffered JSON request is required for local model inference.', 'invalid_request_error'));
+        return;
+      }
+      await localHandler(req, res, buffered, {
+        ...target,
+        variantId: canonical ?? target.variantId,
+      });
+      return;
+    }
 
     // Name the variant that was actually loaded. Foundry routes only that exact id and
     // answers 404 to the alias even when the model is resident, so replaying the client's
@@ -441,15 +513,17 @@ export function createGateway (options) {
 
     // captureNotLoaded: false — the retry already happened, so a second rejection is the
     // real answer and belongs to the client rather than being swallowed again.
-    const second = await forward(req, res, replayBody, { captureNotLoaded: false, metrics });
+    const second = await forward(req, res, replayBody, {
+      captureNotLoaded: false, metrics, encodeEmbeddings,
+    });
     if (second !== SENT) {
       respondBuffered(res, attempt.status, attempt.headers, attempt.body);
     }
   }
 
   /**
-   * Read bounded JSON chat bodies so neutral penalties can always be normalized. Other JSON
-   * requests are buffered only when this caller may autoload and replay them.
+   * Read bounded JSON chat and embeddings bodies for local SDK fallback. Other JSON requests
+   * are buffered only when this caller may autoload and replay them.
    * @returns {Promise<string|null|typeof ABORTED>}
    */
   function maybeBufferBody (req, res, mayAutoload) {
@@ -484,13 +558,19 @@ export function createGateway (options) {
       contentLength: null,
       maxBytes: bufferedBodyLimit,
     });
-    if (isChatJson && Number.isFinite(declared) && declared > bufferedBodyLimit) {
+    const isEmbeddingsJson = isEmbeddingsPath(req.url) && shouldBufferBody({
+      method: req.method,
+      contentType: req.headers['content-type'],
+      contentLength: null,
+      maxBytes: bufferedBodyLimit,
+    });
+    if ((isChatJson || isEmbeddingsJson) && Number.isFinite(declared) && declared > bufferedBodyLimit) {
       res.writeHead(413, { 'content-type': 'application/json', connection: 'close' });
       res.end(openAiError('Request body too large.', 'invalid_request_error'));
       req.resume();
       return Promise.resolve(ABORTED);
     }
-    const wanted = bufferableJson && (isChatJson || mayAutoload);
+    const wanted = bufferableJson && (isChatJson || isEmbeddingsJson || mayAutoload);
     if (!wanted) return Promise.resolve(null);
 
     return new Promise(resolve2 => {
@@ -526,12 +606,14 @@ export function createGateway (options) {
   }
 
   function normalizeChatRequestPenalties (url, body) {
-    if (!isChatCompletionPath(url) || typeof body !== 'string') return body;
+    if (!isChatCompletionPath(url) || typeof body !== 'string') return { body, error: null };
     try {
       const parsed = JSON.parse(body);
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return body;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { body, error: null };
       let changed = false;
-      if (parsed.frequency_penalty === 0) {
+      if (Object.prototype.hasOwnProperty.call(parsed, 'frequency_penalty')) {
+        const frequencyPenaltyError = unsupportedFrequencyPenaltyMessage(parsed.frequency_penalty);
+        if (frequencyPenaltyError) return { body, error: frequencyPenaltyError };
         delete parsed.frequency_penalty;
         changed = true;
       }
@@ -539,9 +621,9 @@ export function createGateway (options) {
         delete parsed.presence_penalty;
         changed = true;
       }
-      return changed ? JSON.stringify(parsed) : body;
+      return { body: changed ? JSON.stringify(parsed) : body, error: null };
     } catch {
-      return body;
+      return { body, error: null };
     }
   }
 
@@ -621,7 +703,9 @@ export function createGateway (options) {
    * Returns SENT when the client response has already been written; otherwise a
    * `{ status, headers, body }` record the caller may replay after loading.
    */
-  function forward (req, res, buffered, { captureNotLoaded, sentModel = null, metrics = null }) {
+  function forward (req, res, buffered, {
+    captureNotLoaded, sentModel = null, metrics = null, encodeEmbeddings = false,
+  }) {
     return new Promise(resolve2 => {
       const headers = stripHopByHopHeaders(req.headers);
       // Upstream is addressed by us, never derived from the client's Host header — that
@@ -672,10 +756,28 @@ export function createGateway (options) {
         // rejection that names the model we sent is acted on below.
         const mayRetry = captureNotLoaded && buffered !== null && (status === 400 || status === 404);
         const isStatus = isStatusPath(req.url);
+        const isModelList = req.method === 'GET'
+          && canonicalGatewayPath(req.url) === '/v1/models';
 
         const isChatJson = isChatCompletionPath(req.url) && isJsonContentType(upRes.headers['content-type']);
         const isChatStream = isChatCompletionPath(req.url) && isEventStream(upRes.headers['content-type']);
-        if (!mayRetry && !isStatus && !isChatJson) {
+        const base64EmbeddingSuccess = encodeEmbeddings && req.method === 'POST'
+          && status >= 200 && status < 300;
+        const convertEmbeddings = base64EmbeddingSuccess
+          && isJsonContentType(upRes.headers['content-type']);
+        if (base64EmbeddingSuccess && !convertEmbeddings) {
+          upRes.destroy();
+          res.off('close', onClientClose);
+          respondBuffered(
+            res,
+            502,
+            { 'content-type': 'application/json' },
+            openAiError('Upstream embedding response was not JSON.', 'server_error'),
+          );
+          resolve2(SENT);
+          return;
+        }
+        if (!mayRetry && !isStatus && !isChatJson && !isModelList && !convertEmbeddings) {
           if (isChatStream) {
             delete outHeaders['content-length'];
             delete outHeaders['Content-Length'];
@@ -722,7 +824,12 @@ export function createGateway (options) {
             res,
             502,
             { 'content-type': 'application/json' },
-            openAiError('Upstream control response exceeded the gateway limit.', 'server_error'),
+            openAiError(
+              convertEmbeddings
+                ? 'Upstream embedding response exceeded the gateway limit.'
+                : 'Upstream control response exceeded the gateway limit.',
+              'server_error',
+            ),
           );
           resolve2(SENT);
         });
@@ -736,7 +843,12 @@ export function createGateway (options) {
           );
           resolve2(SENT);
         });
-        captureTimer = setTimeout(failBufferedResponseTimeout, bufferedResponseTimeout);
+        if (!convertEmbeddings) {
+          captureTimer = setTimeout(failBufferedResponseTimeout, bufferedResponseTimeout);
+        }
+        const responseLimit = convertEmbeddings
+          ? MAX_EMBEDDING_RESPONSE_BYTES
+          : bufferedResponseLimit;
         const declaredLength = Number(upRes.headers['content-length']);
         const bodyAllowed = req.method !== 'HEAD'
           && status !== 204
@@ -744,13 +856,13 @@ export function createGateway (options) {
           && (status < 100 || status >= 200);
         if (bodyAllowed
             && Number.isFinite(declaredLength)
-            && declaredLength > bufferedResponseLimit) {
+            && declaredLength > responseLimit) {
           failBufferedResponse();
           return;
         }
         upRes.on('data', c => {
           size += c.length;
-          if (size > bufferedResponseLimit) {
+          if (size > responseLimit) {
             failBufferedResponse();
             return;
           }
@@ -770,6 +882,66 @@ export function createGateway (options) {
 
           if (mayRetry && rejectionNames(modelRejection(status, body), sentModel)) {
             resolve2({ status, headers: outHeaders, body });
+            return;
+          }
+
+          if (convertEmbeddings) {
+            try {
+              respondBuffered(res, status, outHeaders, encodeEmbeddingResponse(body));
+            } catch (error) {
+              log('warn', `Could not encode upstream embeddings: ${error?.message ?? error}`);
+              respondBuffered(
+                res,
+                502,
+                { 'content-type': 'application/json' },
+                openAiError('Upstream embedding response was invalid.', 'server_error'),
+              );
+            }
+            resolve2(SENT);
+            return;
+          }
+
+          if (isModelList && status >= 200 && status < 300) {
+            void (async () => {
+              let finalBody = body;
+              let parsed;
+              try {
+                parsed = JSON.parse(body);
+              } catch {
+                parsed = null;
+              }
+              if (parsed && typeof parsed === 'object' && Array.isArray(parsed.data)) {
+                const localModels = await listLocalModels();
+                if (!Array.isArray(localModels)) {
+                  throw new TypeError('Local model listing did not return an array.');
+                }
+                const seen = new Set(parsed.data
+                  .map((entry) => typeof entry?.id === 'string' ? entry.id.toLowerCase() : '')
+                  .filter(Boolean));
+                const additions = localModels.filter((entry) =>
+                  entry && typeof entry.id === 'string'
+                  && entry.id.trim()
+                  && !seen.has(entry.id.toLowerCase()),
+                );
+                if (additions.length) {
+                  finalBody = JSON.stringify({ ...parsed, data: [...parsed.data, ...additions] });
+                }
+              }
+              if (Buffer.byteLength(finalBody) > bufferedResponseLimit) {
+                throw new Error('Merged model listing exceeded the gateway response limit.');
+              }
+              respondBuffered(res, status, outHeaders, finalBody);
+              resolve2(SENT);
+            })().catch((error) => {
+              log('warn', `Could not merge local models into the gateway listing: ${error?.message ?? error}`);
+              respondBuffered(
+                res,
+                502,
+                { 'content-type': 'application/json' },
+                openAiError('Could not build the local model listing.', 'server_error'),
+              );
+              resolve2(SENT);
+            });
             return;
           }
 
@@ -795,6 +967,10 @@ export function createGateway (options) {
 
   function isChatCompletionPath (url) {
     return canonicalGatewayPath(url) === '/v1/chat/completions';
+  }
+
+  function isEmbeddingsPath (url) {
+    return canonicalGatewayPath(url) === '/v1/embeddings';
   }
 
   function isEventStream (contentType) {

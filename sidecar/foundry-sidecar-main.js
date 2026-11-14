@@ -23,6 +23,7 @@ import { annotateVariantUpdates } from './model-updates.js';
 import { loadModelWithDiagnostic } from './model-load-diagnostic.js';
 import { mergeAcceleratorDevices, vendorFromName } from './accelerator-merge.js';
 import { normalizeTextPartsForLegacyClient, selectChatTransport } from './chat-transport.js';
+import { unsupportedFrequencyPenaltyMessage } from './chat-parameter-policy.js';
 import {
   createSessionChatClient,
   createSessionEmbeddingClient,
@@ -37,6 +38,8 @@ import {
   buildModelIndex,
   isCachedModel,
   isLocalCatalogEntry,
+  localRegistrationInfo,
+  mergeLocalRegistrations,
   normalizeCachedModels,
   normalizeCatalogModels,
   resolveModelId,
@@ -56,7 +59,11 @@ import { createModelActivityFence } from './model-activity-fence.js';
 import {
   applyPreferredExecutionProvider as applyPreferredExecutionProviderTo,
 } from './execution-provider.js';
-import { rebuildBrokenExecutionProviders, removeProviderCache } from './execution-provider-cache.js';
+import {
+  providerCacheDirectory,
+  rebuildBrokenExecutionProviders,
+  removeProviderCache,
+} from './execution-provider-cache.js';
 import {
   createCatalogRegistrationGate,
   registerDiscoveredExecutionProviders,
@@ -93,7 +100,16 @@ import {
   isInsideRoot,
   TEMPLATE_PRESETS,
   OWNERSHIP_MARKER,
+  localModelTask,
 } from './byom-import.js';
+import {
+  ensureRegisteredLocalModel,
+  linkedLocalRegistrationTargets,
+  lookupLocalAfterPublicMiss,
+  localRegistrationDeletePlan,
+  ownedLocalRegistrationTargets,
+  removeLocalRegistrationAssets,
+} from './local-model-registration.js';
 import { createAsyncLogWriter } from './async-log-writer.js';
 import { normalizeChatResponse } from './chat-response.js';
 import {
@@ -106,9 +122,16 @@ import {
 import { buildInferenceMetrics } from './inference-metrics.js';
 import { summarizeCacheInventory } from './cache-inventory.js';
 import { createHealthRing } from './health-ring.js';
-import { foundryRuntimePinWarning } from './foundry-runtime-pin.js';
+import {
+  foundryRuntimePinWarning,
+  PINNED_FOUNDRY_CORE_VERSION,
+  PINNED_FOUNDRY_SDK_VERSION,
+} from './foundry-runtime-pin.js';
+import { prepareCudaRuntime } from './cuda-runtime-path.js';
+import { createFoundryManager, foundryManagerCreateConfig } from './foundry-manager-config.js';
 import { writeProtocolLine } from './protocol-stdout.js';
 import { createModelOperationQueue } from './model-operation-queue.js';
+import { encodeEmbedding } from './embedding-encoding.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -163,6 +186,22 @@ function benchmarkDrainOperationsOutstanding() {
   return operationAdmission.snapshot().some((op) => BENCHMARK_DRAIN_COMMANDS.has(op.command));
 }
 
+async function runLocalCatalogMutation(mutate, operation, onProgress) {
+  const gate = acceleratorGate();
+  if (!gate) {
+    throw new Error(`Cannot perform ${operation}: initialize the Foundry runtime first`);
+  }
+  const { result } = await gate.mutateAndCommit(
+    mutate,
+    (error) => {
+      log('warn', `Catalog snapshot read failed after ${operation}: ${error?.message ?? error}`);
+    },
+    onProgress,
+    { confirmCatalogCommit: false },
+  );
+  return result;
+}
+
 function downloadInFlight() {
   return operationAdmission.snapshot().some((op) => op.command === 'download');
 }
@@ -196,7 +235,7 @@ let activeLogLevel = 'info';
 const KNOWN_COMMANDS = new Set([
   'init', 'setLogLevel', 'startService', 'stopService', 'stopAndUnload', 'shutdownRuntime', 'getStatus',
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
-  'chatCompletion', 'cancelChatRequest', 'transcribeAudio', 'embedTexts',
+  'chatCompletion', 'cancelDownload', 'cancelChatRequest', 'transcribeAudio', 'embedTexts',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
   'poolStatus', 'getAccessLog', 'getHealthRing',
   'getCacheInventory',
@@ -210,12 +249,13 @@ const KNOWN_COMMANDS = new Set([
 // Per-command type requirements. Keys are required or optional field names; values are:
 // 'number', 'string' (any string), 'non-empty-string', 'array'.
 const FIELD_TYPES = {
-  init:              { appName: 'non-empty-string', logLevel: 'non-empty-string' },
+  init:              { appName: 'non-empty-string', logLevel: 'non-empty-string', useSharedHost: 'boolean' },
   setLogLevel:       { level: 'non-empty-string' },
   startService:      { port: 'number', bindAddress: 'string', gateway: 'boolean', deferCatalogRead: 'boolean' },
   stopAndUnload:     { drainTimeoutMs: 'number' },
   shutdownRuntime:   { drainTimeoutMs: 'number' },
   download:          { alias: 'non-empty-string', variantId: 'non-empty-string' },
+  cancelDownload:    { requestId: 'number' },
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
   unload:            { alias: 'non-empty-string', ifIdle: 'boolean' },
   deleteModel:       { alias: 'non-empty-string', variantId: 'non-empty-string' },
@@ -255,7 +295,7 @@ const VALID_LANES = new Set(['chat', 'audio']);
 // Each entry lists required fields and all allowed optional fields.
 // Payloads with unknown fields are rejected to prevent injection attacks.
 const COMMAND_SCHEMA = {
-  init:               { required: ['appName', 'logLevel'], optional: [] },
+  init:               { required: ['appName', 'logLevel'], optional: ['useSharedHost'] },
   setLogLevel:        { required: ['level'], optional: [] },
   startService:       { required: ['port'], optional: ['alias', 'preferredEp', 'bindAddress', 'gateway', 'deferCatalogRead'] },
   stopService:        { required: [], optional: [] },
@@ -264,6 +304,7 @@ const COMMAND_SCHEMA = {
   getStatus:          { required: [], optional: [] },
   listModels:         { required: [], optional: [] },
   download:           { required: ['alias'], optional: ['variantId'] },
+  cancelDownload:     { required: ['requestId'], optional: [] },
   load:               { required: ['alias'], optional: ['lane', 'variantId'] },
   unload:             { required: ['alias'], optional: ['lane', 'ifIdle'] },
   deleteModel:        { required: ['alias'], optional: ['variantId'] },
@@ -498,6 +539,8 @@ function validateCommand(cmd, payload) {
     if (typeof payload.frequencyPenalty === 'number' && (!Number.isFinite(payload.frequencyPenalty) || payload.frequencyPenalty < -2 || payload.frequencyPenalty > 2)) {
       return `Command "chatCompletion" field "frequencyPenalty" must be between -2 and 2`;
     }
+    const frequencyPenaltyError = unsupportedFrequencyPenaltyMessage(payload.frequencyPenalty);
+    if (frequencyPenaltyError) return frequencyPenaltyError;
     if (typeof payload.presencePenalty === 'number' && (!Number.isFinite(payload.presencePenalty) || payload.presencePenalty < -2 || payload.presencePenalty > 2)) {
       return `Command "chatCompletion" field "presencePenalty" must be between -2 and 2`;
     }
@@ -594,7 +637,10 @@ function acceleratorGate() {
   if (!catalogRegistrationGate) {
     catalogRegistrationGate = createCatalogRegistrationGate((progress, options) => {
       if (!manager || typeof manager.downloadAndRegisterEps !== 'function') return null;
-      return registerDiscoveredExecutionProviders(manager, progress, options);
+      return registerDiscoveredExecutionProviders(manager, progress, {
+        ...options,
+        prepareCudaRuntime: options?.prepareCudaRuntime ?? prepareCudaRuntimeForSidecar,
+      });
     }, () => {
       const catalog = manager?.catalog;
       if (!catalog || typeof catalog.getModels !== 'function') {
@@ -604,6 +650,13 @@ function acceleratorGate() {
     });
   }
   return catalogRegistrationGate;
+}
+
+function prepareCudaRuntimeForSidecar() {
+  const epRoot = path.join(os.homedir(), `.${initConfig?.appName || 'flint'}`, 'ep');
+  return prepareCudaRuntime({
+    cudaExecutionProviderDirectory: providerCacheDirectory(epRoot, 'CUDAExecutionProvider'),
+  });
 }
 
 function beforeCatalogRead(onProgress, options = {}) {
@@ -685,6 +738,8 @@ let cachedSdkModule = null;
 let initConfig = null; // { appName, logLevel } — kept so startService can re-create manager with webServiceUrls
 let nativeServiceStartAttempted = false;
 const canceledRequests = new Set();
+const activeChatRequests = new Map();
+const activeDownloads = new Map();
 const acquireServiceTransition = createServiceTransitionLock();
 
 // Model pool: Map<alias, { catModel, variantId }>
@@ -1151,6 +1206,7 @@ let modelIndex = null;
 // A miss is authoritative only for a complete snapshot. Keep this state beside the index so
 // callers such as listModels cannot publish a partial index that suppresses cached-only fallback.
 let modelIndexComplete = false;
+let localCatalogAliases = new Set();
 let cachedVariantIdsByAlias = new Map();
 let incompleteCandidateAliases = new Set();
 let candidateInventoryHasUnknownAliasFailure = false;
@@ -1158,6 +1214,7 @@ let candidateInventoryHasUnknownAliasFailure = false;
 function invalidateModelIndex () {
   modelIndex = null;
   modelIndexComplete = false;
+  localCatalogAliases = new Set();
   cachedVariantIdsByAlias = new Map();
   incompleteCandidateAliases = new Set();
   candidateInventoryHasUnknownAliasFailure = false;
@@ -1171,6 +1228,12 @@ function cacheModelIndexFromCatalog(models) {
   cachedVariantIdsByAlias = nextVariantIds;
   modelIndex = nextIndex;
   modelIndexComplete = snapshot.complete;
+  localCatalogAliases = new Set(
+    (Array.isArray(models) ? models : [])
+      .filter((model) => isLocalCatalogEntry(model))
+      .map((model) => String(model?.alias || '').trim().toLowerCase())
+      .filter(Boolean),
+  );
   incompleteCandidateAliases = new Set();
   candidateInventoryHasUnknownAliasFailure = !snapshot.complete;
   return { index: modelIndex, complete: snapshot.complete };
@@ -1183,6 +1246,12 @@ function cacheModelIndexFromCachedModels(models) {
   cachedVariantIdsByAlias = nextVariantIds;
   modelIndex = nextIndex;
   modelIndexComplete = snapshot.complete;
+  localCatalogAliases = new Set(
+    (Array.isArray(models) ? models : [])
+      .filter((model) => isLocalCatalogEntry(model))
+      .map((model) => String(model?.alias || '').trim().toLowerCase())
+      .filter(Boolean),
+  );
   incompleteCandidateAliases = new Set(snapshot.incompleteAliases);
   candidateInventoryHasUnknownAliasFailure = snapshot.unknownAliasFailure;
   return { index: modelIndex, complete: snapshot.complete };
@@ -1190,10 +1259,20 @@ function cacheModelIndexFromCachedModels(models) {
 
 async function resolveFromCachedInventory(requested) {
   return readUnconfirmedCatalog(async () => {
-    const cached = await manager.catalog.getCachedModels();
+    const cached = mergeLocalRegistrations(
+      await manager.catalog.getCachedModels(),
+      await readLocalCatalogList('getCachedModels'),
+    );
     cacheModelIndexFromCachedModels(cached);
-    return resolveModelId(modelIndex, requested);
+    return markLocalGatewayResolution(resolveModelId(modelIndex, requested));
   });
+}
+
+function markLocalGatewayResolution(resolution) {
+  if (!resolution) return null;
+  return localCatalogAliases.has(String(resolution.alias).trim().toLowerCase())
+    ? { ...resolution, local: true }
+    : resolution;
 }
 
 async function resolveForGateway (requested, onCachedLookupFailure = null) {
@@ -1201,9 +1280,12 @@ async function resolveForGateway (requested, onCachedLookupFailure = null) {
     if (!manager) return null;
     try {
       return await readCatalog(async () => {
-        const models = await manager.catalog.getModels();
+        const models = mergeLocalRegistrations(
+          await manager.catalog.getModels(),
+          await readLocalCatalogList('getModels'),
+        );
         const snapshot = cacheModelIndexFromCatalog(models);
-        const resolution = resolveModelId(snapshot.index, requested);
+        const resolution = markLocalGatewayResolution(resolveModelId(snapshot.index, requested));
         if (resolution || snapshot.complete) return resolution;
         throw new Error('Catalog snapshot was incomplete for the requested model.');
       });
@@ -1218,7 +1300,7 @@ async function resolveForGateway (requested, onCachedLookupFailure = null) {
       }
     }
   }
-  const resolution = resolveModelId(modelIndex, requested);
+  const resolution = markLocalGatewayResolution(resolveModelId(modelIndex, requested));
   if (resolution || modelIndexComplete) return resolution;
   try {
     return await resolveFromCachedInventory(requested);
@@ -1909,6 +1991,164 @@ function renameSyncRetry (from, to) {
   throw last;
 }
 
+function localRegistrationFailure(error) {
+  return {
+    registered: false,
+    registrationTask: null,
+    registrationReplaced: false,
+    registrationError: error?.message || String(error),
+  };
+}
+
+function localCatalogHandle() {
+  const sdk = cachedSdkModule;
+  if (!manager || typeof manager.getCatalog !== 'function') return null;
+  if (sdk?.CatalogType?.Local === undefined) return null;
+  try {
+    return manager.getCatalog(sdk.CatalogType.Local);
+  } catch (error) {
+    throw new Error(`Local catalog is unavailable: ${error?.message || error}`, { cause: error });
+  }
+}
+
+function localCatalogForRegistration() {
+  const sdk = cachedSdkModule;
+  const catalog = localCatalogHandle();
+  if (!catalog || typeof sdk?.MutableModelInfo !== 'function') return null;
+  return { catalog, MutableModelInfo: sdk.MutableModelInfo };
+}
+
+async function readLocalCatalogList(method) {
+  if (!manager || typeof manager.getCatalog !== 'function'
+      || cachedSdkModule?.CatalogType?.Local === undefined) {
+    return [];
+  }
+  const catalog = localCatalogHandle();
+  if (!catalog) {
+    throw new Error('Foundry Local did not provide a local catalog handle.');
+  }
+  if (typeof catalog[method] !== 'function') {
+    throw new Error(`This Foundry SDK cannot read the local catalog with ${method}().`);
+  }
+  try {
+    const models = await catalog[method]();
+    if (!Array.isArray(models)) {
+      throw new TypeError(`Local catalog ${method}() did not return a model list.`);
+    }
+    return models;
+  } catch (error) {
+    throw new Error(`Local catalog ${method} failed: ${error?.message || error}`, { cause: error });
+  }
+}
+
+async function modelAfterPublicMiss(kind, key, publicError) {
+  return lookupLocalAfterPublicMiss(kind, key, publicError, localCatalogHandle);
+}
+
+// removeFromCache throws for a LocalRegistration and leaves the row in place.
+// Unregister drops the catalog row and does not delete assets. Flint then
+// removes an owned copy or the junction, and never the linked folder.
+async function releaseLocalRegistration(model) {
+  if (!isLocalCatalogEntry(model)) return false;
+  const local = localCatalogHandle();
+  const id = typeof model?.id === 'string' && model.id.trim() ? model.id.trim() : model?.alias;
+  if (!id) throw new Error('Cannot delete a local model without an id.');
+  if (!local || typeof local.unregisterModel !== 'function') {
+    throw new Error(`Cannot delete local model ${id}: this SDK cannot unregister it.`);
+  }
+  let modelPath = '';
+  try {
+    if (typeof model?.path === 'string') modelPath = model.path;
+  } catch (error) {
+    throw new Error(`Cannot delete local model ${id}: its registered path could not be read.`, {
+      cause: error,
+    });
+  }
+  if (!modelPath.trim()) {
+    throw new Error(`Cannot delete local model ${id}: its registered path is empty.`);
+  }
+  const deletePlan = localRegistrationDeletePlan(modelCacheRoot(), modelPath);
+  try {
+    await local.unregisterModel(id);
+  } catch (error) {
+    if (!/not found/i.test(String(error?.message || error))) throw error;
+  }
+  removeLocalRegistrationAssets(deletePlan);
+  log('info', `Unregistered local model ${id}`);
+  return true;
+}
+
+async function registerOneLocalModel(target, { synchronous = false } = {}) {
+  try {
+    const local = localCatalogForRegistration();
+    if (!local) {
+      return localRegistrationFailure(new Error('This Foundry SDK cannot register a local model task.'));
+    }
+    const outcome = await ensureRegisteredLocalModel({
+      catalog: local.catalog,
+      MutableModelInfo: local.MutableModelInfo,
+      modelPath: target.modelPath,
+      modelId: target.modelId,
+      task: target.task,
+      contextLength: target.contextLength,
+      synchronous,
+    });
+    return {
+      registered: outcome.registered,
+      registrationTask: outcome.task,
+      registrationReplaced: outcome.replaced,
+      registrationError: outcome.error,
+    };
+  } catch (error) {
+    log('warn', `Local model task registration failed for ${target.modelId}: ${error?.message || error}`);
+    return localRegistrationFailure(error);
+  }
+}
+
+async function registerImportedLocalModel(imported) {
+  return registerOneLocalModel({
+    modelPath: path.join(imported.path, `v${imported.version}`),
+    modelId: `${imported.name}:${imported.version}`,
+    task: localModelTask({
+      architecture: imported.architecture,
+      dirName: imported.name,
+      task: imported.detectedTask,
+    }),
+    contextLength: imported.contextLength,
+  });
+}
+
+async function registerOwnedLocalModels() {
+  const targets = [
+    ...ownedLocalRegistrationTargets(modelCacheRoot()),
+    ...linkedLocalRegistrationTargets(modelCacheRoot()),
+  ];
+  if (!targets.length) return [];
+  if (!localCatalogForRegistration()) {
+    throw new Error('This Foundry SDK cannot register owned local model tasks.');
+  }
+  const results = [];
+  const failures = [];
+  for (const target of targets) {
+    const registration = await registerOneLocalModel(target, { synchronous: true });
+    if (registration.registered) {
+      log(
+        'info',
+        `Local model ${target.modelId} task ${registration.registrationTask}`
+          + (registration.registrationReplaced ? ' (replaced unset task)' : ''),
+      );
+    } else if (registration.registrationError) {
+      log('warn', `Local model ${target.modelId}: ${registration.registrationError}`);
+      failures.push(`${target.modelId}: ${registration.registrationError}`);
+    }
+    results.push({ modelId: target.modelId, ...registration });
+  }
+  if (failures.length) {
+    throw new Error(`Owned local model registration failed: ${failures.join('; ')}`);
+  }
+  return results;
+}
+
 /**
  * Import a model folder into the Flint cache.
  *
@@ -1991,15 +2231,19 @@ function importModelFolder(payload) {
     sizeBytes: inspection.sizeBytes,
     templateSource,
     warnings: inspection.warnings,
+    architecture: inspection.detected.architecture,
+    contextLength: inspection.detected.contextLength,
+    detectedTask: inspection.detected.task,
   };
 }
 
 /**
  * Register a model that lives elsewhere by creating a directory junction.
  *
- * The native scanner traverses junctions, so a foreign model becomes visible without
- * copying gigabytes and without writing a single byte into the foreign directory.
- * Removing the model later deletes the link, never the target.
+ * Foundry Local does not scan the cache into the public catalog. Flint registers
+ * the target on the local catalog so the model can be listed and loaded. The
+ * foreign directory is not modified. Removing the model later deletes the link,
+ * never the target.
  */
 function linkModelFolder(payload) {
   const inspection = inspectFolder(payload.folderPath);
@@ -2032,7 +2276,16 @@ function linkModelFolder(payload) {
   fs.mkdirSync(path.dirname(linkPath), { recursive: true });
   fs.symlinkSync(target, linkPath, 'junction');
 
-  return { name, publisher, linkPath, target, warnings: inspection.warnings };
+  return {
+    name,
+    publisher,
+    linkPath,
+    target,
+    warnings: inspection.warnings,
+    architecture: inspection.detected.architecture,
+    contextLength: inspection.detected.contextLength,
+    detectedTask: inspection.detected.task,
+  };
 }
 
 /**
@@ -2193,11 +2446,21 @@ async function ensureModelLocked(alias, variantId, onCatalogProgress, requireCac
   }
   const lookUpBuild = () => readUnconfirmedCatalog(
     async () => {
-      const model = await manager.catalog.getModel(alias);
-      return {
-        catModel: model,
-        variant: variantId ? await manager.catalog.getModelVariant(variantId) : null,
-      };
+      let model;
+      try {
+        model = await manager.catalog.getModel(alias);
+      } catch (publicError) {
+        model = await modelAfterPublicMiss('alias', alias, publicError);
+      }
+      let variant = null;
+      if (variantId) {
+        try {
+          variant = await manager.catalog.getModelVariant(variantId);
+        } catch (publicError) {
+          variant = await modelAfterPublicMiss('variant', variantId, publicError);
+        }
+      }
+      return { catModel: model, variant };
     },
     onCatalogProgress,
   );
@@ -2321,6 +2584,260 @@ function getNativeOpenAiApiBase () {
   return upstreamPort
     ? `http://127.0.0.1:${upstreamPort}/v1`
     : getOpenAiApiBase(sharedEndpoint);
+}
+
+async function createEmbeddingClientForModel(modelAlias, embedModel) {
+  let client = null;
+  try {
+    const sdkModule = await getFoundrySdkModule();
+    client = createSessionEmbeddingClient(embedModel, sdkModule);
+  } catch (err) {
+    log('debug', `EmbeddingsSession client unavailable, using createEmbeddingClient(): ${err?.message || err}`);
+  }
+  if (!client) {
+    if (typeof embedModel?.createEmbeddingClient !== 'function') {
+      throw new Error(`Model ${modelAlias} does not expose createEmbeddingClient`);
+    }
+    client = embedModel.createEmbeddingClient();
+  }
+  return client;
+}
+
+async function serveLocalGatewayChat(req, res, rawBody, target) {
+  let request;
+  try {
+    request = JSON.parse(rawBody);
+  } catch {
+    res.writeHead(400, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      error: { message: 'Request body must be valid JSON.', type: 'invalid_request_error' },
+    }));
+    return;
+  }
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    res.writeHead(400, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      error: { message: 'Request body must be a JSON object.', type: 'invalid_request_error' },
+    }));
+    return;
+  }
+
+  const numericMetadata = (value) => {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
+  const payload = {
+    model: target.alias,
+    messages: request.messages,
+    ...(request.stream !== undefined ? { stream: request.stream } : {}),
+    ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+    ...(request.max_tokens !== undefined ? { maxTokens: request.max_tokens } : {}),
+    ...(request.top_p !== undefined ? { topP: request.top_p } : {}),
+    ...(numericMetadata(request.metadata?.top_k) !== undefined
+      ? { topK: numericMetadata(request.metadata.top_k) }
+      : {}),
+    ...(request.frequency_penalty !== undefined ? { frequencyPenalty: request.frequency_penalty } : {}),
+    ...(request.presence_penalty !== undefined ? { presencePenalty: request.presence_penalty } : {}),
+    ...(numericMetadata(request.metadata?.random_seed) !== undefined
+      ? { randomSeed: numericMetadata(request.metadata.random_seed) }
+      : {}),
+    ...(request.tools !== undefined ? { tools: request.tools } : {}),
+    ...(request.tool_choice !== undefined ? { toolChoice: request.tool_choice } : {}),
+    ...(request.response_format !== undefined ? { responseFormat: request.response_format } : {}),
+  };
+  const validation = validateCommand('chatCompletion', payload);
+  if (validation) {
+    res.writeHead(400, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      error: { message: validation, type: 'invalid_request_error' },
+    }));
+    return;
+  }
+
+  const entry = pool.get(target.alias);
+  if (!entry?.catModel) {
+    res.writeHead(503, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      error: { message: `Local model ${target.alias} is not resident.`, type: 'server_error' },
+    }));
+    return;
+  }
+  const sdkModule = await getFoundrySdkModule();
+  const client = createSessionChatClient(entry.catModel, sdkModule, {
+    onDiagnostic: (diagnostic) => log('warn', diagnostic.message),
+  });
+  if (!client) {
+    throw new Error('This Foundry SDK does not expose ChatSession for local model inference.');
+  }
+  const assignSetting = (key, value) => {
+    if (client.settings && Number.isFinite(value)) client.settings[key] = value;
+  };
+  assignSetting('temperature', payload.temperature);
+  assignSetting('maxTokens', payload.maxTokens);
+  assignSetting('topP', payload.topP);
+  assignSetting('topK', payload.topK);
+  assignSetting('frequencyPenalty', normalizeChatPenalty(payload.frequencyPenalty));
+  assignSetting('presencePenalty', normalizeChatPenalty(payload.presencePenalty));
+  assignSetting('randomSeed', payload.randomSeed);
+
+  const messages = toSdkMessages(payload.messages);
+  const options = {
+    ...(payload.toolChoice !== undefined ? { toolChoice: payload.toolChoice } : {}),
+    ...(payload.responseFormat !== undefined ? { responseFormat: payload.responseFormat } : {}),
+  };
+  const completionId = `chatcmpl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const created = Math.floor(Date.now() / 1000);
+  const variantId = target.variantId || entry.variantId || target.alias;
+  const withEnvelope = (result, object) => ({
+    ...result,
+    id: result?.id || completionId,
+    object: result?.object || object,
+    created: result?.created || created,
+    model: variantId,
+  });
+
+  try {
+    if (payload.stream === true) {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      });
+      for await (const chunk of client.completeStreamingChat(messages, payload.tools, options)) {
+        if (res.destroyed || res.writableEnded) return;
+        res.write(`data: ${JSON.stringify(withEnvelope(chunk, 'chat.completion.chunk'))}\n\n`);
+      }
+      if (!res.destroyed && !res.writableEnded) res.end('data: [DONE]\n\n');
+      return;
+    }
+    const result = await client.completeChat(messages, payload.tools, options);
+    if (res.destroyed || res.writableEnded) return;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(withEnvelope(result, 'chat.completion')));
+  } catch (error) {
+    const message = error?.message || String(error);
+    log('warn', `Local gateway inference failed for ${target.alias}: ${message}`);
+    if (res.headersSent) {
+      if (!res.destroyed && !res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ error: { message, type: 'server_error' } })}\n\n`);
+        res.end('data: [DONE]\n\n');
+      }
+      return;
+    }
+    res.writeHead(500, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: { message, type: 'server_error' } }));
+  }
+}
+
+async function serveLocalGatewayEmbeddings(req, res, rawBody, target) {
+  const respondError = (status, message, type) => {
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: { message, type } }));
+  };
+  let request;
+  try {
+    request = JSON.parse(rawBody);
+  } catch {
+    respondError(400, 'Request body must be valid JSON.', 'invalid_request_error');
+    return;
+  }
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    respondError(400, 'Request body must be a JSON object.', 'invalid_request_error');
+    return;
+  }
+  if (!Object.prototype.hasOwnProperty.call(request, 'input')) {
+    respondError(400, 'The input field is required.', 'invalid_request_error');
+    return;
+  }
+  if (request.encoding_format !== undefined &&
+      request.encoding_format !== 'float' && request.encoding_format !== 'base64') {
+    respondError(400, 'Only float and base64 embedding encodings are supported.', 'invalid_request_error');
+    return;
+  }
+  if (request.dimensions !== undefined) {
+    respondError(400, 'Custom embedding dimensions are not supported.', 'invalid_request_error');
+    return;
+  }
+  const inputs = typeof request.input === 'string' ? [request.input] : request.input;
+  if (!Array.isArray(inputs) || inputs.length === 0) {
+    respondError(400, 'Input must be a non-empty string or array of strings.', 'invalid_request_error');
+    return;
+  }
+  if (inputs.length > EMBED_MAX_INPUTS) {
+    respondError(400, `Input accepts at most ${EMBED_MAX_INPUTS} strings per request.`, 'invalid_request_error');
+    return;
+  }
+  for (const input of inputs) {
+    if (typeof input !== 'string' || !input.trim()) {
+      respondError(400, 'Input values must be non-empty strings.', 'invalid_request_error');
+      return;
+    }
+    if (input.length > EMBED_MAX_CHARS) {
+      respondError(400, `Input strings cannot exceed ${EMBED_MAX_CHARS} characters.`, 'invalid_request_error');
+      return;
+    }
+  }
+
+  const entry = pool.get(target.alias);
+  if (!entry?.catModel) {
+    respondError(503, `Local model ${target.alias} is not resident.`, 'server_error');
+    return;
+  }
+
+  try {
+    const client = await createEmbeddingClientForModel(target.alias, entry.catModel);
+    const result = await client.generateEmbeddings(inputs);
+    if (!Array.isArray(result?.data) || result.data.length !== inputs.length) {
+      throw new Error(`Foundry Local returned an invalid embedding count for ${inputs.length} inputs.`);
+    }
+    const data = result.data.map((item, index) => {
+      if (!Array.isArray(item?.embedding)
+          || !item.embedding.every((value) => typeof value === 'number' && Number.isFinite(value))) {
+        throw new Error(`Foundry Local returned an invalid embedding at index ${index}.`);
+      }
+      return {
+        ...item,
+        object: 'embedding',
+        index,
+        embedding: encodeEmbedding(item.embedding, request.encoding_format),
+      };
+    });
+    if (res.destroyed || res.writableEnded) return;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      ...result,
+      object: 'list',
+      data,
+      model: target.variantId || entry.variantId || target.alias,
+    }));
+  } catch (error) {
+    const message = error?.message || String(error);
+    log('warn', `Local gateway embeddings failed for ${target.alias}: ${message}`);
+    if (res.destroyed || res.writableEnded) return;
+    respondError(500, message, 'server_error');
+  }
+}
+
+async function listLocalGatewayModels() {
+  const models = await readLocalCatalogList('getCachedModels');
+  return models
+    .filter((model) => isLocalCatalogEntry(model))
+    .map((model) => {
+      const id = typeof model.id === 'string' ? model.id : '';
+      const alias = typeof model.alias === 'string' ? model.alias : '';
+      if (!id || !alias) {
+        throw new Error('A cached local registration is missing its model id or alias.');
+      }
+      return {
+        id: id.replace(/:\d+$/, ''),
+        object: 'model',
+        created: 0,
+        owned_by: 'flint',
+        parent: alias,
+      };
+    });
 }
 
 async function readErrorBody (resp) {
@@ -2954,13 +3471,18 @@ rl.on('line', async (line) => {
           "then rebuild the installer (natives must be packaged under foundry-local-sdk/prebuilds)."
         );
       }
-      initConfig = { appName, logLevel: payload.logLevel || 'info', libraryPath };
+      initConfig = foundryManagerCreateConfig({
+        appName,
+        logLevel: payload.logLevel || 'info',
+        libraryPath,
+        useSharedHost: payload.useSharedHost === true,
+      });
       if (!LOG_LEVELS.includes(initConfig.logLevel)) {
         throw new Error(`Unsupported log level "${initConfig.logLevel}". Expected one of: ${LOG_LEVELS.join(', ')}`);
       }
       activeLogLevel = initConfig.logLevel;
       log('info', `Using Foundry native library directory: ${libraryPath}`);
-      manager = FManager.create(initConfig);
+      manager = createFoundryManager(FManager, initConfig);
       log('info', `SDK initialized for ${appName}`);
       const pinWarning = foundryRuntimePinWarning(readFoundryRuntimeVersions(libraryPath));
       if (pinWarning) log('warn', pinWarning);
@@ -2970,7 +3492,10 @@ rl.on('line', async (line) => {
     } else if (cmd === 'listModels') {
       const rows = await readCatalog(
         async () => {
-          const models = await manager.catalog.getModels();
+          const models = mergeLocalRegistrations(
+            await manager.catalog.getModels(),
+            await readLocalCatalogList('getModels'),
+          );
           cacheModelIndexFromCatalog(models);
           return models.map(m => {
             // Prefer live isCached getters (query native cache). Catalog snapshot
@@ -3014,7 +3539,7 @@ rl.on('line', async (line) => {
               family: m.info?.family || null,
               // Live catalog uses createdAt (unix seconds); older SDK typings said createdAtUnix.
               createdAt: m.info?.createdAt ?? m.info?.createdAtUnix ?? null,
-              info: m.info || {},
+              info: localRegistrationInfo(m.info || {}, m.alias),
               variants: variantRows,
               updates: variantRows
                 .filter(v => v.update)
@@ -3028,7 +3553,10 @@ rl.on('line', async (line) => {
     } else if (cmd === 'getSTTModels') {
       const stt = await readCatalog(
         async () => {
-          const all = await manager.catalog.getModels();
+          const all = mergeLocalRegistrations(
+            await manager.catalog.getModels(),
+            await readLocalCatalogList('getModels'),
+          );
           return all
             .filter(m => {
               const t = (m.info?.task || '').toLowerCase();
@@ -3047,7 +3575,10 @@ rl.on('line', async (line) => {
     } else if (cmd === 'getVisionModels') {
       const vision = await readCatalog(
         async () => {
-          const all = await manager.catalog.getModels();
+          const all = mergeLocalRegistrations(
+            await manager.catalog.getModels(),
+            await readLocalCatalogList('getModels'),
+          );
           return all
             .filter(m => {
               const t = (m.info?.task || '').toLowerCase();
@@ -3064,30 +3595,123 @@ rl.on('line', async (line) => {
       );
       reply({ ok: true, result: vision });
     } else if (cmd === 'download') {
-      await serializeModelOperation(payload.alias, ['cache'], async () => {
-        await beforeCatalogRead(reportCatalogProgress, { commit: true });
-        const model = await readUnconfirmedCatalog(
-          () => payload.variantId
-            ? manager.catalog.getModelVariant(payload.variantId)
-            : manager.catalog.getModel(payload.alias),
-          reportCatalogProgress,
-        );
-        audit('download.start', { alias: payload.alias, variantId: payload.variantId ?? null });
-        await model.download((p) => send({ id, progress: p, alias: payload.alias }));
-        // Force next catalog access to re-read model list metadata (info.cached, etc.).
-        try { manager.catalog.invalidateCache?.(); } catch {}
-        invalidateModelIndex();
-        audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
-      });
-      reply({ ok: true });
+      const controller = new AbortController();
+      activeDownloads.set(id, controller);
+      try {
+        await serializeModelOperation(payload.alias, ['cache'], async () => {
+          await beforeCatalogRead(reportCatalogProgress, { commit: true });
+          const model = await readUnconfirmedCatalog(
+            async () => {
+              if (payload.variantId) {
+                try {
+                  return await manager.catalog.getModelVariant(payload.variantId);
+                } catch (publicError) {
+                  return modelAfterPublicMiss('variant', payload.variantId, publicError);
+                }
+              }
+              try {
+                return await manager.catalog.getModel(payload.alias);
+              } catch (publicError) {
+                return modelAfterPublicMiss('alias', payload.alias, publicError);
+              }
+            },
+            reportCatalogProgress,
+          );
+          if (controller.signal.aborted) {
+            const error = new Error('Model download was cancelled before native download began.');
+            error.name = 'AbortError';
+            throw error;
+          }
+          audit('download.start', { alias: payload.alias, variantId: payload.variantId ?? null });
+          let cancelledAfterNative = false;
+          let cacheRefreshFailed = false;
+          let cacheRefreshError;
+          try {
+            await model.download((p) => send({ id, progress: p, alias: payload.alias }), controller.signal);
+          } catch (error) {
+            if (controller.signal.aborted && error?.name === 'AbortError') {
+              cancelledAfterNative = true;
+            } else {
+              throw error;
+            }
+          } finally {
+            activeDownloads.delete(id);
+            try {
+              manager.catalog.invalidateCache?.();
+            } catch (error) {
+              cacheRefreshFailed = true;
+              cacheRefreshError = error;
+            }
+            invalidateModelIndex();
+          }
+          if (cancelledAfterNative) {
+            const describeError = error => error?.message || String(error);
+            const cancellationError = (message, cause) => {
+              const cancelled = new Error(message, cause !== undefined ? { cause } : undefined);
+              cancelled.name = 'AbortError';
+              return cancelled;
+            };
+            if (cacheRefreshFailed) {
+              throw cancellationError(
+                `Model download was cancelled after native work settled, but its cache state could not be verified: ${describeError(cacheRefreshError)}`,
+                cacheRefreshError,
+              );
+            }
+
+            let isCached;
+            try {
+              isCached = model.isCached;
+            } catch (error) {
+              throw cancellationError(
+                `Model download was cancelled after native work settled, but its cache state could not be verified: ${describeError(error)}`,
+                error,
+              );
+            }
+            if (isCached !== true && isCached !== false) {
+              throw cancellationError(
+                'Model download was cancelled after native work settled, but the runtime did not report whether the model is cached.',
+              );
+            }
+            if (isCached === false) {
+              if (typeof model.removeFromCache !== 'function') {
+                throw cancellationError(
+                  'Model download was cancelled after native work settled, but the runtime does not expose removeFromCache to clean up its partial cache.',
+                );
+              }
+              try {
+                await model.removeFromCache();
+              } catch (error) {
+                throw cancellationError(
+                  `Model download was cancelled after native work settled, but partial cache cleanup failed: ${describeError(error)}`,
+                  error,
+                );
+              }
+              try {
+                manager.catalog.invalidateCache?.();
+              } catch (error) {
+                throw cancellationError(
+                  `Model download was cancelled and partial cache cleanup completed, but the catalog cache could not be refreshed: ${describeError(error)}`,
+                  error,
+                );
+              }
+              invalidateModelIndex();
+            }
+            throw cancellationError('Model download was cancelled after native work settled.');
+          }
+          audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
+        });
+        reply({ ok: true });
+      } finally {
+        activeDownloads.delete(id);
+      }
     } else if (cmd === 'load') {
       const entry = await ensureModel(payload.alias, payload.variantId, reportCatalogProgress);
       const acceleration = {
         requested: null,
         active: await detectActiveExecutionProvider(entry.catModel)
       };
-      log('info', `Model ${payload.alias} ready (variantId: ${entry.variantId}, accel: ${acceleration.active || 'cpu'})`);
-      audit('load', { alias: payload.alias, variantId: entry.variantId, accel: acceleration.active || 'cpu' });
+      log('info', `Model ${payload.alias} ready (variantId: ${entry.variantId}, accel: ${acceleration.active || 'unknown'})`);
+      audit('load', { alias: payload.alias, variantId: entry.variantId, accel: acceleration.active || 'unknown' });
       reply({ ok: true, result: { acceleration, lane: payload.lane || 'chat', variantId: entry.variantId } });
     } else if (cmd === 'unload') {
       const alias = payload.alias;
@@ -3156,11 +3780,27 @@ rl.on('line', async (line) => {
               async () => {
               if (variantId) {
                 // Delete a single variant from the local cache.
-                const variant = await manager.catalog.getModelVariant(variantId);
+                let variant;
+                try {
+                  variant = await manager.catalog.getModelVariant(variantId);
+                } catch (publicError) {
+                  variant = await modelAfterPublicMiss('variant', variantId, publicError);
+                }
                 if (!variant) {
                   throw new Error(`Variant not found: ${variantId}`);
                 }
-                const parentModel = await manager.catalog.getModel(payload.alias);
+                let parentModel;
+                try {
+                  parentModel = await manager.catalog.getModel(payload.alias);
+                } catch (publicError) {
+                  try {
+                    parentModel = await modelAfterPublicMiss('alias', payload.alias, publicError);
+                  } catch (parentError) {
+                    // A local variant can be unregistered on its own when the alias lookup misses.
+                    if (!isLocalCatalogEntry(variant)) throw parentError;
+                    parentModel = null;
+                  }
+                }
                 const poolEntry = pool.get(payload.alias);
                 if (poolEntry?.variantId === variantId) {
                   if (typeof poolEntry.catModel.unload === 'function') {
@@ -3168,6 +3808,16 @@ rl.on('line', async (line) => {
                   }
                   pool.delete(payload.alias);
                   log('info', `Unloaded pool entry for deleted variant ${variantId}`);
+                }
+                const localModel = isLocalCatalogEntry(variant) ? variant : parentModel;
+                if (await releaseLocalRegistration(localModel)) {
+                  invalidateModelIndex();
+                  audit('deleteModel', { alias: payload.alias, variantId });
+                  return {
+                    alias: payload.alias,
+                    variantId,
+                    catalogEntryRemoved: true,
+                  };
                 }
                 const ok = tryRemoveFromCache(variant, variantId);
                 if (!ok) {
@@ -3184,7 +3834,12 @@ rl.on('line', async (line) => {
               }
 
               // Delete all cached variants for this alias.
-              const model = await manager.catalog.getModel(payload.alias);
+              let model;
+              try {
+                model = await manager.catalog.getModel(payload.alias);
+              } catch (publicError) {
+                model = await modelAfterPublicMiss('alias', payload.alias, publicError);
+              }
               if (!model) {
                 throw new Error(`Model not found: ${payload.alias}`);
               }
@@ -3192,6 +3847,15 @@ rl.on('line', async (line) => {
               if (poolEntry && typeof poolEntry.catModel.unload === 'function') {
                 await poolEntry.catModel.unload();
                 pool.delete(payload.alias);
+              }
+              if (await releaseLocalRegistration(model)) {
+                invalidateModelIndex();
+                audit('deleteModel', { alias: payload.alias, variantId: null, count: 1 });
+                return {
+                  alias: payload.alias,
+                  count: 1,
+                  catalogEntryRemoved: true,
+                };
               }
               let deleted = 0;
               const variants = model.variants || [];
@@ -3243,7 +3907,20 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: inspectFolder(payload.folderPath) });
     } else if (cmd === 'importModelFolder') {
       const result = await runCatalogMutation(
-        () => importModelFolder(payload),
+        async () => {
+          const imported = importModelFolder(payload);
+          const registration = await registerImportedLocalModel(imported);
+          return {
+            name: imported.name,
+            version: imported.version,
+            publisher: imported.publisher,
+            path: imported.path,
+            sizeBytes: imported.sizeBytes,
+            templateSource: imported.templateSource,
+            warnings: imported.warnings,
+            ...registration,
+          };
+        },
         'model import',
         reportCatalogProgress,
       );
@@ -3253,7 +3930,27 @@ rl.on('line', async (line) => {
       reply({ ok: true, result });
     } else if (cmd === 'linkModelFolder') {
       const result = await runCatalogMutation(
-        () => linkModelFolder(payload),
+        async () => {
+          const linked = linkModelFolder(payload);
+          const registration = await registerOneLocalModel({
+            modelPath: linked.target,
+            modelId: `${linked.name}:1`,
+            task: localModelTask({
+              architecture: linked.architecture,
+              dirName: linked.name,
+              task: linked.detectedTask,
+            }),
+            contextLength: linked.contextLength,
+          });
+          return {
+            name: linked.name,
+            publisher: linked.publisher,
+            linkPath: linked.linkPath,
+            target: linked.target,
+            warnings: linked.warnings,
+            ...registration,
+          };
+        },
         'model link',
         reportCatalogProgress,
       );
@@ -3362,6 +4059,23 @@ rl.on('line', async (line) => {
               return (await ensureModel(alias, variantId, undefined, { requireCached: true }))
                 ?.variantId ?? null;
             },
+            getLoadedModel: async (alias, variantId) => {
+              const entry = pool.get(alias);
+              if (!entry?.catModel || (variantId && entry.variantId !== variantId)) return null;
+              let loaded;
+              try {
+                loaded = typeof entry.catModel.isLoaded === 'function'
+                  ? await entry.catModel.isLoaded()
+                  : entry.catModel.isLoaded;
+              } catch (error) {
+                log('warn', `Could not verify local model residency for ${alias}: ${error?.message ?? error}`);
+                return null;
+              }
+              return loaded === true ? entry.variantId : null;
+            },
+            serveLocal: serveLocalGatewayChat,
+            serveLocalEmbeddings: serveLocalGatewayEmbeddings,
+            listLocalModels: listLocalGatewayModels,
             // Proxied traffic never reaches this process, so without this hook a model
             // serving a long completion would look idle and could be evicted underneath it.
             onActivity: noteActivity,
@@ -3486,6 +4200,10 @@ rl.on('line', async (line) => {
       reply({ ok: true, endpoint: sharedEndpoint });
     } else if (cmd === 'getStatus') {
       const poolSnapshot = [...pool.entries()].map(([alias, { variantId }]) => ({ alias, variantId }));
+      const libraryDir = resolveFoundryLibraryDir();
+      const foundryRuntime = libraryDir
+        ? readFoundryRuntimeVersions(libraryDir)
+        : { sdkVersion: null, coreVersion: null };
       reply({
         ok: true,
         result: {
@@ -3512,6 +4230,10 @@ rl.on('line', async (line) => {
           // the guard below, with the page having no indication that its pin/eviction-settings
           // push did not actually take effect.
           lastAppliedMemorySettingsSeq,
+          foundrySdkVersion: foundryRuntime.sdkVersion,
+          foundryCoreVersion: foundryRuntime.coreVersion,
+          foundrySdkPin: PINNED_FOUNDRY_SDK_VERSION,
+          foundryCorePin: PINNED_FOUNDRY_CORE_VERSION,
         }
       });
     } else if (cmd === 'chatCompletion') {
@@ -3529,6 +4251,8 @@ rl.on('line', async (line) => {
       if (!chatBooking) {
         throw new Error(`Cannot use ${modelAlias} while it is being unloaded or deleted. Retry shortly.`);
       }
+      const chatAbortController = new AbortController();
+      activeChatRequests.set(id, chatAbortController);
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'chat', modelAlias, startedAt: chatAccessTs };
       try {
@@ -3549,6 +4273,13 @@ rl.on('line', async (line) => {
         const sdkMessages = toSdkMessages(payload.messages);
         if (!sdkMessages.length) {
           throw new Error('No valid messages supplied');
+        }
+        if (canceledRequests.has(id)) {
+          reply({
+            error: 'Chat request cancelled before native inference; model loading may have completed.',
+            certainty: 'cancelled',
+          });
+          return;
         }
 
         // Prefer direct SDK inference to avoid web-service schema/version mismatch issues.
@@ -3595,6 +4326,11 @@ rl.on('line', async (line) => {
           : normalizeTextPartsForLegacyClient(sdkMessages);
         if (transport === 'sdk') {
           const client = sessionChatClient || chatModel.createChatClient();
+          const requestOptions = {
+            toolChoice: payload.toolChoice,
+            responseFormat: payload.responseFormat,
+            ...(client === sessionChatClient ? { signal: chatAbortController.signal } : {}),
+          };
           // SDK reads generation params from client.settings, not completeChat args.
           // Omit unset fields so the model's own defaults are not overwritten.
           if (client?.settings && Number.isFinite(payload.temperature)) {
@@ -3627,7 +4363,7 @@ rl.on('line', async (line) => {
               for await (const chunk of client.completeStreamingChat(
                 sdkInferenceMessages,
                 payload.tools,
-                { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+                requestOptions,
               )) {
                 const usage = chunk?.usage;
                 chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
@@ -3674,18 +4410,32 @@ rl.on('line', async (line) => {
               streamFailure = error;
             }
             const latchedFailure = firstToolCallFailure(toolCallsByChoice);
-            const combinedFailure = mergeStreamFailure(latchedFailure, streamFailure);
+            const cancelledNatively = canceledRequests.has(id) && streamFailure?.name === 'AbortError';
+            const combinedFailure = mergeStreamFailure(
+              latchedFailure,
+              cancelledNatively ? null : streamFailure,
+            );
             if (combinedFailure) throw combinedFailure;
+            if (canceledRequests.has(id)) {
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
-            const wasCanceled = canceledRequests.has(id);
-            const compactedToolCalls = wasCanceled
-              ? []
-              : finalizeToolCallChoices(toolCallsByChoice, finishReasons);
+            if (canceledRequests.has(id)) {
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
+            const compactedToolCalls = finalizeToolCallChoices(toolCallsByChoice, finishReasons);
             const chatFinishReason = finishReasons.get(0) ?? null;
-            const publishedFinishReason = wasCanceled ? null : chatFinishReason;
             const normalizedStreamResult = validateCompletedChatResponse(normalizeChatResponse({
               choices: [{
-                finish_reason: publishedFinishReason,
+                finish_reason: chatFinishReason,
                 message: {
                   role: 'assistant',
                   content,
@@ -3718,14 +4468,20 @@ rl.on('line', async (line) => {
               }
             });
           } else if (typeof client?.completeChat === 'function') {
-            const result = await client.completeChat(
-              sdkInferenceMessages,
-              payload.tools,
-              { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
-            );
+            let result;
+            try {
+              result = await client.completeChat(sdkInferenceMessages, payload.tools, requestOptions);
+            } catch (error) {
+              if (!canceledRequests.has(id) || error?.name !== 'AbortError') throw error;
+              reply({
+                error: 'The chat response was discarded after cancellation; the native request has settled.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
             if (canceledRequests.has(id)) {
               reply({
-                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                error: 'The chat response was discarded after cancellation; the native request has settled.',
                 certainty: 'cancelled',
               });
               return;
@@ -3781,7 +4537,7 @@ rl.on('line', async (line) => {
               for await (const chunk of client.completeStreamingChat(
                 sdkInferenceMessages,
                 payload.tools,
-                { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+                requestOptions,
               )) {
                 const usage = chunk?.usage;
                 chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
@@ -3816,7 +4572,11 @@ rl.on('line', async (line) => {
               streamFailure = error;
             }
             const latchedFailure = firstToolCallFailure(toolCallsByChoice);
-            const combinedFailure = mergeStreamFailure(latchedFailure, streamFailure);
+            const cancelledNatively = canceledRequests.has(id) && streamFailure?.name === 'AbortError';
+            const combinedFailure = mergeStreamFailure(
+              latchedFailure,
+              cancelledNatively ? null : streamFailure,
+            );
             if (combinedFailure) throw combinedFailure;
             if (canceledRequests.has(id)) {
               reply({
@@ -3885,9 +4645,6 @@ rl.on('line', async (line) => {
               ...(payload.toolChoice !== undefined ? { tool_choice: payload.toolChoice } : {}),
               ...(payload.responseFormat !== undefined ? { response_format: payload.responseFormat } : {}),
               top_p: payload.topP,
-              ...(normalizeChatPenalty(payload.frequencyPenalty) !== undefined
-                ? { frequency_penalty: payload.frequencyPenalty }
-                : {}),
               ...(normalizeChatPenalty(payload.presencePenalty) !== undefined
                 ? { presence_penalty: payload.presencePenalty }
                 : {}),
@@ -3970,6 +4727,7 @@ rl.on('line', async (line) => {
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
         noteActivity(modelAlias, 'end', chatBooking);
+        activeChatRequests.delete(id);
         canceledRequests.delete(id);
         appendAccessLog({
           ts: chatAccessTs,
@@ -3990,10 +4748,22 @@ rl.on('line', async (line) => {
           ok: chatOk,
         });
       }
+    } else if (cmd === 'cancelDownload') {
+      const requestId = Number(payload.requestId);
+      if (!Number.isFinite(requestId)) {
+        throw new Error('cancelDownload requires numeric requestId');
+      }
+      const controller = activeDownloads.get(requestId);
+      if (controller && !controller.signal.aborted) controller.abort();
+      reply({ ok: true, result: { accepted: Boolean(controller) } });
     } else if (cmd === 'cancelChatRequest') {
       const requestId = Number(payload.requestId);
       if (Number.isFinite(requestId)) {
-        canceledRequests.add(requestId);
+        const controller = activeChatRequests.get(requestId);
+        if (controller) {
+          canceledRequests.add(requestId);
+          controller.abort();
+        }
         reply({ ok: true });
       } else {
         throw new Error('cancelChatRequest requires numeric requestId');
@@ -4245,23 +5015,7 @@ rl.on('line', async (line) => {
       try {
         const poolEntry = await ensureModel(modelAlias);
         const embedModel = poolEntry.catModel;
-        // Prefer the EmbeddingsSession-backed replacement (see createSessionEmbeddingClient)
-        // over the deprecated createEmbeddingClient() wrapper it mirrors, removed end of 2026.
-        // Falls back to createEmbeddingClient() unchanged on any SDK build that doesn't export
-        // EmbeddingsSession/Request/Item.
-        let client = null;
-        try {
-          const sdkModule = await getFoundrySdkModule();
-          client = createSessionEmbeddingClient(embedModel, sdkModule);
-        } catch (err) {
-          log('debug', `EmbeddingsSession client unavailable, using createEmbeddingClient(): ${err?.message || err}`);
-        }
-        if (!client) {
-          if (typeof embedModel?.createEmbeddingClient !== 'function') {
-            throw new Error(`Model ${modelAlias} does not expose createEmbeddingClient`);
-          }
-          client = embedModel.createEmbeddingClient();
-        }
+        const client = await createEmbeddingClientForModel(modelAlias, embedModel);
         const result = await client.generateEmbeddings(inputs);
         embedOk = true;
         audit('embedTexts', { alias: modelAlias, count: inputs.length });
@@ -4310,7 +5064,16 @@ rl.on('line', async (line) => {
           };
         } : undefined;
         const result = await rerunAcceleratorRegistration(progress, rebuild);
-        reply({ ok: true, result: result ?? null });
+        const localRegistrations = await runLocalCatalogMutation(
+          registerOwnedLocalModels,
+          'owned local model registration',
+          progress,
+        );
+        if (localRegistrations.length) invalidateModelIndex();
+        const registration = result && typeof result === 'object'
+          ? { ...result, localModelRegistrations: localRegistrations }
+          : { result: result ?? null, localModelRegistrations: localRegistrations };
+        reply({ ok: true, result: registration });
       } else {
         reply({ ok: true, result: null });
       }
@@ -4345,7 +5108,11 @@ rl.on('line', async (line) => {
       reply({ error: `Unknown command: ${cmd}` });
     }
   } catch (e) {
-    reply({ error: e.message || String(e) });
+    if (cmd === 'download' && e?.name === 'AbortError') {
+      reply({ error: e.message || 'Model download was cancelled.', certainty: 'cancelled' });
+    } else {
+      reply({ error: e.message || String(e) });
+    }
   } finally {
     if (operationAdmitted) operationAdmission.complete(id);
     releaseServiceTransition?.();

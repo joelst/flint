@@ -182,6 +182,51 @@ describe('verifyIpcContractSources', () => {
     );
   });
 
+  it('refuses duplicate sidecar command schema entries', () => {
+    const broken = fixtures();
+    broken.sidecar = broken.sidecar.replace(
+      'getStatus: { required: [], optional: [] },',
+      'getStatus: { required: [], optional: [] },\n        getStatus: { required: [], optional: [] },',
+    );
+    expect(() => verifyIpcContractSources(broken, { log: () => {} })).toThrow(/duplicate.*getStatus/i);
+  });
+
+  it('refuses duplicate typed command variants instead of letting the later variant win', () => {
+    const broken = fixtures();
+    broken.typed = broken.typed.replace(
+      "| { cmd: 'unload'; alias: string; lane?: LaneName };",
+      "| { cmd: 'unload'; wrong: string }\n        | { cmd: 'unload'; alias: string; lane?: LaneName };",
+    );
+    expect(() => verifyIpcContractSources(broken, { log: () => {} })).toThrow(/duplicate.*unload/i);
+  });
+
+  it('refuses duplicate field-type command entries', () => {
+    const broken = fixtures();
+    broken.sidecar = broken.sidecar.replace(
+      "unload: { alias: 'non-empty-string' },",
+      "unload: { wrong: 'string' },\n        unload: { alias: 'non-empty-string' },",
+    );
+    expect(() => verifyIpcContractSources(broken, { log: () => {} })).toThrow(/duplicate.*unload/i);
+  });
+
+  it('refuses a duplicate field type that weakens alias validation', () => {
+    const broken = fixtures();
+    broken.sidecar = broken.sidecar.replace(
+      "unload: { alias: 'non-empty-string' },",
+      "unload: { alias: 'non-empty-string', alias: 'string' },",
+    );
+    expect(() => verifyIpcContractSources(broken, { log: () => {} })).toThrow(/duplicate.*alias/i);
+  });
+
+  it('refuses a nonliteral schema field list that otherwise looks empty', () => {
+    const broken = fixtures();
+    broken.sidecar = broken.sidecar.replace(
+      'getStatus: { required: [], optional: [] },',
+      'getStatus: { required: MISSING_FIELDS, optional: [] },',
+    );
+    expect(() => verifyIpcContractSources(broken, { log: () => {} })).toThrow(/literal.*getStatus.*required/i);
+  });
+
   it('detects a command missing from COMMAND_EFFECTS', () => {
     const broken = fixtures();
     broken.outcomes = broken.outcomes.replace("getStatus: 'query',\n", '');

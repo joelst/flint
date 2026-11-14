@@ -89,6 +89,30 @@ fn phase_name(phase: RuntimePhase) -> &'static str {
     }
 }
 
+pub(crate) fn node_compatible_path(path: &Path) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    {
+        let text = path
+            .to_str()
+            .ok_or_else(|| "The runtime path is not representable as Unicode".to_string())?;
+        if let Some(local) = text.strip_prefix(r"\\?\") {
+            if let Some(unc) = local.strip_prefix(r"UNC\") {
+                return Ok(PathBuf::from(format!(r"\\{unc}")));
+            }
+            let bytes = local.as_bytes();
+            if bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && bytes[2] == b'\\'
+            {
+                return Ok(PathBuf::from(local));
+            }
+            return Err("Node cannot launch from this Windows volume path".to_string());
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
 fn trusted_runtime_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf, String), String> {
     #[cfg(debug_assertions)]
     let _ = app;
@@ -115,19 +139,20 @@ fn trusted_runtime_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf, String), 
     if !canonical_script.starts_with(&canonical_base) {
         return Err("The sidecar resolved outside Flint's trusted runtime directory".to_string());
     }
+    let node_base = node_compatible_path(&canonical_base)?;
+    let node_script = node_compatible_path(&canonical_script)?;
 
     #[cfg(debug_assertions)]
-    let node_path =
-        std::env::join_paths([canonical_base.join("node_modules"), canonical_base.clone()])
-            .map_err(|error| format!("Could not build development NODE_PATH: {error}"))?;
+    let node_path = std::env::join_paths([node_base.join("node_modules"), node_base.clone()])
+        .map_err(|error| format!("Could not build development NODE_PATH: {error}"))?;
 
     #[cfg(not(debug_assertions))]
-    let node_path = std::env::join_paths([canonical_base.clone()])
+    let node_path = std::env::join_paths([node_base.clone()])
         .map_err(|error| format!("Could not build packaged NODE_PATH: {error}"))?;
 
     Ok((
-        canonical_script,
-        canonical_base,
+        node_script,
+        node_base,
         node_path.to_string_lossy().into_owned(),
     ))
 }
@@ -528,6 +553,24 @@ mod tests {
         assert_eq!(phase_name(RuntimePhase::Ready), "ready");
         assert_eq!(phase_name(RuntimePhase::ShuttingDown), "shuttingDown");
         assert_eq!(phase_name(RuntimePhase::Exited), "exited");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_node_compatible_path_preserves_canonical_targets_without_verbatim_prefix() {
+        assert_eq!(
+            node_compatible_path(Path::new(r"\\?\D:\a\flint\sidecar\foundry-sidecar.js")).unwrap(),
+            PathBuf::from(r"D:\a\flint\sidecar\foundry-sidecar.js")
+        );
+        assert_eq!(
+            node_compatible_path(Path::new(r"\\?\UNC\server\share\sidecar\web-tool.js")).unwrap(),
+            PathBuf::from(r"\\server\share\sidecar\web-tool.js")
+        );
+        assert_eq!(
+            node_compatible_path(Path::new(r"C:\Program Files\Flint\sidecar\web-tool.js")).unwrap(),
+            PathBuf::from(r"C:\Program Files\Flint\sidecar\web-tool.js")
+        );
+        assert!(node_compatible_path(Path::new(r"\\?\Volume{1234}\sidecar\web-tool.js")).is_err());
     }
 
     #[test]

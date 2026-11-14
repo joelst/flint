@@ -1,4 +1,10 @@
-export const SPEECH_SDK_VERSION = '2.0.1';
+/**
+ * Request shapes below were probed on Foundry Local SDK 2.0.1. Parakeet stays
+ * refused until a probe on this pin records a pass. The label tracks the pin.
+ */
+import { PINNED_FOUNDRY_SDK_VERSION } from './foundry-runtime-pin.js';
+
+export const SPEECH_SDK_VERSION = PINNED_FOUNDRY_SDK_VERSION;
 
 const FAMILY_RULES = [
   {
@@ -20,8 +26,9 @@ const FAMILY_RULES = [
 ];
 
 /**
- * Select the probed SDK 2.0.1 audio request shape from model names, which carry the
- * family information absent from catalog metadata.
+ * Select the probed audio request shape from model names, which carry the
+ * family information absent from catalog metadata. The shapes were probed on
+ * SDK 2.0.1 and are still the ones this pin uses.
  *
  * @param {string} alias
  * @param {string} [variantId]

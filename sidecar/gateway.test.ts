@@ -133,6 +133,97 @@ afterEach(async () => {
 });
 
 describe('gateway pass-through', () => {
+  it('returns base64 float32 embeddings when the native route ignores the requested format', async () => {
+    upstream.state.loaded.add('already-loaded');
+    gateway = await startGateway();
+    const body = JSON.stringify({ model: 'already-loaded', input: ['one'], encoding_format: 'base64' });
+    const res = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(200);
+    const bytes = Buffer.from(JSON.parse(res.body).data[0].embedding, 'base64');
+    expect(bytes.length).toBe(8);
+    expect(bytes.readFloatLE(0)).toBeCloseTo(0.1);
+    expect(bytes.readFloatLE(4)).toBeCloseTo(0.2);
+    expect(Number(res.headers['content-length'])).toBe(Buffer.byteLength(res.body));
+    expect(JSON.parse(upstream.state.hits[0].body).encoding_format).toBe('base64');
+  });
+
+  it('returns base64 embeddings after autoload and leaves float requests unchanged', async () => {
+    gateway = await startGateway({
+      load: async alias => { upstream.state.loaded.add(alias); return alias; },
+    });
+    const body = JSON.stringify({ model: 'cold', input: ['one'], encoding_format: 'base64' });
+    const encoded = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST', body, headers: { 'content-type': 'application/json' },
+    });
+    expect(encoded.status).toBe(200);
+    expect(Buffer.from(JSON.parse(encoded.body).data[0].embedding, 'base64')).toHaveLength(8);
+    expect(upstream.state.hits).toHaveLength(2);
+    const plain = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'cold', input: ['one'], encoding_format: 'float' }),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(JSON.parse(plain.body).data[0].embedding).toEqual([0.1, 0.2]);
+  });
+
+  it('does not return a successful base64 response for invalid native embedding data', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ embedding: [null] }] }));
+    });
+    gateway = await startGateway();
+    const res = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'already-loaded', input: 'one', encoding_format: 'base64' }),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(502);
+    expect(JSON.parse(res.body).error.message).toMatch(/invalid/i);
+  });
+
+  it('refuses a successful non-JSON native response to a base64 embeddings request', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('not an embedding');
+    });
+    gateway = await startGateway();
+    const res = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'already-loaded', input: 'one', encoding_format: 'base64' }),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(502);
+    expect(JSON.parse(res.body).error.message).toMatch(/not JSON/);
+  });
+
+  it('appends cached local registrations to the native model listing', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        object: 'list',
+        data: [{ id: 'catalog-model', object: 'model', parent: 'Catalog Model' }],
+      }));
+    });
+    gateway = await startGateway({
+      listLocalModels: async () => [
+        { id: 'external-model', object: 'model', parent: 'External Model' },
+      ],
+    });
+    const res = await request(gateway.publicPort, '/v1/models');
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).data.map(({ id }) => id)).toEqual([
+      'catalog-model',
+      'external-model',
+    ]);
+  });
+
   it('forwards a plain GET and returns the upstream body', async () => {
     gateway = await startGateway();
     const res = await request(gateway.publicPort, '/v1/models');
@@ -140,7 +231,7 @@ describe('gateway pass-through', () => {
     expect(res.body).toBe('pong');
   });
 
-  it('omits neutral chat penalties before forwarding to Foundry', async () => {
+  it('omits neutral penalties before forwarding to Foundry', async () => {
     const model = 'already-loaded';
     upstream.state.loaded.add(model);
     gateway = await startGateway();
@@ -166,6 +257,42 @@ describe('gateway pass-through', () => {
     expect(forwarded.temperature).toBe(0);
     expect(Number(upstream.state.hits[0].headers['content-length']))
       .toBe(Buffer.byteLength(upstream.state.hits[0].body));
+  });
+
+  it('continues omitting nonnumeric frequency penalty values', async () => {
+    upstream.state.loaded.add('already-loaded');
+    gateway = await startGateway();
+    const body = JSON.stringify({
+      model: 'already-loaded',
+      messages: [{ role: 'user', content: 'hello' }],
+      frequency_penalty: '0.5',
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(upstream.state.hits[0].body).frequency_penalty).toBeUndefined();
+  });
+
+  it('rejects nonzero frequency penalty without loading or forwarding the request', async () => {
+    let called = false;
+    gateway = await startGateway({ load: async () => { called = true; } });
+    const body = JSON.stringify({
+      model: 'qwen3-0.6b',
+      messages: [{ role: 'user', content: 'hello' }],
+      frequency_penalty: 0.4,
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error.message).toContain('does not support a nonzero frequency penalty');
+    expect(called).toBe(false);
+    expect(upstream.state.hits).toEqual([]);
   });
 
   it('rewrites the Host header so upstream never sees the client value', async () => {
@@ -292,6 +419,166 @@ describe('gateway pass-through', () => {
 });
 
 describe('gateway autoload', () => {
+  it('serves local registrations through the SDK instead of replaying to the native HTTP router', async () => {
+    const serveLocal = vi.fn(async (_req, res, _body, model) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ model: model.variantId, source: 'session' }));
+    });
+    const load = vi.fn(async () => 'local-model:1');
+    gateway = await startGateway({
+      resolve: async () => ({ alias: 'local-model', variantId: null, local: true }),
+      load,
+      serveLocal,
+    });
+    const body = JSON.stringify({
+      model: 'local-model',
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ model: 'local-model:1', source: 'session' });
+    expect(load).toHaveBeenCalledWith('local-model', null);
+    expect(serveLocal).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      body,
+      { alias: 'local-model', variantId: 'local-model:1', local: true },
+    );
+    expect(upstream.state.hits).toHaveLength(1);
+  });
+
+  it('serves an already-loaded local model when autoload is disabled', async () => {
+    const serveLocal = vi.fn(async (_req, res, _body, model) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ model: model.variantId, source: 'session' }));
+    });
+    const load = vi.fn(async () => 'local-model:1');
+    const getLoadedModel = vi.fn(async () => 'local-model:1');
+    gateway = await startGateway({
+      autoload: false,
+      resolve: async () => ({ alias: 'local-model', variantId: null, local: true }),
+      load,
+      getLoadedModel,
+      serveLocal,
+    });
+    const body = JSON.stringify({
+      model: 'local-model',
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ model: 'local-model:1', source: 'session' });
+    expect(getLoadedModel).toHaveBeenCalledWith('local-model', null);
+    expect(load).not.toHaveBeenCalled();
+    expect(serveLocal).toHaveBeenCalledOnce();
+  });
+
+  it('does not load an unloaded local model when autoload is disabled', async () => {
+    const serveLocal = vi.fn();
+    const load = vi.fn(async () => 'local-model:1');
+    const getLoadedModel = vi.fn(async () => null);
+    gateway = await startGateway({
+      autoload: false,
+      resolve: async () => ({ alias: 'local-model', variantId: null, local: true }),
+      load,
+      getLoadedModel,
+      serveLocal,
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'local-model',
+        messages: [{ role: 'user', content: 'hello' }],
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(getLoadedModel).toHaveBeenCalledWith('local-model', null);
+    expect(load).not.toHaveBeenCalled();
+    expect(serveLocal).not.toHaveBeenCalled();
+  });
+
+  it('serves local embeddings through the SDK after loading the registration', async () => {
+    const body = JSON.stringify({ model: 'local-model', input: 'hello' });
+    const serveLocalEmbeddings = vi.fn(async (_req, res, _body, model) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        object: 'list',
+        data: [{ object: 'embedding', index: 0, embedding: [0.1, 0.2] }],
+        model: model.variantId,
+      }));
+    });
+    const load = vi.fn(async () => 'local-model:1');
+    gateway = await startGateway({
+      resolve: async () => ({ alias: 'local-model', variantId: null, local: true }),
+      load,
+      serveLocalEmbeddings,
+    });
+
+    const res = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({
+      object: 'list',
+      model: 'local-model:1',
+      data: [{ object: 'embedding', index: 0, embedding: [0.1, 0.2] }],
+    });
+    expect(load).toHaveBeenCalledWith('local-model', null);
+    expect(serveLocalEmbeddings).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      body,
+      { alias: 'local-model', variantId: 'local-model:1', local: true },
+    );
+    expect(upstream.state.hits).toHaveLength(1);
+  });
+
+  it('buffers embeddings for an already-loaded local model when autoload is disabled', async () => {
+    const body = JSON.stringify({ model: 'local-model', input: ['hello'] });
+    const serveLocalEmbeddings = vi.fn(async (_req, res, _body, model) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ object: 'list', data: [], model: model.variantId }));
+    });
+    const load = vi.fn(async () => 'local-model:1');
+    const getLoadedModel = vi.fn(async () => 'local-model:1');
+    gateway = await startGateway({
+      autoload: false,
+      resolve: async () => ({ alias: 'local-model', variantId: null, local: true }),
+      load,
+      getLoadedModel,
+      serveLocalEmbeddings,
+    });
+
+    const res = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).model).toBe('local-model:1');
+    expect(getLoadedModel).toHaveBeenCalledWith('local-model', null);
+    expect(load).not.toHaveBeenCalled();
+    expect(serveLocalEmbeddings).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      body,
+      { alias: 'local-model', variantId: 'local-model:1', local: true },
+    );
+  });
+
   it('loads the model and replays the request once', async () => {
     const loads = [];
     gateway = await startGateway({

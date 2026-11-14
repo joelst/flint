@@ -295,6 +295,38 @@ jobs:
       - name: Smoke test bundled Node + Foundry SDK
         run: npm run smoke:node -- --target ${{ matrix.target }}
 
+      - name: Install signed MSI and smoke installed runtime
+        if: ${{ matrix.os == 'windows-latest' && contains(steps.version.outputs.win_bundles, 'msi') }}
+        shell: pwsh
+        run: |
+          $msi = @(Get-ChildItem -LiteralPath 'src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi' -Filter '*.msi' -File)
+          if ($msi.Count -ne 1) {
+            throw "Expected one signed MSI, found $($msi.Count)."
+          }
+          $installDir = Join-Path $env:RUNNER_TEMP 'flint-installed'
+          $log = Join-Path $env:RUNNER_TEMP 'flint-msi-install.log'
+          $installer = Start-Process -FilePath 'msiexec.exe' -ArgumentList @(
+            '/i', ('"' + $msi[0].FullName + '"'), ('INSTALLDIR="' + $installDir + '"'),
+            '/qn', '/norestart', '/l*v', ('"' + $log + '"')
+          ) -PassThru -Wait
+          if ($installer.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $log -PathType Leaf) {
+              Get-Content -LiteralPath $log -Tail 35
+            }
+            throw "MSI installation failed with exit code $($installer.ExitCode)."
+          }
+          $exe = Join-Path $installDir 'Flint.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            throw "Installed executable not found at $($exe)."
+          }
+          if ((Get-AuthenticodeSignature -FilePath $exe).Status -ne 'Valid') {
+            throw 'The installed executable does not have a valid Authenticode signature.'
+          }
+          & npm run smoke:runtime -- --exe $exe
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installed runtime smoke failed with exit code $($LASTEXITCODE)."
+          }
+
       - name: Upload updater metadata
         uses: actions/upload-artifact@v4
         with:

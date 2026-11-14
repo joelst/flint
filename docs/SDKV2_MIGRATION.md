@@ -1,11 +1,18 @@
 # Foundry Local SDK 2.x migration scope
 
-This document records the migration boundary for the current minimum
-`foundry-local-sdk` version, pinned to `2.0.1` in `package.json` and
-`PRODUCT_PLAN.md`. The SDK marks the OpenAI-shaped `ChatClient`, `AudioClient`, and
+This document records the migration boundary for the checked-in
+`foundry-local-sdk` pin, which is `2.4.1` in `package.json`. That pin targets
+the 2.1.0 through 2.4.1 behavior Flint uses and does not follow newer npm releases.
+The registration measurement is
+[spikes/foundry-2.1.0-spike.md](./spikes/foundry-2.1.0-spike.md). The SDK marks the OpenAI-shaped `ChatClient`, `AudioClient`, and
 `EmbeddingClient` wrappers deprecated and plans to remove them at the end of
 2026. The replacement API is based on `ChatSession`, `AudioSession`,
 `EmbeddingsSession`, `Request`, and `Item`.
+
+The 2.1.0 integration is the baseline this pin grew from, not release qualification.
+Current implementation gaps, model feasibility, sequencing, and the 2.4.1
+release gates belong to
+[the SDK/BYOM shipping plan](./PRODUCT_PLAN.md#sdk-241-and-real-byom-shipping-plan).
 
 ## Current state
 
@@ -19,8 +26,10 @@ Flint already has compatibility adapters for the text paths:
 
 The adapters preserve Flint's existing OpenAI-shaped request and response
 contracts. They create a fresh session for each operation, so the migration does
-not implicitly change Flint's conversation-history ownership or streaming
-cancellation behavior.
+not change Flint's conversation-history ownership. IPC ChatSession one-shot and
+streaming calls now receive an operation-owned AbortSignal; the native operation
+must settle before its activity lease is released. Legacy-client and HTTP
+gateway disconnect cancellation remain separate qualification gates.
 
 Completed assistant tool calls are structurally validated on every chat
 transport before Flint reports success or emits a synthetic buffered delta.
@@ -33,8 +42,13 @@ most 64 distinct calls.
 The current audio code classifies the requested model before loading whenever
 its alias, explicit variant, resident variant, or unanimous cached candidates
 identify the family. Whisper-family models use the proven one-shot URI request.
-Nemotron uses 16 kHz mono 16-bit PCM through `ItemQueue`. Parakeet has no working
-request shape in the pinned SDK and is refused before loading when determinable.
+Nemotron uses 16 kHz mono 16-bit PCM through `ItemQueue`. These request shapes
+were established on 2.0.1; Whisper and Nemotron were probed on 2.4.0, while
+2.4.1 qualification remains. Parakeet is refused before loading when
+determinable, retaining the unsupported family decision from 2.0.1.
+Foundry Local 2.3.0 claims a Parakeet
+fix; the 2.4.0 re-probe refused Parakeet before loading. Keep the refusal until
+a supported path is verified on a later pin.
 Mixed or unreadable cached candidates defer to the exact runtime-selected
 variant; no speech request retries through deprecated `AudioClient` or HTTP.
 
@@ -44,6 +58,67 @@ the `PromptTemplate` JSON stored in BYOM `inference_model.json` files and shared
 with the browser bundle. It must remain until Flint's BYOM format no longer
 requires that metadata. ChatSession applies the model's template internally at
 inference time.
+
+## SDK 2.1.0 local-catalog boundary
+
+`manager.getCatalog(CatalogType.Local)` exposes
+`registerModel(modelPath, modelId, metadata)` and `unregisterModel(aliasOrId)`.
+The public `manager.catalog` is not the mutation target. `MutableModelInfo`
+exposes string/integer setters for task, execution provider, device type,
+context length, modalities, tool/reasoning capabilities, and other metadata.
+Registration is metadata, not a model converter or proof that a session works.
+
+Copied and linked folders are registered after awaited accelerator setup,
+through the serialized local-catalog mutation lane without forcing a public
+catalog snapshot read. SDK local rows use `providerType: LocalRegistration`;
+sidecar list projections retain `local://<alias>` for existing frontend
+presentation. A catalog read failure no longer turns into an empty list or
+authorizes unregistering an unknown row. A task-less collision is replaced
+only when its registered path matches the requested path. Deletion captures
+the registered path before unregistering; external linked assets remain
+untouched.
+
+The native listener still omits local registrations from `/v1/models` and
+returns 404 for them. Flint's gateway now appends cached local registrations to
+discovery and sends local chat completions through `ChatSession`, while keeping
+the existing model admission, residency, and activity leases. Focused gateway
+tests cover the adapter boundary. The external Llama 3.2 3B spike also proves
+real-weight CPU IPC and buffered/streaming gateway chat on 2.4.0 for both a
+metadata-free copy and a metadata-bearing link, as recorded in the linked spike
+evidence. Source hashes and graceful child closure are verified.
+Tool/usage parity, other providers, and installed-app
+behavior remain release gates until the complete qualification matrix passes.
+
+## SDK session and cancellation features
+
+The installed package accepts an `AbortSignal` for both
+`processRequest(request, { signal })` and
+`processStreamingRequest(request, { signal })`; cancellation rejects with
+`AbortError`, but a completed native response can win the race. A stream's
+terminal `response` settles after native completion and queued callbacks.
+`IModel.download(..., signal)` observes cooperative cancellation at download
+checkpoints. Flint's `cancelDownload` IPC aborts the matching download and
+waits for its native promise to settle before reporting cancellation; a
+completion race can still report success. The cache view is refreshed after a
+confirmed cancellation, but real-model partial-file cleanup remains unqualified.
+The IPC ChatSession adapter forwards an operation-owned signal for one-shot and
+streaming chat, and waits for the terminal stream response before disposing the
+session or releasing its activity lease. Gateway-disconnect cancellation
+remains unqualified; an early Stop acknowledgement alone is not treated as
+native completion.
+
+`ChatSession` also exposes exact structural `preflightRequest`, function-tool
+definitions, custom raw-text tool definitions, and explicit tool removal.
+Those declarations do not make raw tools part of Flint's existing
+function-only IPC contracts or authorize a tool executor. Adoption and explicit
+unsupported outcomes are owned by the shipping plan.
+
+The imported adapters omit frequency penalties because nonzero values are
+unsupported by the runtime. Flint rejects a nonzero value in the Playground,
+IPC, and gateway before dispatch; neutral zero is omitted to avoid the
+previously observed converter failure. This does not claim non-neutral
+frequency-penalty semantics. Verify the remaining sampling/usage/finish
+reasons against real 2.4.0 sessions before shipping.
 
 ## Migration boundary
 

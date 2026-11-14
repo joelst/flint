@@ -80,6 +80,9 @@ jobs:
       - name: Stage bundled Node (externalBin)
         run: npm run ensure:node
 
+      - name: Stage koffi native resources
+        run: npm run stage:koffi
+
       - name: Validate updater configuration
         shell: bash
         run: |
@@ -224,6 +227,9 @@ jobs:
 
       - name: Stage bundled Node (externalBin)
         run: npm run ensure:node
+
+      - name: Stage koffi native resources
+        run: npm run stage:koffi
 
       # Packaging prerequisites and a real sidecar-runtime smoke. These catch the
       # class of bug that only shows up in an installed build, which is invisible

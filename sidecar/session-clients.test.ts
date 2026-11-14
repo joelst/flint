@@ -78,6 +78,35 @@ function fakeSdk({ disposeThrows = false, processRequestThrows = false, processR
 }
 
 describe('createSessionChatClient buffered chat', () => {
+  it('passes the owning request AbortSignal to one-shot SDK processing', async () => {
+    const controller = new AbortController();
+    let capturedOptions: unknown;
+    class Request { addItem() { return this; } }
+    const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+    class ChatSession {
+      async processRequest(_request: unknown, options?: unknown) {
+        capturedOptions = options;
+        return { output: [Item.text(JSON.stringify({ choices: [] }), 'openai-json')] };
+      }
+      dispose() {}
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    await client.completeChat([{ role: 'user', content: 'hi' }], undefined, { signal: controller.signal });
+    expect(capturedOptions).toEqual({ signal: controller.signal });
+  });
+
+  it('preserves the SDK AbortError identity after one-shot cancellation', async () => {
+    const abortError = Object.assign(new Error('native request cancelled'), { name: 'AbortError' });
+    class Request { addItem() { return this; } }
+    const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+    class ChatSession {
+      async processRequest() { throw abortError; }
+      dispose() {}
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    await expect(client.completeChat([{ role: 'user', content: 'hi' }])).rejects.toBe(abortError);
+  });
+
   it('sends multipart messages as native text and decoded image items', async () => {
     let capturedRequest: any;
     class Request {
@@ -418,7 +447,7 @@ describe('createSessionChatClient buffered chat', () => {
     expect(result.choices[0].message.content).toBe('hi');
   });
 
-  it('serializes every optional sampling setting onto the wire request', async () => {
+  it('serializes every supported optional sampling setting onto the wire request', async () => {
     let capturedItem: { text: string } | undefined;
     class Request {
       addItem (item: { text: string }) { capturedItem = item; return this; }
@@ -432,7 +461,7 @@ describe('createSessionChatClient buffered chat', () => {
     }
     const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
     Object.assign(client.settings, {
-      frequencyPenalty: 0.1,
+      frequencyPenalty: 0,
       maxTokens: 128,
       presencePenalty: 0.2,
       temperature: 0.7,
@@ -442,7 +471,7 @@ describe('createSessionChatClient buffered chat', () => {
     });
     await client.completeChat([{ role: 'user', content: 'hi' }]);
     const wire = JSON.parse(capturedItem!.text);
-    expect(wire.frequency_penalty).toBe(0.1);
+    expect(wire.frequency_penalty).toBeUndefined();
     expect(wire.max_tokens).toBe(128);
     expect(wire.presence_penalty).toBe(0.2);
     expect(wire.temperature).toBe(0.7);
@@ -450,9 +479,176 @@ describe('createSessionChatClient buffered chat', () => {
     expect(wire.metadata).toEqual({ top_k: '40', random_seed: '7' });
   });
 
+  it.each(['completeChat', 'completeStreamingChat'])(
+    'rejects nonzero frequency penalty before %s dispatch',
+    async (method) => {
+      let dispatched = false;
+      class Request {}
+      const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+      class ChatSession {
+        async processRequest () {
+          dispatched = true;
+          return { output: [] };
+        }
+        processStreamingRequest () {
+          dispatched = true;
+          return { response: Promise.resolve({ output: [] }), [Symbol.asyncIterator]: async function* () {} };
+        }
+        dispose () {}
+      }
+      const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+      client.settings.frequencyPenalty = 0.5;
+      if (method === 'completeChat') {
+        await expect(client.completeChat([{ role: 'user', content: 'hi' }]))
+          .rejects.toThrow('does not support a nonzero frequency penalty');
+      } else {
+        expect(() => client.completeStreamingChat([{ role: 'user', content: 'hi' }]))
+          .toThrow('does not support a nonzero frequency penalty');
+      }
+      expect(dispatched).toBe(false);
+    },
+  );
+
+  it.each(['completeChat', 'completeStreamingChat'])(
+    'preflights the native request before %s dispatch',
+    async (method) => {
+      const events: string[] = [];
+      let preflightRequest: unknown;
+      let dispatchedRequest: unknown;
+      const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+      class Request {
+        addItem () { return this; }
+      }
+      class ChatSession {
+        async preflightRequest (request: unknown) {
+          events.push('preflight');
+          preflightRequest = request;
+          return {
+            promptTokens: 10,
+            outputReserveTokens: 20,
+            requiredTokens: 30,
+            contextLimitTokens: 40,
+            fits: true,
+            deficitTokens: 0,
+          };
+        }
+        async processRequest (request: unknown) {
+          events.push('dispatch');
+          dispatchedRequest = request;
+          return { output: [Item.text(JSON.stringify({ choices: [] }), 'openai-json')] };
+        }
+        processStreamingRequest (request: unknown) {
+          events.push('dispatch');
+          dispatchedRequest = request;
+          return {
+            response: Promise.resolve({ output: [] }),
+            [Symbol.asyncIterator]: async function* () {
+              yield Item.text(JSON.stringify({ choices: [] }), 'openai-json');
+            },
+          };
+        }
+        dispose () {}
+      }
+      const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+      if (method === 'completeChat') {
+        await client.completeChat([{ role: 'user', content: 'hi' }]);
+      } else {
+        for await (const _ of client.completeStreamingChat([{ role: 'user', content: 'hi' }])) {}
+      }
+      expect(events).toEqual(['preflight', 'dispatch']);
+      expect(dispatchedRequest).toBe(preflightRequest);
+    },
+  );
+
+  it.each(['completeChat', 'completeStreamingChat'])(
+    'rejects a request over the native structural context limit before %s dispatch',
+    async (method) => {
+      let dispatched = false;
+      const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+      class Request {
+        addItem () { return this; }
+      }
+      class ChatSession {
+        async preflightRequest () {
+          return {
+            promptTokens: 110,
+            outputReserveTokens: 20,
+            requiredTokens: 130,
+            contextLimitTokens: 128,
+            fits: false,
+            deficitTokens: 2,
+          };
+        }
+        async processRequest () {
+          dispatched = true;
+          return { output: [] };
+        }
+        processStreamingRequest () {
+          dispatched = true;
+          return { response: Promise.resolve({ output: [] }), [Symbol.asyncIterator]: async function* () {} };
+        }
+        dispose () {}
+      }
+      const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+      const message = 'structural context limit by 2 tokens';
+      if (method === 'completeChat') {
+        await expect(client.completeChat([{ role: 'user', content: 'hi' }]))
+          .rejects.toThrow(message);
+      } else {
+        await expect((async () => {
+          for await (const _ of client.completeStreamingChat([{ role: 'user', content: 'hi' }])) {}
+        })()).rejects.toThrow(message);
+      }
+      expect(dispatched).toBe(false);
+    },
+  );
+
+  it('does not dispatch inference if cancellation arrives during preflight', async () => {
+    let preflightStartedResolve: (() => void) | null = null;
+    let releasePreflight: (() => void) | null = null;
+    let dispatched = false;
+    const preflightStarted = new Promise<void>((resolve) => { preflightStartedResolve = resolve; });
+    const preflightBlocked = new Promise<void>((resolve) => { releasePreflight = resolve; });
+    const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+    class Request {
+      addItem () { return this; }
+    }
+    class ChatSession {
+      async preflightRequest () {
+        preflightStartedResolve?.();
+        await preflightBlocked;
+        return {
+          promptTokens: 10,
+          outputReserveTokens: 20,
+          requiredTokens: 30,
+          contextLimitTokens: 40,
+          fits: true,
+          deficitTokens: 0,
+        };
+      }
+      async processRequest () {
+        dispatched = true;
+        return { output: [] };
+      }
+      dispose () {}
+    }
+    const controller = new AbortController();
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    const completion = client.completeChat(
+      [{ role: 'user', content: 'hi' }],
+      undefined,
+      { signal: controller.signal },
+    );
+    await preflightStarted;
+    controller.abort();
+    releasePreflight?.();
+    await expect(completion).rejects.toMatchObject({ name: 'AbortError' });
+    expect(dispatched).toBe(false);
+  });
+
   it('omits neutral penalties while preserving other zero-valued settings', async () => {
-    // Foundry Local 2.0.1 misapplies an explicit frequency_penalty of 0 for some models.
-    // Omission is semantically identical for penalties, but not for the other settings.
+    // Frequency penalty is never sent. 2.0.1 misapplies an explicit 0, and 2.1.0 rejects
+    // a nonzero value. Omission of a zero presence penalty is semantically identical.
     let capturedItem: { text: string } | undefined;
     class Request {
       addItem (item: { text: string }) { capturedItem = item; return this; }
@@ -538,6 +734,74 @@ describe('createSessionChatClient fallback', () => {
 });
 
 describe('createSessionChatClient streaming disposal', () => {
+  it('passes the owning request AbortSignal to SDK streaming processing', async () => {
+    const controller = new AbortController();
+    let capturedOptions: unknown;
+    class Request { addItem() { return this; } }
+    const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+    class ChatSession {
+      processStreamingRequest(_request: unknown, options?: unknown) {
+        capturedOptions = options;
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield Item.text(JSON.stringify({ choices: [{ delta: { content: 'hi' } }] }), 'openai-json');
+          },
+          response: Promise.resolve({ output: [] }),
+        };
+      }
+      dispose() {}
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    for await (const _chunk of client.completeStreamingChat(
+      [{ role: 'user', content: 'hi' }],
+      undefined,
+      { signal: controller.signal },
+    )) {}
+    expect(capturedOptions).toEqual({ signal: controller.signal });
+  });
+
+  it('holds session disposal until the terminal response settles after stream cancellation', async () => {
+    const controller = new AbortController();
+    const abortError = Object.assign(new Error('native stream cancelled'), { name: 'AbortError' });
+    let settleTerminal!: (response: unknown) => void;
+    let disposeCalls = 0;
+    class Request { addItem() { return this; } }
+    const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+    class ChatSession {
+      processStreamingRequest(_request: unknown, options?: { signal?: AbortSignal }) {
+        return {
+          async *[Symbol.asyncIterator]() {
+            await new Promise<void>((resolve) => {
+              options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+            });
+            throw abortError;
+          },
+          response: new Promise((resolve) => { settleTerminal = resolve; }),
+        };
+      }
+      dispose() { disposeCalls += 1; }
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    const iterator = client.completeStreamingChat(
+      [{ role: 'user', content: 'hi' }],
+      undefined,
+      { signal: controller.signal },
+    )[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    const outcome = pending.then(
+      () => ({ error: null }),
+      (error) => ({ error }),
+    );
+    await vi.waitFor(() => expect(settleTerminal).toBeTypeOf('function'));
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(disposeCalls).toBe(0);
+
+    settleTerminal({ finishReason: 'stop' });
+    await expect(outcome).resolves.toEqual({ error: abortError });
+    expect(disposeCalls).toBe(1);
+  });
+
   it('adapts native multimodal deltas and terminal metadata to OpenAI-shaped chunks', async () => {
     class Request {
       items: any[] = [];

@@ -5,6 +5,7 @@ import {
   selectPromptTemplate,
   buildInferenceModel,
   isEmbeddingModel,
+  localModelTask,
   sanitizeModelName,
   isInsideRoot,
   validatePromptTemplate,
@@ -167,6 +168,28 @@ describe('selectPromptTemplate', () => {
     const r = selectPromptTemplate({});
     expect(r.confident).toBe(false);
     expect(r.templateSource).toMatch(/default/);
+  });
+});
+
+describe('localModelTask', () => {
+  it('registers chat, vision, speech, and embeddings without forcing chat onto the others', () => {
+    expect(localModelTask({ architecture: 'llama', dirName: 'Llama-3.2-1B' })).toBe('chat-completion');
+    expect(localModelTask({ architecture: 'qwen2', dirName: 'qwen2.5-vl-7b' })).toBe('vision-language-chat');
+    expect(localModelTask({ dirName: 'whisper-tiny' })).toBe('automatic-speech-recognition');
+    expect(localModelTask({ architecture: 'qwen3-embedding' })).toBe('embeddings');
+    expect(localModelTask({ task: 'embeddings', dirName: 'whisper-tiny' })).toBe('embeddings');
+    expect(localModelTask()).toBe('chat-completion');
+  });
+
+  it('registers coding only from the folder task or architecture', () => {
+    expect(localModelTask({ task: 'coding', architecture: 'llama' })).toBe('coding');
+    expect(localModelTask({ architecture: 'coding' })).toBe('coding');
+    expect(localModelTask({ architecture: 'my-coding-model' })).toBe('coding');
+    expect(localModelTask({ architecture: 'llama', dirName: 'coding-7b' })).toBe('chat-completion');
+    expect(localModelTask({ architecture: 'encoding' })).toBe('chat-completion');
+    expect(localModelTask({ task: 'coding', dirName: 'whisper-tiny' })).toBe('automatic-speech-recognition');
+    expect(localModelTask({ task: 'embeddings', architecture: 'coding' })).toBe('embeddings');
+    expect(localModelTask({ architecture: 'qwen2-vl', task: 'coding' })).toBe('vision-language-chat');
   });
 });
 

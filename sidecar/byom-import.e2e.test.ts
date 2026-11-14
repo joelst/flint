@@ -1,15 +1,16 @@
 // End-to-end coverage for the BYOM import path.
 //
 // These tests drive the real sidecar over its JSON-lines protocol and then ask the real
-// Foundry SDK whether the imported model is discoverable. That last step is the point:
-// unit tests can prove Flint writes the files it intends to, but only the native scanner
-// can prove those files add up to a model Foundry will load.
+// Foundry SDK whether the imported model is registered. That last step is the point:
+// unit tests can prove Flint writes the files it intends to, but only the local catalog
+// can prove Foundry kept the session task.
 //
 // Everything happens under a throwaway appName, so the developer's own ~/.flint is never
 // touched.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import fs from 'node:fs';
+import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -101,6 +102,8 @@ beforeAll(async () => {
     let msg: any;
     try { msg = JSON.parse(line); } catch { return; }
     if (msg?.id && pending.has(msg.id)) {
+      // Accelerator downloads emit progress on this command's id before the reply.
+      if (msg.progress !== undefined || msg.stream) return;
       pending.get(msg.id)!(msg);
       pending.delete(msg.id);
     }
@@ -119,7 +122,7 @@ beforeAll(async () => {
   // incomplete SDK snapshot. Establish provider setup once; the first mutation below still
   // owns the initial native catalog scan and has a matching timeout.
   await send('ensureAccelerators');
-}, 0);
+}, 600_000);
 
 afterAll(async () => {
   if (proc) await killAndWait(proc);
@@ -264,17 +267,94 @@ describe('BYOM link', () => {
     // The source must be untouched: no marker file, no metadata rewrite.
     expect(fs.readdirSync(src).sort()).toEqual(before);
   });
+
+  it.skipIf(!hasNativeSdk)('does not serve a linked registration while its source is missing', async () => {
+    const src = track(makeSourceRepo({ nested: false }));
+    const alias = 'temporarily-missing-link';
+    fs.writeFileSync(
+      path.join(src, 'inference_model.json'),
+      JSON.stringify({ Name: `${alias}:1`, PromptTemplate: CUSTOM_TEMPLATE }),
+    );
+    const linked = await send('linkModelFolder', { folderPath: src, name: alias });
+    expect(linked.ok, JSON.stringify(linked)).toBe(true);
+
+    const moved = `${src}-hidden`;
+    fs.renameSync(src, moved);
+    let serviceStarted = false;
+    try {
+      const listed = await send('listModels');
+      expect(listed.ok, JSON.stringify(listed)).toBe(true);
+      const model = listed.result.find((row: any) => row.alias === alias);
+      expect(model).toBeDefined();
+      expect(model.cached).toBe(false);
+      expect(model.variants.every((variant: any) => !variant.cached)).toBe(true);
+
+      const load = await send('load', { alias });
+      expect(load.ok).toBeFalsy();
+      expect(String(load.error)).toMatch(/not cached|not found|does not exist|missing|ENOENT/i);
+
+      const reservation = createServer();
+      await new Promise<void>((resolve, reject) => {
+        reservation.once('error', reject).listen(0, '127.0.0.1', resolve);
+      });
+      const address = reservation.address();
+      await new Promise<void>((resolve, reject) => {
+        reservation.close((error) => error ? reject(error) : resolve());
+      });
+      if (!address || typeof address === 'string') throw new Error('No loopback port available.');
+      const started = await send('startService', {
+        port: address.port,
+        bindAddress: '127.0.0.1',
+        gateway: true,
+      });
+      expect(started.ok, JSON.stringify(started)).toBe(true);
+      serviceStarted = true;
+      const endpoint = (await send('getEndpoint')).endpoint;
+      expect(endpoint).toBeTypeOf('string');
+      const models = await fetch(`${endpoint}/models`, { signal: AbortSignal.timeout(30000) });
+      expect(models.ok).toBe(true);
+      expect((await models.json()).data.some((row: any) => row.parent === alias)).toBe(false);
+      const chat = await fetch(`${endpoint}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: alias,
+          messages: [{ role: 'user', content: 'hello' }],
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+      expect(chat.status).toBe(404);
+      await chat.text();
+    } finally {
+      try {
+        if (serviceStarted) {
+          const stopped = await send('stopService');
+          expect(stopped.ok, JSON.stringify(stopped)).toBe(true);
+        }
+      } finally {
+        fs.renameSync(moved, src);
+      }
+    }
+
+    const deleted = await send('deleteModel', { alias });
+    expect(deleted.ok, JSON.stringify(deleted)).toBe(true);
+    expect(fs.existsSync(src)).toBe(true);
+    expect(fs.existsSync(linked.result.linkPath)).toBe(false);
+  }, 120000);
 });
 
 describe('BYOM discovery by the Foundry SDK', () => {
-  it.skipIf(!hasNativeSdk)('surfaces an imported model as a Local provider resolvable by alias', async () => {
+  it.skipIf(!hasNativeSdk)('registers an imported model on the local catalog with its session task', async () => {
     const src = track(makeSourceRepo());
     const imported = await send('importModelFolder', { folderPath: src, name: 'discoverable-model' });
     expect(imported.ok, JSON.stringify(imported)).toBe(true);
+    expect(imported.result.registered).toBe(true);
+    expect(imported.result.registrationTask).toBe('chat-completion');
 
     const embedSrc = track(makeEmbeddingSourceRepo());
     const embedImported = await send('importModelFolder', { folderPath: embedSrc, name: 'discoverable-embed' });
     expect(embedImported.ok, JSON.stringify(embedImported)).toBe(true);
+    expect(embedImported.result.registrationTask).toBe('embeddings');
 
     const templateSrc = track(makeSourceRepo());
     await send('importModelFolder', { folderPath: templateSrc, name: 'tpl-write-sdk' });
@@ -284,22 +364,25 @@ describe('BYOM discovery by the Foundry SDK', () => {
     });
     expect(templateUpdated.ok, JSON.stringify(templateUpdated)).toBe(true);
 
+    const { CatalogType } = await import('foundry-local-sdk');
     const mgr = await getNativeManager();
-    const cached = await mgr.catalog.getCachedModels();
+    const local = mgr.getCatalog(CatalogType.Local);
+    const cached = await local.getCachedModels();
 
     const found = cached.find((m: any) => String(m.id).startsWith('discoverable-model'));
     expect(found, `cached: ${cached.map((m: any) => m.id).join(', ')}`).toBeTruthy();
-    expect(found.info.providerType).toBe('Local');
-    expect(found.info.uri).toBe('local://discoverable-model');
+    expect(found.info.providerType).toBe('LocalRegistration');
+    expect(found.info.task).toBe('chat-completion');
 
     const foundEmbed = cached.find((m: any) => String(m.id).startsWith('discoverable-embed'));
     expect(foundEmbed, `cached: ${cached.map((m: any) => m.id).join(', ')}`).toBeTruthy();
-    expect(foundEmbed.info.providerType).toBe('Local');
-    expect(foundEmbed.info.uri).toBe('local://discoverable-embed');
+    expect(foundEmbed.info.providerType).toBe('LocalRegistration');
+    expect(foundEmbed.info.task).toBe('embeddings');
 
-    const byAlias = await mgr.catalog.getModel('discoverable-model');
+    const byAlias = await local.getModel('discoverable-model');
     expect(byAlias.id).toBe('discoverable-model:1');
-    const rewrittenTemplate = await mgr.catalog.getModel('tpl-write-sdk');
+    expect(byAlias.info.task).toBe('chat-completion');
+    const rewrittenTemplate = await local.getModel('tpl-write-sdk');
     expect(rewrittenTemplate.id).toBe('tpl-write-sdk:1');
   }, 60000);
 });

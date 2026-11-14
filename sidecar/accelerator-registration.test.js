@@ -181,6 +181,69 @@ describe('registerDiscoveredExecutionProviders', () => {
     expect(result.retry).toBeUndefined();
   });
 
+  it('prepares CUDA before a no-discovery fallback can select it', async () => {
+    let discovered = [];
+    const calls = [];
+    const manager = {
+      discoverEps: () => discovered,
+      downloadAndRegisterEps: vi.fn(async () => {
+        calls.push('fallback');
+        discovered = [{ name: 'CUDAExecutionProvider', isRegistered: true }];
+        return { success: true, registeredEps: ['CUDAExecutionProvider'], failedEps: [] };
+      }),
+    };
+    const prepareCudaRuntime = vi.fn(async () => {
+      calls.push('prepare');
+      return { ok: true };
+    });
+
+    const result = await registerDiscoveredExecutionProviders(manager, undefined, {
+      prepareCudaRuntime,
+    });
+    expect(calls).toEqual(['prepare', 'fallback']);
+    expect(prepareCudaRuntime).toHaveBeenCalledTimes(1);
+    expect(result.registeredEps).toEqual(['CUDAExecutionProvider']);
+  });
+
+  it('does not run an ambiguous fallback when CUDA preparation fails', async () => {
+    const manager = {
+      discoverEps: () => [],
+      downloadAndRegisterEps: vi.fn(),
+    };
+    const result = await registerDiscoveredExecutionProviders(manager, undefined, {
+      prepareCudaRuntime: async () => ({ ok: false, reason: 'CUDA runtime missing' }),
+    });
+    expect(manager.downloadAndRegisterEps).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: false,
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+      retry: true,
+    });
+    expect(result.status).toContain('CUDA runtime missing');
+  });
+
+  it('does not report already-registered CUDA usable when runtime preparation fails', async () => {
+    const manager = {
+      discoverEps: () => [
+        { name: 'CPUExecutionProvider', isRegistered: true },
+        { name: 'CUDAExecutionProvider', isRegistered: true },
+      ],
+      downloadAndRegisterEps: vi.fn(),
+    };
+    const result = await registerDiscoveredExecutionProviders(manager, undefined, {
+      prepareCudaRuntime: async () => { throw new Error('DLL directory unavailable'); },
+    });
+    expect(manager.downloadAndRegisterEps).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: false,
+      registeredEps: ['CPUExecutionProvider'],
+      failedEps: ['CUDAExecutionProvider'],
+      retry: true,
+    });
+    expect(result.status).toContain('DLL directory unavailable');
+  });
+
   it('preserves failed fallback providers that rediscovery does not return', async () => {
     let discovered = [];
     const manager = {
@@ -325,6 +388,57 @@ describe('registerDiscoveredExecutionProviders', () => {
       registeredEps: ['CPUExecutionProvider'],
       failedEps: ['CUDAExecutionProvider'],
     });
+  });
+
+  it('registers CUDA before TensorRT when TensorRT is discovered first', async () => {
+    const providers = [
+      { name: 'NvTensorRTRTXExecutionProvider', isRegistered: false },
+      { name: 'WebGpuExecutionProvider', isRegistered: false },
+      { name: 'CUDAExecutionProvider', isRegistered: false },
+    ];
+    const manager = {
+      discoverEps: () => providers,
+      downloadAndRegisterEps: vi.fn(async ([name]) => {
+        providers.find((provider) => provider.name === name).isRegistered = true;
+        return { success: true, registeredEps: [name], failedEps: [] };
+      }),
+    };
+
+    await registerDiscoveredExecutionProviders(manager);
+    expect(manager.downloadAndRegisterEps.mock.calls.map(([names]) => names)).toEqual([
+      ['CUDAExecutionProvider'],
+      ['WebGpuExecutionProvider'],
+      ['NvTensorRTRTXExecutionProvider'],
+    ]);
+  });
+
+  it('records a missing CUDA runtime and still registers the other providers', async () => {
+    const providers = [
+      { name: 'CUDAExecutionProvider', isRegistered: false },
+      { name: 'CPUExecutionProvider', isRegistered: false },
+    ];
+    const prepareCudaRuntime = vi.fn(async () => ({
+      ok: false,
+      reason: 'CUDA 12 runtime directory was not found',
+    }));
+    const manager = {
+      discoverEps: () => providers,
+      downloadAndRegisterEps: vi.fn(async ([name]) => {
+        providers.find((provider) => provider.name === name).isRegistered = true;
+        return { success: true, registeredEps: [name], failedEps: [] };
+      }),
+    };
+
+    const result = await registerDiscoveredExecutionProviders(manager, undefined, {
+      prepareCudaRuntime,
+    });
+    expect(prepareCudaRuntime).toHaveBeenCalledTimes(1);
+    expect(manager.downloadAndRegisterEps.mock.calls.map(([names]) => names)).toEqual([
+      ['CPUExecutionProvider'],
+    ]);
+    expect(result.registeredEps).toEqual(['CPUExecutionProvider']);
+    expect(result.failedEps).toEqual(['CUDAExecutionProvider']);
+    expect(result.status).toContain('CUDA 12 runtime directory was not found');
   });
 });
 
@@ -1122,6 +1236,23 @@ describe('createCatalogRegistrationGate', () => {
       result: 'imported',
       catalogRefreshRequiresRestart: true,
     });
+  });
+
+  it('serializes local registration without forcing a public catalog snapshot', async () => {
+    const readCatalog = vi.fn(async () => []);
+    const gate = createCatalogRegistrationGate(
+      vi.fn().mockResolvedValue({ success: true, registeredEps: ['CPUExecutionProvider'] }),
+      readCatalog,
+    );
+
+    await expect(gate.mutateAndCommit(
+      async () => 'registered',
+      vi.fn(),
+      undefined,
+      { confirmCatalogCommit: false },
+    )).resolves.toEqual({ result: 'registered' });
+    expect(gate.isCommitConfirmed()).toBe(false);
+    expect(readCatalog).not.toHaveBeenCalled();
   });
 
   it('restart-bounds a first mutation whose callback reads the catalog before changing it', async () => {

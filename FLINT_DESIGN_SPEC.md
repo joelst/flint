@@ -192,13 +192,14 @@ Azure connections and other future feature work are tracked in
   - **UI:** Help view documents this split.
 - **Vision** — supported when catalog + chat client accept image content; multi-image attach shipped in 0.3.
 - **Pinned SDK, not latest** — Foundry Local's REST API is preview and explicitly subject
-  to breaking change. Flint pins SDK 2.0.1. The in-process OpenAI clients
-  (`createChatClient` and the audio/embedding equivalents) still exist but are
-  deprecated and scheduled for removal at the end of 2026; the Session API migration
-  is separate from this pin. A CLI or core update can silently break cache, gateway,
-  or BYOM assumptions with no Flint change; see
-  [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) Wave 1 for the startup version-check
-  that guards against this.
+  to breaking change. The checked-in pin is SDK 2.4.1, including the 2.1.0 through
+  2.4.1 behavior Flint already uses, and does not follow newer npm releases.
+  The in-process OpenAI clients (`createChatClient` and the audio/embedding equivalents)
+  still exist but are deprecated and scheduled for removal at the end of 2026; the
+  Session API migration is separate from this pin. A CLI or core update can silently
+  break cache, gateway, or BYOM assumptions with no Flint change; see
+  [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) for the 0.11.0 pin and the startup
+  version-check that guards against a mismatch.
 
 ## 11. Security & Privacy (expanded)
 

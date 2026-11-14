@@ -8,6 +8,7 @@
   import Icon from "$lib/Icon.svelte";
   import TranscriptViewToggle from "$lib/TranscriptViewToggle.svelte";
   import TranscriptSegmentTime from "$lib/TranscriptSegmentTime.svelte";
+  import { unsupportedFrequencyPenaltyMessage } from "../../sidecar/chat-parameter-policy.js";
   import type { Conversation } from "$lib/ConversationSidebar.svelte";
   import {
     initializeSDK,
@@ -30,6 +31,7 @@
     subscribeQuitFlush,
     withServiceTransition,
     downloadModel,
+    cancelDownload,
     loadModel as sdkLoadModel,
     getSidecarGeneration,
     unloadModel as sdkUnloadModel,
@@ -62,6 +64,8 @@
     setBenchmarkExclusive as sdkSetBenchmarkExclusive,
     reconcileBenchmarkExclusive,
     getLastAppliedMemorySettingsSeq,
+    refreshFoundryRuntimeAbout,
+    rememberSharedHostPreference,
     getWslStatus,
     enableWslMirroredNetworking,
     shutdownWsl,
@@ -78,6 +82,7 @@
   } from "$lib/sdk";
   import { evaluateStartupPreload, publishedAccelerationKind, publishedAccelerationLabels } from "$lib/accelerator-readiness";
   import { failureLogLine, failureNotice, summarizeFailure, type FailureNotice } from "$lib/status-message";
+  import { foundrySdkAboutLine } from "$lib/foundry-about";
   import {
     evaluate as evaluateWatch,
     emptyWatchState,
@@ -201,6 +206,7 @@
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
   import { readRuntimeGpu, writeRuntimeGpu, runtimeGpuChoices, runtimeGpuPanelVisible, runtimeGpuRestartRequired, cudaVisibleAccelerators, isCudaVariant, planVramAdmission, vramBudgetOf } from "$lib/runtime-gpu";
+  import { readSharedHost, writeSharedHost } from "$lib/shared-host";
   import { decideChipFetchHop, detectFetchableUrls, isFetchableUrl } from "$lib/url-chips";
   import {
     conversationImagePreviewPartIndexes,
@@ -262,6 +268,9 @@
     webToolSchemaTokens,
     canonicalFetchUrl,
     collectCurrentWebFetchUrls,
+    contentWebToolCalls,
+    offerAnotherWebToolRound,
+    usedToolCallIds,
     executeWebImage,
     executeWebToolCalls,
     messagesContainImages,
@@ -508,7 +517,7 @@
     }
   }
 
-  /** About strip — app + Node + service (Help + Settings). */
+  /** About strip — app + Node + Foundry SDK + service (Help + Settings). */
   const appVersion = String(
     import.meta.env.VITE_FLINT_BUILD_VERSION || (packageJson as { version?: string }).version || "0.0.0",
   );
@@ -690,6 +699,21 @@
       nodeVersionOk = null;
     }
   }
+
+  async function refreshFoundryAboutLine() {
+    try {
+      await refreshFoundryRuntimeAbout();
+    } catch {
+      // The connection row already says when the sidecar is down.
+    }
+  }
+
+  let foundryAbout = $derived(foundrySdkAboutLine(state.foundryRuntimeReported ? {
+    sdkVersion: state.foundrySdkVersion,
+    coreVersion: state.foundryCoreVersion,
+    sdkPin: state.foundrySdkPin,
+    corePin: state.foundryCorePin,
+  } : null));
 
   function dismissFirstRunCoach() {
     showFirstRunCoach = false;
@@ -1009,6 +1033,11 @@
     audioLaneModel: undefined as string | undefined,
     pool: [] as any[],
     poolStats: null as any,
+    foundrySdkVersion: null as string | null,
+    foundryCoreVersion: null as string | null,
+    foundrySdkPin: null as string | null,
+    foundryCorePin: null as string | null,
+    foundryRuntimeReported: false,
     runtimeGpuApplied: null as string | null,
     runtimeGpuAppliedSource: null as "configured" | "inherited" | "unrestricted" | null,
   });
@@ -1033,6 +1062,16 @@
     runtimeGpu = value;
     runtimeGpuSaveFailed = !writeRuntimeGpu(localStorage, value);
   }
+  const savedSharedHostAtLoad = readSharedHost(localStorage);
+  let sharedHost = $state(savedSharedHostAtLoad);
+  let sharedHostApplied = $state(savedSharedHostAtLoad);
+  let sharedHostSaveFailed = $state(false);
+
+  function setSharedHost(enabled: boolean) {
+    sharedHost = enabled;
+    sharedHostSaveFailed = !writeSharedHost(localStorage, enabled);
+    rememberSharedHostPreference(enabled);
+  }
   let cacheInventory = $state<CacheInventory | null>(null);
   let cacheInventoryLoading = $state(false);
   let hostPlatform = $state<"windows" | "macos" | "linux" | "unknown">("unknown");
@@ -1044,6 +1083,8 @@
   let startupModels = $state<Record<string, string | null>>({});
   let downloadingModelAliases = $state<Record<string, boolean>>({});
   let downloadingVariantIds = $state<Record<string, boolean>>({});
+  let downloadingModelRequestIds = $state<Record<string, number>>({});
+  let downloadingVariantRequestIds = $state<Record<string, number>>({});
   let monitorLog = $state<any[]>([]);
   let monitorLogPaused = $state(false);
 
@@ -3087,8 +3128,13 @@
     state.audioLaneModel = s.audioLaneModel;
     state.pool = s.pool ?? [];
     state.poolStats = s.poolStats ?? null;
+    state.foundrySdkVersion = s.foundrySdkVersion ?? null;
+    state.foundryCoreVersion = s.foundryCoreVersion ?? null;
+    state.foundrySdkPin = s.foundrySdkPin ?? null;
+    state.foundryCorePin = s.foundryCorePin ?? null;
     state.runtimeGpuApplied = s.runtimeGpuApplied ?? null;
     state.runtimeGpuAppliedSource = s.runtimeGpuAppliedSource ?? null;
+    state.foundryRuntimeReported = s.foundryRuntimeReported === true;
     sidecarLogs = s.logs ?? [];
   }
 
@@ -3374,9 +3420,10 @@
   let byomPreset = $state("");
   let byomTemplateOpen = $state(false);
 
-  /** Locally imported and linked models report a `local://` uri; catalog models do not. */
+  /** Imported and linked models use a `local://` uri or Foundry's LocalRegistration provider. */
   function isLocalModel(model: any): boolean {
-    return String(model?.info?.uri || "").startsWith("local://");
+    if (String(model?.info?.uri || "").startsWith("local://")) return true;
+    return model?.info?.providerType === "LocalRegistration";
   }
 
   const byomTemplateCheck = $derived(
@@ -3448,12 +3495,18 @@
           promptTemplate: byomTemplateDirty() ? (byomTemplate as any) : undefined,
         });
       }
-      const addedMessage = `Added model "${byomName.trim()}" (${mode === "link" ? "linked" : "copied"})`;
+      let addedMessage = `Added model "${byomName.trim()}" (${mode === "link" ? "linked" : "copied"})`;
+      if (mode === "copy" && result.registrationError) {
+        addedMessage += `. Task registration failed: ${result.registrationError}`;
+      } else if (mode === "copy" && result.registered && result.registrationTask) {
+        addedMessage += `. Task set to ${result.registrationTask}`;
+      }
       if (result.catalogRefreshRequiresRestart) {
         statusMessage = `${addedMessage}. Restart Flint to let the model catalog detect the change.`;
         appendAppLog(statusMessage, "warn");
       } else {
-        appendAppLog(addedMessage, "info");
+        statusMessage = addedMessage;
+        appendAppLog(addedMessage, result.registrationError ? "warn" : "info");
       }
       byomOpen = false;
       resetByom();
@@ -4460,9 +4513,8 @@ updateStateFromSdk();
     // value); other providers (DirectML, WebGPU) keep the unrestricted inventory.
     const all = state.poolStats?.accelerators || [];
     const gpus = (cudaOnly ? cudaVisibleAccelerators(all, runtimeGpuApplied) : all).filter(
-      (a) => a.kind === "gpu" && (!cudaOnly || a.vendor === "nvidia"),
+      (a) => a.kind === "gpu",
     );
-    let totalMb = 0;
     let freeMb = 0;
     let usedMb = 0;
     let maxFreeMb = 0;
@@ -5540,6 +5592,8 @@ updateStateFromSdk();
     // Settings are hydrated by this point (onMount runs restoreChat before init), so the
     // service honors the user's autostart choice, port and bind address instead of a hardcoded
     // 5272 that opened a port they never configured.
+    sharedHostApplied = sharedHost;
+    rememberSharedHostPreference(sharedHost);
     const ok = await initializeSDK({
       appName: "flint",
       // Hydrated runtime policy and accelerator registration must land before HTTP startup or
@@ -5549,8 +5603,10 @@ updateStateFromSdk();
       deferCatalogRead: !autoRefreshCatalogOnStartup,
       servicePort: networkPort,
       bindAddress: networkBindAddress || undefined,
+      useSharedHost: sharedHost,
     });
     void refreshNodeAboutLine();
+    void refreshFoundryAboutLine();
 
     try {
       if (ok) {
@@ -6422,6 +6478,17 @@ updateStateFromSdk();
     untrack(() => saveConversations());
   });
 
+  async function requestDownloadCancellation(requestId: number) {
+    try {
+      const accepted = await cancelDownload(requestId);
+      statusMessage = accepted
+        ? "Cancellation requested. Waiting for the runtime to settle the download…"
+        : "The download already settled; checking its final result…";
+    } catch (e: any) {
+      statusMessage = `Could not request download cancellation: ${e?.message || e}`;
+    }
+  }
+
   async function downloadAndTrack(model: any) {
     const blocked = blockedByExclusivePoolRun();
     if (blocked) {
@@ -6434,6 +6501,7 @@ updateStateFromSdk();
     // visible to `otherInferenceInFlight()` (checked by benchmark admission) exactly like those
     // other pool-affecting operations already are.
     const release = beginPoolMutation();
+    let requestId: number | null = null;
     try {
       statusMessage = `Downloading ${model.alias}...`;
       await downloadModel(
@@ -6445,18 +6513,29 @@ updateStateFromSdk();
         () => {
           statusMessage = `Downloading ${model.alias}: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.`;
         },
+        (id: number) => {
+          requestId = id;
+          downloadingModelRequestIds = { ...downloadingModelRequestIds, [model.alias]: id };
+        },
       );
       setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
       statusMessage = `${model.alias} downloaded`;
       await refreshCatalogModels();
     } catch (e: any) {
-      statusMessage = `Download failed: ${e?.message || e}`;
+      statusMessage = e?.certainty === "cancelled"
+        ? `Download cancelled: ${e?.message || "the native download settled."}`
+        : `Download failed: ${e?.message || e}`;
       throw e;
     } finally {
       release();
       const next = { ...downloadingModelAliases };
       delete next[model.alias];
       downloadingModelAliases = next;
+      if (downloadingModelRequestIds[model.alias] === requestId) {
+        const requestIds = { ...downloadingModelRequestIds };
+        delete requestIds[model.alias];
+        downloadingModelRequestIds = requestIds;
+      }
     }
   }
 
@@ -6699,6 +6778,7 @@ updateStateFromSdk();
     }
     downloadingVariantIds = { ...downloadingVariantIds, [variantId]: true };
     const release = beginPoolMutation();
+    let requestId: number | null = null;
     try {
       statusMessage = `Downloading ${model.alias} variant...`;
       await downloadModel(
@@ -6710,17 +6790,28 @@ updateStateFromSdk();
         () => {
           statusMessage = `Downloading ${model.alias}: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.`;
         },
+        (id: number) => {
+          requestId = id;
+          downloadingVariantRequestIds = { ...downloadingVariantRequestIds, [variantId]: id };
+        },
       );
       setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
       statusMessage = `${model.alias} variant downloaded`;
       await refreshCatalogModels();
     } catch (e: any) {
-      statusMessage = `Download failed: ${e?.message || e}`;
+      statusMessage = e?.certainty === "cancelled"
+        ? `Download cancelled: ${e?.message || "the native download settled."}`
+        : `Download failed: ${e?.message || e}`;
     } finally {
       release();
       const next = { ...downloadingVariantIds };
       delete next[variantId];
       downloadingVariantIds = next;
+      if (downloadingVariantRequestIds[variantId] === requestId) {
+        const requestIds = { ...downloadingVariantRequestIds };
+        delete requestIds[variantId];
+        downloadingVariantRequestIds = requestIds;
+      }
     }
   }
 
@@ -7214,6 +7305,11 @@ updateStateFromSdk();
       statusMessage = "Web tools require Flint's supervised runtime transport.";
       return;
     }
+    const frequencyPenaltyError = unsupportedFrequencyPenaltyMessage(frequencyPenalty);
+    if (frequencyPenaltyError) {
+      statusMessage = frequencyPenaltyError;
+      return;
+    }
 
     const text = chatInput.trim();
     const allowWebTools = webToolsEnabled;
@@ -7228,7 +7324,6 @@ updateStateFromSdk();
       presencePenalty,
       randomSeed: randomSeed ?? undefined,
     };
-
     const nextMessages = [...chatMessages];
     const userCreatedAt = Date.now();
 
@@ -7497,12 +7592,18 @@ updateStateFromSdk();
         // helper still requires public HTTPS.
         const maxWebToolRounds = 2;
         let webToolRounds = 0;
+        let contentToolAnswer = false;
         let retriedWithoutTools = false;
         let roundMaxChars = 20_000;
         let data: any;
         while (true) {
-          const roundsRemaining = offerWebTools ? Math.max(0, maxWebToolRounds - webToolRounds) : 0;
-          const sendTools = offerWebTools && webToolRounds < maxWebToolRounds;
+          const sendTools = offerAnotherWebToolRound({
+            offerWebTools,
+            webToolRounds,
+            maxWebToolRounds,
+            contentToolAnswer,
+          });
+          const roundsRemaining = sendTools ? Math.max(0, maxWebToolRounds - webToolRounds) : 0;
           const latestKeep = [...requestMessages].reverse().findIndex((message: { role?: string }) => message?.role === "user");
           const latestKeepAt = latestKeep < 0 ? 0 : requestMessages.length - 1 - latestKeep;
           const keptHead = requestMessages.slice(0, Math.min(1, latestKeepAt));
@@ -7605,7 +7706,20 @@ updateStateFromSdk();
             }
             return;
           }
-          const rawCalls = data?.choices?.[0]?.message?.tool_calls;
+          let rawCalls = data?.choices?.[0]?.message?.tool_calls;
+          if ((!Array.isArray(rawCalls) || rawCalls.length === 0) && offerWebTools) {
+            const lifted = contentWebToolCalls(
+              data?.choices?.[0]?.message?.content,
+              usedToolCallIds(requestMessages),
+            );
+            const message = data?.choices?.[0]?.message;
+            if (lifted && message) {
+              rawCalls = lifted;
+              message.content = null;
+              // The chat template requires a function call while tools remain offered.
+              contentToolAnswer = true;
+            }
+          }
           const hasCalls = Array.isArray(rawCalls) && rawCalls.length > 0;
           if (!offerWebTools || !hasCalls) break;
           if (!sendTools) {
@@ -7750,9 +7864,9 @@ updateStateFromSdk();
           chatClient.settings.maxTokens = maxTokens;
           chatClient.settings.topP = topP;
           chatClient.settings.topK = topK;
-          // Zero is neutral, but Foundry Local 2.0.1 misapplies an explicitly serialized
-          // frequency_penalty of 0 for some models. Clear reused-client settings instead.
-          chatClient.settings.frequencyPenalty = frequencyPenalty === 0 ? undefined : frequencyPenalty;
+          // The session client never serializes frequency penalty. Clear a reused client
+          // so an older nonzero value cannot linger on that object.
+          chatClient.settings.frequencyPenalty = undefined;
           chatClient.settings.presencePenalty = presencePenalty === 0 ? undefined : presencePenalty;
           chatClient.settings.randomSeed = randomSeed ?? undefined;
         }
@@ -9900,19 +10014,37 @@ Output only the summary text, no preamble.`;
                                   {#if variant.update}
                                     <button
                                       class="small update-btn"
-                                      onclick={() => downloadVariant(model, variant.update.latestVariantId)}
-                                      disabled={downloadingVariantIds[variant.update.latestVariantId] || benchmarkRunInFlight}
+                                      onclick={() => {
+                                        const requestId = downloadingVariantRequestIds[variant.update.latestVariantId];
+                                        if (requestId) void requestDownloadCancellation(requestId);
+                                        else void downloadVariant(model, variant.update.latestVariantId);
+                                      }}
+                                      disabled={benchmarkRunInFlight || (
+                                        downloadingVariantIds[variant.update.latestVariantId]
+                                        && !downloadingVariantRequestIds[variant.update.latestVariantId]
+                                      )}
                                     >
-                                      {downloadingVariantIds[variant.update.latestVariantId] ? 'Downloading…' : 'Download update'}
+                                      {downloadingVariantIds[variant.update.latestVariantId]
+                                        ? (downloadingVariantRequestIds[variant.update.latestVariantId] ? 'Cancel download' : 'Starting…')
+                                        : 'Download update'}
                                     </button>
                                   {/if}
                                   {#if !variant.cached}
                                     <button
                                       class="small"
-                                      onclick={() => downloadVariant(model, variant.id)}
-                                      disabled={downloadingVariantIds[variant.id] || benchmarkRunInFlight}
+                                      onclick={() => {
+                                        const requestId = downloadingVariantRequestIds[variant.id];
+                                        if (requestId) void requestDownloadCancellation(requestId);
+                                        else void downloadVariant(model, variant.id);
+                                      }}
+                                      disabled={benchmarkRunInFlight || (
+                                        downloadingVariantIds[variant.id]
+                                        && !downloadingVariantRequestIds[variant.id]
+                                      )}
                                     >
-                                      {downloadingVariantIds[variant.id] ? 'Downloading…' : 'Download'}
+                                      {downloadingVariantIds[variant.id]
+                                        ? (downloadingVariantRequestIds[variant.id] ? 'Cancel download' : 'Starting…')
+                                        : 'Download'}
                                     </button>
                                   {:else}
                                     {#if !isCurrentlyLoaded}
@@ -9949,10 +10081,24 @@ Output only the summary text, no preamble.`;
 
                       {#if !model.isCached}
                         <button
-                          onclick={() => { void downloadAndTrack(model).catch((e: any) => { statusMessage = `Download failed: ${e?.message || e}`; }); }}
-                          disabled={downloadingModelAliases[model.alias] || benchmarkRunInFlight}
+                          onclick={() => {
+                            const requestId = downloadingModelRequestIds[model.alias];
+                            if (requestId) void requestDownloadCancellation(requestId);
+                            else {
+                              void downloadAndTrack(model).catch((e: any) => {
+                                statusMessage = e?.certainty === "cancelled"
+                                  ? `Download cancelled: ${e?.message || "the native download settled."}`
+                                  : `Download failed: ${e?.message || e}`;
+                              });
+                            }
+                          }}
+                          disabled={benchmarkRunInFlight || (
+                            downloadingModelAliases[model.alias] && !downloadingModelRequestIds[model.alias]
+                          )}
                         >
-                          {downloadingModelAliases[model.alias] ? 'Downloading…' : 'Download'}
+                          {downloadingModelAliases[model.alias]
+                            ? (downloadingModelRequestIds[model.alias] ? 'Cancel download' : 'Starting…')
+                            : 'Download'}
                         </button>
                       {/if}
 
@@ -10891,7 +11037,7 @@ Output only the summary text, no preamble.`;
                       disabled={isStreaming}
                     />
 
-                    <label for="genparams-freqpenalty" title="Penalize tokens by how often they've already appeared (-2 to 2)">Frequency penalty</label>
+                    <label for="genparams-freqpenalty" title="Foundry Local does not support nonzero frequency penalties; set this to 0 before sending.">Frequency penalty</label>
                     <input
                       type="range"
                       id="genparams-freqpenalty"
@@ -12251,6 +12397,13 @@ Output only the summary text, no preamble.`;
                 </dd>
               </div>
               <div class="about-row">
+                <dt>Foundry SDK</dt>
+                <dd class:about-ok={foundryAbout.ok === true} class:about-bad={foundryAbout.ok === false}>
+                  {foundryAbout.label}
+                  <button type="button" class="tiny about-refresh" onclick={() => refreshFoundryAboutLine()}>Recheck</button>
+                </dd>
+              </div>
+              <div class="about-row">
                 <dt>Sidecar / Foundry</dt>
                 <dd class:about-ok={state.ready} class:about-bad={!state.ready && !!state.error}>
                   {#if state.ready}
@@ -12867,6 +13020,30 @@ Output only the summary text, no preamble.`;
             <h3>Startup</h3>
             <div class="setting-row">
               <div class="setting-info">
+                <span class="setting-name" id="shared-host-label">Shared Foundry host</span>
+                <span class="setting-desc">
+                  Off by default. Applies the next time this runtime starts. Flint keeps its own cache
+                  and does not fall back to an in-process manager if the shared host fails.
+                  {#if sharedHost !== sharedHostApplied}
+                    Restart Flint for this to take effect.
+                  {/if}
+                  {#if sharedHostSaveFailed}
+                    The choice could not be saved.
+                  {/if}
+                </span>
+              </div>
+              <label class="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={sharedHost}
+                  onchange={(e) => setSharedHost((e.currentTarget as HTMLInputElement).checked)}
+                  aria-labelledby="shared-host-label"
+                />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
                 <span class="setting-name" id="auto-start-service-label">Start local service automatically</span>
                 <span class="setting-desc">Load the default model and start the inference service when Flint opens</span>
               </div>
@@ -13235,6 +13412,13 @@ Output only the summary text, no preamble.`;
                 <dd class:about-ok={nodeVersionOk === true} class:about-bad={nodeVersionOk === false}>
                   {nodeVersionLabel}
                   <button type="button" class="tiny about-refresh" onclick={() => refreshNodeAboutLine()}>Recheck</button>
+                </dd>
+              </div>
+              <div class="about-row">
+                <dt>Foundry SDK</dt>
+                <dd class:about-ok={foundryAbout.ok === true} class:about-bad={foundryAbout.ok === false}>
+                  {foundryAbout.label}
+                  <button type="button" class="tiny about-refresh" onclick={() => refreshFoundryAboutLine()}>Recheck</button>
                 </dd>
               </div>
               <div class="about-row">
