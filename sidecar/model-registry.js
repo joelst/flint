@@ -132,7 +132,7 @@ export function indexableLocalModel (model) {
   return {
     alias,
     id,
-    info: model?.info,
+    info: readField(() => model?.info),
     isCached: cached,
     variants: [{
       id,

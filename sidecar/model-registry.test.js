@@ -146,6 +146,30 @@ describe('buildCachedModelIndex', () => {
       expect(merged[2]).toMatchObject({ alias: 'llama', id: 'llama:1', isCached: true });
       expect(merged[3]).toBe(throwingId);
     });
+
+    it('keeps healthy public and local models when a local info getter throws', () => {
+      const publicRow = {
+        alias: 'phi',
+        id: 'phi:1',
+        variants: [{ id: 'phi:1', isCached: true }],
+      };
+      const throwingInfo = {
+        alias: 'broken-local',
+        id: 'broken-local:1',
+        get info() { throw new Error('native snapshot unavailable'); },
+      };
+      const healthyLocal = { alias: 'llama', id: 'llama:1', info: { task: 'chat-completion' } };
+      const merged = mergeLocalRegistrations([publicRow], [throwingInfo, healthyLocal]);
+
+      expect(merged).toHaveLength(3);
+      expect(merged[0]).toBe(publicRow);
+      expect(merged[1]).toMatchObject({ alias: 'broken-local', id: 'broken-local:1' });
+      expect(merged[2].info).toEqual(healthyLocal.info);
+      const catalog = normalizeCatalogModels(merged);
+      expect(resolveModelId(buildModelIndex(catalog.models), 'phi')).not.toBeNull();
+      expect(resolveModelId(buildModelIndex(catalog.models), 'llama')).not.toBeNull();
+      expect(normalizeCachedModels(merged).models).toContainEqual({ alias: 'llama', id: 'llama:1' });
+    });
   });
 
   it('does not resolve models absent from the cached-only inventory', () => {

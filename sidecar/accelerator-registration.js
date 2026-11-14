@@ -62,6 +62,24 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
 
   let usedLegacyFallback = false;
   let fallbackResult = null;
+  let cudaRuntimePromise = null;
+  async function cudaRuntimeFailure() {
+    if (!cudaRuntimePromise) {
+      cudaRuntimePromise = (async () => {
+        if (typeof options.prepareCudaRuntime !== 'function') return null;
+        try {
+          const prepared = await options.prepareCudaRuntime();
+          if (prepared && prepared.ok === false) {
+            return prepared.reason || 'CUDA runtime directory is unavailable';
+          }
+          return null;
+        } catch (error) {
+          return errorMessage(error);
+        }
+      })();
+    }
+    return cudaRuntimePromise;
+  }
   const initial = discoveredProviders(manager);
   if (initial.length === 0) {
     // An empty list is not proof the machine has no GPU. Discovery can be empty
@@ -73,6 +91,17 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
         status: 'No execution providers discovered yet',
         registeredEps: [],
         failedEps: [],
+        retry: true,
+      };
+    }
+    // The no-argument fallback may select CUDA before discovery names it.
+    const cudaFailure = await cudaRuntimeFailure();
+    if (cudaFailure) {
+      return {
+        success: false,
+        status: `CUDAExecutionProvider preparation failed: ${cudaFailure}`,
+        registeredEps: [],
+        failedEps: ['CUDAExecutionProvider'],
         retry: true,
       };
     }
@@ -93,24 +122,6 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
 
   const failures = new Map();
   const attempted = new Set();
-  let cudaRuntimePromise = null;
-  async function cudaRuntimeFailure() {
-    if (!cudaRuntimePromise) {
-      cudaRuntimePromise = (async () => {
-        if (typeof options.prepareCudaRuntime !== 'function') return null;
-        try {
-          const prepared = await options.prepareCudaRuntime();
-          if (prepared && prepared.ok === false) {
-            return prepared.reason || 'CUDA runtime directory is unavailable';
-          }
-          return null;
-        } catch (error) {
-          return errorMessage(error);
-        }
-      })();
-    }
-    return cudaRuntimePromise;
-  }
   // Bounded so a discovery list that keeps growing cannot register forever.
   // Eight covers the providers this machine can surface (CPU, CUDA, WebGPU,
   // TensorRT, DML, QNN, OpenVINO) with one spare pass.
@@ -153,6 +164,14 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
     const name = providerName(provider);
     if (!name || seen.has(name)) continue;
     seen.add(name);
+    if (isCudaExecutionProvider(name)) {
+      const reason = await cudaRuntimeFailure();
+      if (reason) {
+        failedEps.push(name);
+        failures.set(name, reason);
+        continue;
+      }
+    }
     if (provider.isRegistered) {
       registeredEps.push(name);
       failures.delete(name);
