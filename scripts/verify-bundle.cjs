@@ -168,25 +168,35 @@ const resourceDir = platformKey.startsWith('darwin-')
   ? path.join(releaseDir, 'bundle', 'macos', 'Flint.app', 'Contents', 'Resources')
   : releaseDir;
 const stagedSdk = path.join(resourceDir, 'foundry-local-sdk');
+const nsiPath = path.join(releaseDir, 'nsis', 'x64', 'installer.nsi');
+const wixPath = path.join(releaseDir, 'wix', 'x64', 'main.wxs');
 if (fs.existsSync(releaseDir)) {
-  console.log(`Checking bundled resources (${path.relative(root, resourceDir)})...`);
-  checkKoffiAt('bundled resources', path.join(resourceDir, 'koffi'), path.join(resourceDir, '@koromix'));
-  for (const file of requiredSidecarSources) {
-    if (!fs.existsSync(path.join(resourceDir, 'sidecar', file))) {
-      bad(`bundled resources missing sidecar/${file}`);
-    } else {
-      ok(`bundled resources include sidecar/${file}`);
-    }
-  }
-  if (!fs.existsSync(stagedSdk)) {
-    bad(
-      `no bundled foundry-local-sdk under ${path.relative(root, resourceDir)} — run tauri build`
-    );
+  const looseResources = fs.existsSync(stagedSdk) ||
+    fs.existsSync(path.join(resourceDir, 'sidecar')) ||
+    fs.existsSync(path.join(resourceDir, 'koffi'));
+  if (platformKey === 'win32-x64' && !looseResources) {
+    // Tauri can package directly from source paths without copying resources beside the exe.
+    console.log('Checking Windows installer resource manifests (no loose release resources)...');
   } else {
-    checkPayloadAt(
-      `bundled resources (${path.relative(root, stagedSdk)})`,
-      stagedSdk,
-    );
+    console.log(`Checking bundled resources (${path.relative(root, resourceDir)})...`);
+    checkKoffiAt('bundled resources', path.join(resourceDir, 'koffi'), path.join(resourceDir, '@koromix'));
+    for (const file of requiredSidecarSources) {
+      if (!fs.existsSync(path.join(resourceDir, 'sidecar', file))) {
+        bad(`bundled resources missing sidecar/${file}`);
+      } else {
+        ok(`bundled resources include sidecar/${file}`);
+      }
+    }
+    if (!fs.existsSync(stagedSdk)) {
+      bad(
+        `no bundled foundry-local-sdk under ${path.relative(root, resourceDir)} — run tauri build`
+      );
+    } else {
+      checkPayloadAt(
+        `bundled resources (${path.relative(root, stagedSdk)})`,
+        stagedSdk,
+      );
+    }
   }
 
   // Prefer definitive checks; size is only a coarse safety net.
@@ -202,30 +212,31 @@ if (fs.existsSync(releaseDir)) {
   }
   const versionNeedle = appVersion ? `_${appVersion}_` : null;
 
-  // Tauri-generated NSIS script lists every bundled file — definitive for NSIS.
-  const nsiPath = path.join(releaseDir, 'nsis', 'x64', 'installer.nsi');
-  if (fs.existsSync(nsiPath)) {
-    const nsi = fs.readFileSync(nsiPath, 'utf8');
-    for (const file of requiredSidecarSources) {
-      if (nsi.includes(file)) {
-        ok(`NSIS script includes ${file}`);
+  // Tauri-generated WiX/NSIS manifests list the files each Windows installer consumes.
+  const manifests = [
+    ['MSI', wixPath],
+    ['NSIS', nsiPath],
+  ].filter(([, file]) => fs.existsSync(file));
+  if (platformKey === 'win32-x64' && !looseResources && manifests.length === 0) {
+    bad('no Windows installer resource manifest found; cannot verify bundled resources');
+  }
+  for (const [label, manifestPath] of manifests) {
+    const manifest = fs.readFileSync(manifestPath, 'utf8');
+    const requiredPaths = [
+      ...requiredSidecarSources.map((file) => `sidecar/${file}`),
+      ...expectedFiles.map((file) => `prebuilds/${platformKey}/${file.name}`),
+      '@koromix/koffi-win32-x64/package.json',
+    ];
+    for (const file of requiredPaths) {
+      const fileRe = new RegExp(file.split('/').map(escapeRegExp).join('[\\\\/]'), 'i');
+      if (fileRe.test(manifest)) {
+        ok(`${label} script includes ${file}`);
       } else {
-        bad(`NSIS script missing ${file}: ${path.relative(root, nsiPath)}`);
+        bad(`${label} script missing ${file}: ${path.relative(root, manifestPath)}`);
       }
     }
-    // NSI lists each resource with File /oname=...prebuilds\win32-x64\...
-    for (const file of expectedFiles || []) {
-      const fileRe = new RegExp(
-        `prebuilds[\\\\/]${escapeRegExp(platformKey)}[\\\\/]${escapeRegExp(file.name)}`,
-        'i',
-      );
-      if (fileRe.test(nsi) || nsi.includes(file.name)) {
-        ok(`NSIS script includes ${file.name}`);
-      } else {
-        bad(`NSIS script missing ${file.name}: ${path.relative(root, nsiPath)}`);
-      }
-    }
-  } else {
+  }
+  if (!fs.existsSync(nsiPath)) {
     console.log('  (no installer.nsi yet — skipped NSIS file-list check)');
   }
 
