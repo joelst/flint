@@ -6,14 +6,14 @@
 //   Tauri's WebView2 is Chromium-based and speaks CDP natively once launched
 //   with a remote debugging port. Set VITE_FLINT_BUILD_VERSION so Help and
 //   Settings show the next release instead of package.json.
-//     1. $env:VITE_FLINT_BUILD_VERSION = "0.10.0"
+//     1. $env:VITE_FLINT_BUILD_VERSION = "0.11.0"
 //        $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
 //        .\build-local.ps1 -Command "npm run tauri dev"
 //     2. node scripts/capture-screenshots.mjs
 //
 // macOS (implemented, verified):
 //   Tauri uses WKWebView rather than CDP. Launch
-//   `VITE_FLINT_BUILD_VERSION=0.10.0 npm run tauri dev`, then run this script.
+//   `VITE_FLINT_BUILD_VERSION=0.11.0 npm run tauri dev`, then run this script.
 //   It uses macOS Accessibility controls plus CoreGraphics and captures each
 //   native app window with `screencapture`.
 //
@@ -45,15 +45,15 @@ const THEMES = ['dark', 'light'];
 // `waitMs` for the view to settle, then save a screenshot per theme as
 // `<file base>-<theme>.png`.
 const SHOTS = [
-  { nav: 'Playground', subnav: 'Chat', file: 'flint-chat-window', waitMs: 600 },
-  { nav: 'Playground', subnav: 'Voice', file: 'flint-audio-page', waitMs: 600 },
-  { nav: 'Model Arena', file: 'flint-model-compare-page-1', waitMs: 600 },
-  { nav: 'Models', file: 'flint-model-selection', waitMs: 600 },
-  { nav: 'Monitor', file: 'flint-monitor-page', waitMs: 600 },
-  { nav: 'Diagnostics', file: 'flint-diagnostics-page', waitMs: 600 },
-  { nav: 'Integrations', file: 'flint-integrations-page', waitMs: 600 },
-  { nav: 'Settings', file: 'flint-settings-page', waitMs: 600 },
-  { nav: 'Help', file: 'flint-help-window', waitMs: 600 },
+  { nav: 'Playground', subnav: 'Chat', heading: 'Chat', file: 'flint-chat-window', waitMs: 600 },
+  { nav: 'Playground', subnav: 'Voice', heading: 'Audio Transcription', file: 'flint-audio-page', waitMs: 600 },
+  { nav: 'Model Arena', heading: 'Model Arena', file: 'flint-model-compare-page-1', waitMs: 600 },
+  { nav: 'Models', heading: 'Model Catalog', file: 'flint-model-selection', waitMs: 600 },
+  { nav: 'Monitor', heading: 'Monitor', file: 'flint-monitor-page', waitMs: 600 },
+  { nav: 'Diagnostics', heading: 'Service & Diagnostics', file: 'flint-diagnostics-page', waitMs: 600 },
+  { nav: 'Integrations', heading: 'Integrations', file: 'flint-integrations-page', waitMs: 600 },
+  { nav: 'Settings', heading: 'Settings', file: 'flint-settings-page', waitMs: 600 },
+  { nav: 'Help', heading: 'Help', file: 'flint-help-window', waitMs: 600 },
 ];
 
 const MAC_SHOTS = [
@@ -337,6 +337,16 @@ async function setTheme(client, theme) {
   }
 }
 
+async function waitForHeading(client, heading) {
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const found = await evaluate(client, `([...document.querySelectorAll('h2')]
+      .some(el => el.textContent.trim() === ${JSON.stringify(heading)} && el.getClientRects().length > 0))`);
+    if (found) return;
+    await sleep(200);
+  }
+  throw new Error(`Expected page heading "${heading}" did not appear; screenshot not saved.`);
+}
+
 async function captureWindowsScreenshots() {
   const client = await CdpClient.connectToFirstPage(CDP_PORT);
   try {
@@ -363,6 +373,14 @@ async function captureWindowsScreenshots() {
             continue;
           }
           await sleep(shot.waitMs ?? 500);
+        }
+
+        await waitForHeading(client, shot.heading);
+        if (shot.nav === 'Diagnostics') {
+          await evaluate(client, `(() => {
+            const log = document.querySelector('.log-list');
+            if (log) log.scrollTop = log.scrollHeight;
+          })()`);
         }
 
         const { data } = await client.send('Page.captureScreenshot', { format: 'png' });

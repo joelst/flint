@@ -170,9 +170,9 @@ not currently exposed.
 
 ### Bring Your Own Model (BYOM) and External Linking
 
-- **Import local ONNX models**: Add custom ONNX models (containing `genai_config.json` and `inference_model.json`) into Flint's local cache directly from the Models tab.
-- **Embedding models**: folders whose architecture or name contains `embed` import without a chat prompt template. The gateway supports `POST /v1/embeddings` with autoload, and the sidecar has an `embedTexts` command. SDK/core 2.4.0 lists `qwen3-embedding-0.6b` and `qwen3-embedding-8b`; both cached CUDA variants have passed gateway and IPC probes. Flint does not yet have a verified BYOM/Continue embedding recipe.
-- **Link external model folders**: Connect existing models stored elsewhere on your drive using directory junctions without duplicating weights across folders.
+- **Import local ONNX models**: Add an ONNX GenAI folder with `genai_config.json`, a tokenizer, and an `.onnx` file from Models. A copied import can supply its own `inference_model.json` or let Flint create one in Flint's copy; Flint does not modify the source.
+- **Embedding models**: folders whose architecture or name contains `embed` import without a chat prompt template. The gateway supports `POST /v1/embeddings` with autoload, and the sidecar has an `embedTexts` command. SDK/core 2.4.0 lists `qwen3-embedding-0.6b` and `qwen3-embedding-8b`; both cached CUDA variants passed gateway and IPC probes. A separate [Qwen3 embedding BYOM recipe](spikes/qwen3-embedding-olive-recipe.md) passed an isolated Continue indexing replay on 2.4.0; it is not yet a 2.4.1 installed-app qualification.
+- **Link external model folders**: Connect an existing folder with `inference_model.json` using a directory junction without duplicating weights. Flint cannot add missing metadata to a linked source.
 - **Prompt template authoring**: Validate and customize Jinja/chat prompt templates using the `{Content}` placeholder to ensure proper message formatting. Embedding imports skip this.
 
 ### Model Cache Inventory

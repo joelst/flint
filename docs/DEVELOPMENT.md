@@ -229,8 +229,8 @@ on every development OS. SVG generation is intentionally excluded.
 ## Screenshots
 
 README and docs screenshots go stale after UI changes (nav labels, theme, branding).
-The Windows and macOS PNGs in `images/` currently show 0.10.0. Use the next
-release version when recapturing them.
+Use the next release version when recapturing them; do not claim a version for
+existing PNGs without inspecting them.
 
 To refresh them:
 

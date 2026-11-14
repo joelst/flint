@@ -1,8 +1,8 @@
 # Foundry Local SDK 2.x migration scope
 
 This document records the migration boundary for the checked-in
-`foundry-local-sdk` pin, which is `2.4.0` in `package.json`. That pin includes
-the 2.1.0 through 2.4.0 behavior Flint already uses and does not follow newer npm releases.
+`foundry-local-sdk` pin, which is `2.4.1` in `package.json`. That pin targets
+the 2.1.0 through 2.4.1 behavior Flint uses and does not follow newer npm releases.
 The registration measurement is
 [spikes/foundry-2.1.0-spike.md](./spikes/foundry-2.1.0-spike.md). The SDK marks the OpenAI-shaped `ChatClient`, `AudioClient`, and
 `EmbeddingClient` wrappers deprecated and plans to remove them at the end of
@@ -10,9 +10,9 @@ The registration measurement is
 `EmbeddingsSession`, `Request`, and `Item`.
 
 The 2.1.0 integration is the baseline this pin grew from, not release qualification.
-Current implementation gaps, model feasibility, sequencing, and the 2.4.0
+Current implementation gaps, model feasibility, sequencing, and the 2.4.1
 release gates belong to
-[the SDK/BYOM shipping plan](./PRODUCT_PLAN.md#sdk-240-and-real-byom-shipping-plan).
+[the SDK/BYOM shipping plan](./PRODUCT_PLAN.md#sdk-241-and-real-byom-shipping-plan).
 
 ## Current state
 
@@ -43,11 +43,12 @@ The current audio code classifies the requested model before loading whenever
 its alias, explicit variant, resident variant, or unanimous cached candidates
 identify the family. Whisper-family models use the proven one-shot URI request.
 Nemotron uses 16 kHz mono 16-bit PCM through `ItemQueue`. These request shapes
-were established on 2.0.1 and still need real-model qualification on the
-2.4.0 pin. Parakeet is refused before loading when determinable, retaining the
-unsupported family decision from 2.0.1. Foundry Local 2.3.0 claims a Parakeet
-fix; that refusal stays until the 2.4.0 re-probe in the shipping plan records
-a pass or a still-unsupported result.
+were established on 2.0.1; Whisper and Nemotron were probed on 2.4.0, while
+2.4.1 qualification remains. Parakeet is refused before loading when
+determinable, retaining the unsupported family decision from 2.0.1.
+Foundry Local 2.3.0 claims a Parakeet
+fix; the 2.4.0 re-probe refused Parakeet before loading. Keep the refusal until
+a supported path is verified on a later pin.
 Mixed or unreadable cached candidates defer to the exact runtime-selected
 variant; no speech request retries through deprecated `AudioClient` or HTTP.
 

@@ -154,7 +154,7 @@ The runner copies only that cached variant into an isolated catalog cache,
 checks public catalog discovery and the exact loaded variant, then verifies
 source hashes and sidecar shutdown. The catalog-artifact measurement and its
 limitations are recorded in the
-[SDK release plan](../PRODUCT_PLAN.md#sdk-240-and-real-byom-shipping-plan).
+[SDK release plan](../PRODUCT_PLAN.md#sdk-241-and-real-byom-shipping-plan).
 
 The portable 12-file replay returned 1,024-component vectors from IPC and
 gateway with cosine agreement above 0.999999. On the full SciFact corpus and

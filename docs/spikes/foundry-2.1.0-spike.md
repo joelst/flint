@@ -2,7 +2,7 @@
 
 **Status:** The original checks below record SDK 2.1.0 measurements, not 2.4.0 qualification. Checks 1–3 and 7 passed for the Qwen 2.5 0.5B CPU folder; native-listener chat and tools failed with HTTP 404. The separate [SDK 2.4.0 qualification](#sdk-240-qualification) records the current Flint gateway CPU copy/link results.
 **Date opened:** 2026-10-07
-**Measured pin:** `foundry-local-sdk` **2.1.0**. The shipping branch now pins **2.4.0** ([the SDK/BYOM shipping plan](../PRODUCT_PLAN.md#sdk-240-and-real-byom-shipping-plan)). This file records the 2026-10-07 measurement. It does not by itself prove listener chat.
+**Measured pin:** `foundry-local-sdk` **2.1.0**. The release target is **2.4.1** ([the SDK/BYOM shipping plan](../PRODUCT_PLAN.md#sdk-241-and-real-byom-shipping-plan)). This file records the 2026-10-07 measurement. It does not by itself prove listener chat.
 **npm:** `foundry-local-sdk@2.1.0` was published 2026-09-29. The GitHub release is [v2.1.0](https://github.com/microsoft/Foundry-Local/releases/tag/v2.1.0).
 
 ## Goal
@@ -163,7 +163,7 @@ node .\scripts\spike-foundry-210.mjs --model "D:\models\some-onnx-genai-folder"
 node .\scripts\byom-gateway-live.mjs --model "D:\models\some-onnx-genai-folder"
 ```
 
-The inspect file is `%TEMP%\flint-foundry-210-spike\inspect.json`. The Result column records the measured run above; a repeat must record its own SDK, model, and listener evidence. Current implementation sequencing and release gates live in the [SDK/BYOM shipping plan](../PRODUCT_PLAN.md#sdk-240-and-real-byom-shipping-plan).
+The inspect file is `%TEMP%\flint-foundry-210-spike\inspect.json`. The Result column records the measured run above; a repeat must record its own SDK, model, and listener evidence. Current implementation sequencing and release gates live in the [SDK/BYOM shipping plan](../PRODUCT_PLAN.md#sdk-241-and-real-byom-shipping-plan).
 
 ## Follow-ups after a go
 

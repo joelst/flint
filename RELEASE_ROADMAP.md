@@ -50,7 +50,7 @@ pins, and corrections found by that evidence; sequencing lives in
 ### Current stable → 0.11.0
 
 **0.10.0** is the current published stable release. **0.11.0** is the next
-release. Its SDK pin is **2.4.0**, inclusive of the 2.1.0 through 2.4.0
+release. Its SDK pin is **2.4.1**, inclusive of the 2.1.0 through 2.4.1
 behavior Flint already uses, and its real-BYOM qualification gates are tracked in
 [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md). The existing model paths,
 including the Windows x64 CUDA runtime directory, task `coding`, and an
@@ -63,7 +63,7 @@ broad new feature work. One real, non-catalog Llama 3.2 3B package has already
 passed CPU registration, IPC chat, and buffered/streaming chat through Flint's
 gateway on SDK 2.4.0 as both a metadata-free copy and a metadata-bearing link,
 with unchanged source hashes and confirmed graceful shutdown. Remaining package provenance, lifecycle, SDK feature, and
-installed-app gates are listed in the product plan.
+installed-app gates, including requalification on 2.4.1, are listed in the product plan.
 The native Foundry listener still does not route local registrations; Flint's
 session-backed gateway handles them.
 
