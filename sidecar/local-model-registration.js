@@ -133,7 +133,12 @@ export function localRegistrationDeletePlan(cacheRoot, modelPath, alias) {
     }
     for (const model of models) {
       if (!model.isSymbolicLink()) continue;
-      if (typeof alias === 'string' && model.name.toLowerCase() !== alias.toLowerCase()) continue;
+      if (typeof alias === 'string') {
+        const matchesAlias = process.platform === 'win32'
+          ? model.name.toLowerCase() === alias.toLowerCase()
+          : model.name === alias;
+        if (!matchesAlias) continue;
+      }
       const linkPath = path.join(publisherDir, model.name);
       let linkReal;
       try {

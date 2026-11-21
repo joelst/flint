@@ -550,6 +550,26 @@ describe('linkedLocalRegistrationTargets', () => {
 });
 
 describe('localRegistrationDeletePlan', () => {
+  it('preserves differently cased aliases on case-sensitive platforms', () => {
+    const root = tempDir();
+    const cache = path.join(root, 'cache');
+    const source = path.join(root, 'source');
+    fs.mkdirSync(source);
+    const lower = path.join(cache, 'First', 'demo');
+    const upper = path.join(cache, 'Second', 'Demo');
+    fs.mkdirSync(path.dirname(lower), { recursive: true });
+    fs.mkdirSync(path.dirname(upper), { recursive: true });
+    fs.symlinkSync(source, lower, 'junction');
+    fs.symlinkSync(source, upper, 'junction');
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    try {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      expect(localRegistrationDeletePlan(cache, source, 'demo').junctions).toEqual([lower]);
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
+  });
+
   it('deletes only the selected alias when independent links share a source', () => {
     const root = tempDir();
     const cache = path.join(root, 'cache');
