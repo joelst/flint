@@ -22,6 +22,7 @@
     "ensure:node": "node scripts/ensure-bundled-node.cjs",
     "smoke:node": "node scripts/smoke-bundled-node.cjs",
     "smoke:runtime": "node scripts/smoke-packaged-runtime.cjs",
+    "smoke:gui:windows": "powershell.exe -NoProfile -NonInteractive -File scripts/smoke-windows-settings.ps1",
     "tauri:build": "tauri build",
     "tauri:build:local": "tauri build --no-sign",
     "tauri:build:local:version": "node scripts/build-local-version.cjs",

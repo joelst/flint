@@ -106,8 +106,13 @@ actual CPU/GPU variant replacement. BYOM copy and link runs use `--model` and
 `--restart`, with `--copy` for the copy case. Add `--packaged-root` to qualify
 staged resources rather than repository runtime files.
 
-These automate native runtime checks, not installed-GUI behavior, installer
-signatures, or updater validation. GUI import/chat/Stop/persistence and
+`npm run smoke:gui:windows -- -exePath <Flint.exe>` uses built-in Windows
+accessibility with an isolated profile to check Settings navigation and the
+Shared Foundry host toggle's placement. Windows CI runs it on the debug app.
+It loads no model and requires no CDP endpoint or additional packages.
+
+These automate native runtime and Settings shell checks, not installer
+signatures or updater validation. GUI import/chat/Stop/persistence and
 Benchmark Start/Stop/Resume remain separate release gates.
 
 ---
