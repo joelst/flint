@@ -1502,6 +1502,7 @@ describe('gateway streaming', () => {
     });
 
     expect(res.status).toBe(200);
+    await vi.waitFor(() => expect(access.some(e => e.routeClass === 'chat')).toBe(true));
     const entry = access.find(e => e.routeClass === 'chat');
     expect(entry.tokensIn).toBeNull();
     expect(entry.tokensOut).toBeNull();

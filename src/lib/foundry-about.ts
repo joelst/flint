@@ -7,7 +7,7 @@ export interface FoundryRuntimeReport {
 
 export interface FoundryAboutLine {
   label: string;
-  /** True when the loaded SDK and core match Flint's pin. Null while the version is unknown. */
+  /** True when the loaded SDK and core match Flint's pins. Null when a version or pin is unknown. */
   ok: boolean | null;
 }
 
@@ -33,8 +33,11 @@ export function foundrySdkAboutLine(report: FoundryRuntimeReport | null): Foundr
   const sdkMismatch = Boolean(sdkPin) && sdk !== sdkPin;
   const coreMismatch = Boolean(core) && Boolean(corePin) && core !== corePin;
   if (sdkMismatch || coreMismatch) {
-    const expectedPin = sdkPin ?? corePin;
+    const expectedPin = sdkMismatch ? sdkPin : corePin;
     return { label: `${sdk}${coreNote} (tested on ${expectedPin})`, ok: false };
+  }
+  if (!core || !sdkPin || !corePin) {
+    return { label: `${sdk}${coreNote} (compatibility unverified)`, ok: null };
   }
   return { label: `${sdk}${coreNote}`, ok: true };
 }
