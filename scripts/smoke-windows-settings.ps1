@@ -11,7 +11,7 @@ This is a shell smoke test, not import, inference, or Benchmark qualification.
 param(
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$exePath = (Join-Path $PSScriptRoot '..\src-tauri\target\debug\Flint.exe'),
+    [string]$exePath,
 
     [Parameter()]
     [ValidateRange(5, 120)]
@@ -19,6 +19,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $PSBoundParameters.ContainsKey('exePath')) {
+    $exePath = Join-Path $PSScriptRoot '..\src-tauri\target\debug\Flint.exe'
+}
+$exePath = [System.IO.Path]::GetFullPath($exePath)
 if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
     throw "Flint executable not found: $($exePath)"
 }
@@ -116,6 +120,9 @@ try {
                     Stop-Process -Id $appProcess.Id -Force
                     $cleanupErrors.Add('Flint needed forced termination.')
                 }
+            }
+            if ($appProcess.HasExited -and $appProcess.ExitCode -ne 0) {
+                $cleanupErrors.Add("Flint exited with code $($appProcess.ExitCode).")
             }
             $children = @(Get-CimInstance Win32_Process | Where-Object {
                 ($_.CommandLine -and $_.CommandLine.Contains($probeProfile) -and $_.Name -eq 'msedgewebview2.exe') -or
