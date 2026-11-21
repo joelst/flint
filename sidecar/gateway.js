@@ -811,6 +811,7 @@ export function createGateway (options) {
         let size = 0;
         let settled = false;
         let captureTimer = null;
+        const captureDeadline = Date.now() + bufferedResponseTimeout;
         const finish = callback => {
           if (settled) return;
           settled = true;
@@ -911,7 +912,15 @@ export function createGateway (options) {
                 parsed = null;
               }
               if (parsed && typeof parsed === 'object' && Array.isArray(parsed.data)) {
-                const localModels = await listLocalModels();
+                const remaining = captureDeadline - Date.now();
+                if (remaining <= 0) throw new Error('Local model listing timed out.');
+                let mergeTimer;
+                const localModels = await Promise.race([
+                  Promise.resolve().then(listLocalModels),
+                  new Promise((_, reject) => {
+                    mergeTimer = setTimeout(() => reject(new Error('Local model listing timed out.')), remaining);
+                  }),
+                ]).finally(() => clearTimeout(mergeTimer));
                 if (!Array.isArray(localModels)) {
                   throw new TypeError('Local model listing did not return an array.');
                 }

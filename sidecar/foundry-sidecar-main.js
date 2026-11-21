@@ -2067,7 +2067,7 @@ async function releaseLocalRegistration(model) {
   if (!modelPath.trim()) {
     throw new Error(`Cannot delete local model ${id}: its registered path is empty.`);
   }
-  const deletePlan = localRegistrationDeletePlan(modelCacheRoot(), modelPath);
+  const deletePlan = localRegistrationDeletePlan(modelCacheRoot(), modelPath, id.replace(/:\d+$/, ''));
   try {
     await local.unregisterModel(id);
   } catch (error) {
@@ -2552,17 +2552,19 @@ async function detectActiveExecutionProvider (model) {
 
   const directProps = ['executionProvider', 'activeExecutionProvider', 'currentExecutionProvider', 'provider'];
   for (const prop of directProps) {
-    const value = model[prop];
-    if (typeof value === 'string' && value.trim()) {
-      return value.trim();
+    try {
+      const value = model[prop];
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    } catch (error) {
+      log('warn', `Execution provider probe failed via ${prop}: ${error?.message || error}`);
     }
   }
 
   const methodCandidates = ['getExecutionProvider', 'getCurrentExecutionProvider', 'getProvider'];
   for (const methodName of methodCandidates) {
-    const method = model?.[methodName];
-    if (typeof method !== 'function') continue;
     try {
+      const method = model[methodName];
+      if (typeof method !== 'function') continue;
       const value = await method.call(model);
       if (typeof value === 'string' && value.trim()) {
         return value.trim();

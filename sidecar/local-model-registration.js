@@ -82,9 +82,10 @@ function realOrResolved(targetPath) {
  *
  * @param {string} cacheRoot
  * @param {string} modelPath
+ * @param {string} [alias] limits link removal to the registration being deleted
  * @returns {{ ownedRoot: string | null, junctions: string[] }}
  */
-export function localRegistrationDeletePlan(cacheRoot, modelPath) {
+export function localRegistrationDeletePlan(cacheRoot, modelPath, alias) {
   const empty = { ownedRoot: null, junctions: [] };
   if (typeof cacheRoot !== 'string' || !cacheRoot || typeof modelPath !== 'string' || !modelPath) {
     return empty;
@@ -132,6 +133,7 @@ export function localRegistrationDeletePlan(cacheRoot, modelPath) {
     }
     for (const model of models) {
       if (!model.isSymbolicLink()) continue;
+      if (typeof alias === 'string' && model.name.toLowerCase() !== alias.toLowerCase()) continue;
       const linkPath = path.join(publisherDir, model.name);
       let linkReal;
       try {
@@ -301,6 +303,11 @@ export async function ensureRegisteredLocalModel(input) {
   }
   const existingTask = taskOf(existing);
   if (existingTask === task) {
+    if (!sameModelPath(existing?.path, modelPath)) {
+      throw new Error(
+        `Model ${modelId} is already registered at a different or unreadable path; refusing to use an unrelated registration.`,
+      );
+    }
     return outcomeFrom(existing, { registered: true, replaced: false, task: existingTask });
   }
   if (existingTask) {

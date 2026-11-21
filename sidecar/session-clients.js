@@ -36,7 +36,8 @@ function abortError () {
 }
 
 async function preflightNativeRequest (session, request, signal) {
-  if (typeof session?.preflightRequest !== 'function' || signal?.aborted) return;
+  if (signal?.aborted) throw abortError();
+  if (typeof session?.preflightRequest !== 'function') return;
   let result;
   try {
     result = await session.preflightRequest(request);
@@ -350,6 +351,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
           : new Request().addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
         session = new ChatSession(chatModel);
         await preflightNativeRequest(session, request, options.signal);
+        if (options.signal?.aborted) throw abortError();
         const response = await session.processRequest(
           request,
           options.signal ? { signal: options.signal } : undefined,
@@ -400,6 +402,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
               : new Request().addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
             session = new ChatSession(chatModel);
             await preflightNativeRequest(session, request, options.signal);
+            if (options.signal?.aborted) throw abortError();
             const stream = session.processStreamingRequest(
               request,
               options.signal ? { signal: options.signal } : undefined,

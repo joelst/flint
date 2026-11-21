@@ -81,7 +81,7 @@
     type CacheInventory,
   } from "$lib/sdk";
   import { evaluateStartupPreload, publishedAccelerationKind, publishedAccelerationLabels } from "$lib/accelerator-readiness";
-  import { failureLogLine, failureNotice, summarizeFailure, type FailureNotice } from "$lib/status-message";
+  import { byomAddMessage, failureLogLine, failureNotice, summarizeFailure, type FailureNotice } from "$lib/status-message";
   import { foundrySdkAboutLine } from "$lib/foundry-about";
   import {
     evaluate as evaluateWatch,
@@ -3495,12 +3495,7 @@
           promptTemplate: byomTemplateDirty() ? (byomTemplate as any) : undefined,
         });
       }
-      let addedMessage = `Added model "${byomName.trim()}" (${mode === "link" ? "linked" : "copied"})`;
-      if (mode === "copy" && result.registrationError) {
-        addedMessage += `. Task registration failed: ${result.registrationError}`;
-      } else if (mode === "copy" && result.registered && result.registrationTask) {
-        addedMessage += `. Task set to ${result.registrationTask}`;
-      }
+      const addedMessage = byomAddMessage(byomName.trim(), mode, result);
       if (result.catalogRefreshRequiresRestart) {
         statusMessage = `${addedMessage}. Restart Flint to let the model catalog detect the change.`;
         appendAppLog(statusMessage, "warn");

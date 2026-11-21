@@ -78,6 +78,21 @@ function fakeSdk({ disposeThrows = false, processRequestThrows = false, processR
 }
 
 describe('createSessionChatClient buffered chat', () => {
+  it.each(['buffered', 'streamed'])('does not dispatch %s after cancellation without native preflight', async (mode) => {
+    const { sdkModule, disposeCalls } = fakeSdk();
+    const buffered = vi.spyOn(sdkModule.ChatSession.prototype, 'processRequest');
+    const streamed = vi.spyOn(sdkModule.ChatSession.prototype, 'processStreamingRequest');
+    const controller = new AbortController();
+    const client = createSessionChatClient({ id: 'm' }, sdkModule);
+    const operation = mode === 'buffered'
+      ? client.completeChat([{ role: 'user', content: 'hi' }], undefined, { signal: controller.signal })
+      : client.completeStreamingChat([{ role: 'user', content: 'hi' }], undefined, { signal: controller.signal })[Symbol.asyncIterator]().next();
+    controller.abort();
+    await expect(operation).rejects.toMatchObject({ name: 'AbortError' });
+    expect(buffered).not.toHaveBeenCalled();
+    expect(streamed).not.toHaveBeenCalled();
+    expect(disposeCalls).toHaveLength(1);
+  });
   it('passes the owning request AbortSignal to one-shot SDK processing', async () => {
     const controller = new AbortController();
     let capturedOptions: unknown;

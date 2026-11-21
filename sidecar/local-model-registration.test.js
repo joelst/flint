@@ -112,6 +112,19 @@ describe('applyLocalModelMetadata', () => {
 });
 
 describe('ensureRegisteredLocalModel', () => {
+  it('does not accept another folder as a successful same-task registration', async () => {
+    const { MutableModelInfo } = metadataClass();
+    const requested = path.join(tempDir(), 'new-model');
+    const existing = path.join(tempDir(), 'old-model');
+    await expect(ensureRegisteredLocalModel({
+      catalog: {
+        async registerModel() { throw new Error('already registered'); },
+        async getModel() { return { path: existing, info: { id: 'llama:1', task: 'chat-completion' } }; },
+        async unregisterModel() { throw new Error('Must not unregister unrelated model'); },
+      },
+      MutableModelInfo, modelPath: requested, modelId: 'llama:1', task: 'chat-completion',
+    })).rejects.toThrow(/different or unreadable path/);
+  });
   it('registers once and disposes the metadata', async () => {
     const { MutableModelInfo, created } = metadataClass();
     const catalog = {
@@ -178,7 +191,7 @@ describe('ensureRegisteredLocalModel', () => {
       },
       async getModel(name) {
         calls.push(`get:${name}`);
-        return { info: { id: 'llama:1', task: 'chat-completion' } };
+        return { path: 'C:/models/llama', info: { id: 'llama:1', task: 'chat-completion' } };
       },
       async unregisterModel() {
         calls.push('unregister');
@@ -537,6 +550,23 @@ describe('linkedLocalRegistrationTargets', () => {
 });
 
 describe('localRegistrationDeletePlan', () => {
+  it('deletes only the selected alias when independent links share a source', () => {
+    const root = tempDir();
+    const cache = path.join(root, 'cache');
+    const source = path.join(root, 'source');
+    fs.mkdirSync(source);
+    fs.writeFileSync(path.join(source, 'model.onnx'), 'keep');
+    const first = path.join(cache, 'Linked', 'first');
+    const second = path.join(cache, 'Linked', 'second');
+    fs.mkdirSync(path.dirname(first), { recursive: true });
+    fs.symlinkSync(source, first, 'junction');
+    fs.symlinkSync(source, second, 'junction');
+    const plan = localRegistrationDeletePlan(cache, source, 'first');
+    expect(plan.junctions).toEqual([first]);
+    removeLocalRegistrationAssets(plan);
+    expect(fs.lstatSync(second).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(path.join(source, 'model.onnx'), 'utf8')).toBe('keep');
+  });
   it('removes an owned copy and leaves a catalog folder and a linked target', () => {
     const root = tempDir();
     const source = path.join(root, 'source');

@@ -23,6 +23,16 @@ export interface FailureNotice {
   advice: string;
 }
 
+export function byomAddMessage(name: string, mode: "copy" | "link", result: Record<string, unknown>): string {
+  let message = `Added model "${name}" (${mode === "link" ? "linked" : "copied"})`;
+  if (typeof result.registrationError === "string" && result.registrationError) {
+    message += `. Task registration failed: ${result.registrationError}`;
+  } else if (result.registered === true && typeof result.registrationTask === "string" && result.registrationTask) {
+    message += `. Task set to ${result.registrationTask}`;
+  }
+  return message;
+}
+
 /**
  * A failure whose recovery advice is too long for the status bar. Returns null for
  * every failure that the one-line summary already covers.

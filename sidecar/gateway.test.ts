@@ -211,6 +211,7 @@ describe('gateway pass-through', () => {
         data: [{ id: 'catalog-model', object: 'model', parent: 'Catalog Model' }],
       }));
     });
+
     gateway = await startGateway({
       listLocalModels: async () => [
         { id: 'external-model', object: 'model', parent: 'External Model' },
@@ -222,6 +223,33 @@ describe('gateway pass-through', () => {
       'catalog-model',
       'external-model',
     ]);
+  });
+
+  it('bounds a hung local model-list merge and ignores its late completion', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ object: 'list', data: [] }));
+    });
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    gateway = await startGateway({
+      bufferedResponseTimeoutMs: 25,
+      listLocalModels: () => held,
+    });
+    const response = request(gateway.publicPort, '/v1/models');
+    let timer;
+    try {
+      const observed = await Promise.race([
+        response,
+        new Promise(resolve => { timer = setTimeout(() => resolve(null), 250); }),
+      ]);
+      expect(observed).toMatchObject({ status: 502 });
+    } finally {
+      clearTimeout(timer);
+      release([]);
+      await response;
+    }
   });
 
   it('forwards a plain GET and returns the upstream body', async () => {

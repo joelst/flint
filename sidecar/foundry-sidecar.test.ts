@@ -3909,6 +3909,7 @@ describe('chatCompletion ChatSession path', () => {
       "const awaitAbort = async (signal) => { if (signal?.aborted) return; await new Promise((resolve) => signal?.addEventListener('abort', resolve, { once: true })); };",
       'class FakeModel {',
       "  constructor() { this.id = 'fake-variant'; this.loaded = false; }",
+      "  get executionProvider() { const failure = streamSteps()[0]?.providerGetterError; if (failure) throw new Error(failure); return undefined; }",
       "  async load() { const failure = streamSteps()[0]?.loadError; if (failure) { note('model-load-failed'); throw new Error(failure); } this.loaded = true; }",
       '  isLoaded() { return this.loaded; }',
       `  async getExecutionProvider() { note('provider-probe'); if (${JSON.stringify(sdkMode)} === 'session-stream-provider-cancel' && fs.readFileSync(process.env.FLINT_TEST_EVENT_LOG, 'utf8').includes('stream-finished')) { note('provider-probe-waiting'); await awaitSignal(); } return 'CPUExecutionProvider'; }`,
@@ -4066,6 +4067,17 @@ describe('chatCompletion ChatSession path', () => {
     await killAndWait(proc);
     rmSync(homeDir, { recursive: true, force: true });
   });
+
+  it('keeps a successful native load successful when an optional provider getter throws', async () => {
+    await startSidecar('session');
+    setStreamSteps([{ providerGetterError: 'native provider getter unavailable' }]);
+    const loaded = reply(3);
+    send({ id: 3, cmd: 'load', alias: 'another-model' });
+    const result = await loaded;
+    expect(result.ok).toBe(true);
+    expect(result.result.acceleration.active).toBe('CPUExecutionProvider');
+    expect(events()).toContain('provider-probe');
+  }, 30000);
 
   it.each(['load', 'chatCompletion'])('reports CUDA allocator guidance over IPC for %s without retrying', async (cmd) => {
     await startSidecar('session');

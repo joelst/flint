@@ -92,6 +92,24 @@ Pass `--packaged-root <release-dir>` to `scripts/byom-gateway-live.mjs` to
 exercise the staged `node.exe`, sidecar, and SDK with an isolated model cache.
 This tests staged resources, not the installed GUI or an installer signature.
 
+### Repeatable Windows runtime qualification
+
+Run `scripts/byom-gateway-live.mjs` using the bundled `node.exe`, with
+`CUDA_VISIBLE_DEVICES` set to an explicitly chosen NVIDIA GPU UUID. The driver
+isolates its cache, hashes source models before/after, requires confirmed
+graceful shutdown, and exits nonzero on a failed or uncertain result.
+
+For a cached catalog chat model, combine `--catalog-alias`, `--catalog-variant`,
+`--model`, `--cancel-stream`, `--concurrent`, `--admission-errors`, `--preflight`,
+and `--require-tools`. Add `--switch-model` and `--switch-variant` to test an
+actual CPU/GPU variant replacement. BYOM copy and link runs use `--model` and
+`--restart`, with `--copy` for the copy case. Add `--packaged-root` to qualify
+staged resources rather than repository runtime files.
+
+These automate native runtime checks, not installed-GUI behavior, installer
+signatures, or updater validation. GUI import/chat/Stop/persistence and
+Benchmark Start/Stop/Resume remain separate release gates.
+
 ---
 
 ## Architecture (short)

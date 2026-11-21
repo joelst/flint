@@ -464,6 +464,7 @@ async function run(modelPath, {
     phase: 'source snapshot',
     sourceUnchanged: null,
     sourceFileCount: 0,
+    accelerators: null,
     ipc: null,
     gateway: null,
     retrieval: null,
@@ -512,6 +513,7 @@ async function run(modelPath, {
     assertReply(await sidecar.send('init', { appName, logLevel: 'error' }), 'init');
     report.phase = 'first accelerator registration';
     const accelerators = assertReply(await sidecar.send('ensureAccelerators'), 'ensureAccelerators').result;
+    report.accelerators = accelerators;
     if ((embeddings || (catalogAlias && /-cuda-/i.test(catalogVariant))
       || (switchVariant && /-cuda-/i.test(switchVariant)))
       && !accelerators?.registeredEps?.includes('CUDAExecutionProvider')) {
@@ -1171,7 +1173,7 @@ async function main() {
   if (report.error) process.exitCode = 2;
 }
 
-export { catalogCacheTarget, parseArgs, stopSidecar, validateBase64Embeddings, validateEmbeddings };
+export { catalogCacheTarget, parseArgs, run, snapshotFolder, stopSidecar, validateBase64Embeddings, validateEmbeddings };
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
