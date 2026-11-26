@@ -1159,6 +1159,47 @@ describe('progress stall notices', () => {
     await download.tracked;
   });
 
+  it('exposes download cancellation and refreshes the cache after native settlement', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+    const onAssignedRequestId = vi.fn();
+    const download = capture(
+      sdk.downloadModel({ alias: 'model-a' }, undefined, undefined, undefined, onAssignedRequestId),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const downloadId = JSON.parse(harness.writes.find((line) => line.includes('"download"'))!).id;
+    expect(onAssignedRequestId).toHaveBeenCalledWith(downloadId);
+
+    const cancellation = sdk.cancelDownload(downloadId);
+    const cancellationOutcome = cancellation.then(
+      (value: boolean) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const cancelLine = harness.writes.find((line) => line.includes('"cancelDownload"'))!;
+    const cancelRequest = JSON.parse(cancelLine);
+    expect(cancelRequest).toMatchObject({ cmd: 'cancelDownload', requestId: downloadId });
+    harness.emitStdout({ id: cancelRequest.id, ok: true, result: { accepted: true } });
+    await expect(cancellationOutcome).resolves.toEqual({ value: true });
+
+    harness.emitStdout({
+      id: downloadId,
+      error: 'Model download was cancelled after native work settled.',
+      certainty: 'cancelled',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const listId = JSON.parse(harness.writes.find((line) => line.includes('"listModels"'))!).id;
+    harness.emitStdout({ id: listId, result: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    const statusId = JSON.parse(harness.writes.find((line) => line.includes('"getStatus"'))!).id;
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    await vi.advanceTimersByTimeAsync(0);
+    const poolId = JSON.parse(harness.writes.find((line) => line.includes('"poolStatus"'))!).id;
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    await download.tracked;
+    expect(download.box.err.certainty).toBe('cancelled');
+  });
+
   it('retires accelerator stall notices when reset makes the outcome unknown', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);

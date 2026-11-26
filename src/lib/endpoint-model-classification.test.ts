@@ -34,6 +34,17 @@ describe('endpoint model classification', () => {
       capabilities: ['speech-input'],
     })).toBeNull();
     expect(endpointModelKind({ alias: 'assistant', task: 'chat-completion' })).toBe('chat');
+    expect(endpointModelKind({ alias: 'coder', task: 'coding' })).toBe('chat');
+    expect(endpointModelKind({ alias: 'coder', capabilities: 'coding' })).toBe('chat');
+    expect(endpointModelKind({ alias: 'coder', capabilities: ['text-generation', 'coding'] })).toBe('chat');
+    expect(endpointModelKind({ alias: 'encoder', task: 'encoding' })).toBeNull();
+    expect(endpointModelKind({ alias: 'encoder', capabilities: 'encoding' })).toBeNull();
+    expect(endpointModelKind({ alias: 'vectors', task: 'embeddings', capabilities: 'coding' })).toBe('embed');
+    expect(endpointModelKind({
+      alias: 'listener',
+      task: 'automatic-speech-recognition',
+      capabilities: 'coding',
+    })).toBe('speech');
     expect(endpointModelKind({
       alias: 'opaque-audio-model',
       task: 'stt',

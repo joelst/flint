@@ -51,6 +51,7 @@ The sidebar is grouped by workflow:
 ### Download / load / unload models
 
 - **Models** tab: search, filter, download with progress, load into the pool.  
+- While a model download is active, its button becomes **Cancel download**. Cancellation is cooperative: Flint requests it, keeps the operation in flight until the runtime settles, then refreshes the cache view. A completion race can still produce a successful download.
 - Multiple models can stay loaded when memory allows (see **Monitor**).  
 - Update badges: newer catalog versions for the **same** acceleration track (CPU/GPU/NPU), not cross-grade noise.
 - Listing/refreshing the catalog contacts Microsoft's Foundry Local model catalog over the network (separate from inference, which stays local). Flint checks it on startup by default; disable **Settings → Startup → "Check model catalog on startup"** to skip recommendations and configured model preloads for that launch. **Refresh catalog** later populates the Models view but does not replay startup-only work. Accelerator setup is separate: Flint runs it automatically at startup, and Foundry Local may download execution-provider components when needed. **Recheck Providers** on the Models page asks Foundry Local to register each execution provider that is not registered. CUDA and WebGPU are downloaded into Flint's own cache, so for those two it removes the cached copy first and Foundry Local downloads a new one. The other providers (QNN, OpenVINO, DirectML, NvTensorRTRTX) come from Windows ML or the runtime and have no Flint cache; Recheck only registers them again, which can still fetch their package. When every provider is already registered, it does nothing. A CUDA or WebGPU cache whose files are still loaded, so Windows will not delete them, is left in place and not downloaded again. The status line names any provider that is still not registered afterward. Model actions such as download or import may also require network access or refresh the catalog afterward.
@@ -107,6 +108,7 @@ not currently exposed.
 - Persona is beside the message controls. The gear beside Send opens and closes the
   **Generation settings** drawer. The conversation list starts collapsed. The panel button
   opens it (tooltip **Expand conversations**) and closes it (tooltip **Collapse conversations**).
+  Foundry Local does not support nonzero Frequency penalty; set it to 0 before sending.
   **Export conversations** is the download icon and stays available while the list is collapsed.
   **New conversation** is the plus icon.
   Qwen3 and QwQ start a reply inside reasoning. Playground keeps that text under **Thinking**
@@ -168,9 +170,9 @@ not currently exposed.
 
 ### Bring Your Own Model (BYOM) and External Linking
 
-- **Import local ONNX models**: Add custom ONNX models (containing `genai_config.json` and `inference_model.json`) into Flint's local cache directly from the Models tab.
-- **Embedding models**: folders whose architecture or name contains `embed` import without a chat prompt template. The gateway supports `POST /v1/embeddings` with autoload, and the sidecar has an `embedTexts` command, but the Foundry catalog currently ships no embedding models — there is no Flint-verified end-to-end embedding recipe yet.
-- **Link external model folders**: Connect existing models stored elsewhere on your drive using directory junctions without duplicating weights across folders.
+- **Import local ONNX models**: Add an ONNX GenAI folder with `genai_config.json`, a tokenizer, and an `.onnx` file from Models. A copied import can supply its own `inference_model.json` or let Flint create one in Flint's copy; Flint does not modify the source.
+- **Embedding models**: folders whose architecture or name contains `embed` import without a chat prompt template. The gateway supports `POST /v1/embeddings` with autoload, and the sidecar has an `embedTexts` command. SDK/core 2.4.0 lists `qwen3-embedding-0.6b` and `qwen3-embedding-8b`; both cached CUDA variants passed gateway and IPC probes. A separate [Qwen3 embedding BYOM recipe](spikes/qwen3-embedding-olive-recipe.md) passed an isolated Continue indexing replay on 2.4.0; it is not yet a 2.4.1 installed-app qualification.
+- **Link external model folders**: Connect an existing folder with `inference_model.json` using a directory junction without duplicating weights. Flint cannot add missing metadata to a linked source.
 - **Prompt template authoring**: Validate and customize Jinja/chat prompt templates using the `{Content}` placeholder to ensure proper message formatting. Embedding imports skip this.
 
 ### Model Cache Inventory

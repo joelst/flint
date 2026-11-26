@@ -432,6 +432,89 @@ function toolErrorCall(raw: unknown, fallbackId: string): ChatToolCall {
   };
 }
 
+const CONTENT_TOOL_PREFIX = '<|python_tag|>';
+
+/**
+ * Another tool round is offered only while the cap remains and the model emits
+ * native tool calls. A call recovered from assistant text (Llama 3.2) is followed
+ * by a tool-free answer. That template otherwise requires another function-call JSON.
+ */
+export function offerAnotherWebToolRound(input: {
+  offerWebTools: boolean;
+  webToolRounds: number;
+  maxWebToolRounds: number;
+  contentToolAnswer: boolean;
+}): boolean {
+  return input.offerWebTools
+    && input.webToolRounds < input.maxWebToolRounds
+    && !input.contentToolAnswer;
+}
+
+/** Ids already attached to assistant tool calls or tool results in this transcript. */
+export function usedToolCallIds(messages: unknown): string[] {
+  if (!Array.isArray(messages)) return [];
+  const ids: string[] = [];
+  for (const message of messages) {
+    if (!message || typeof message !== 'object') continue;
+    const record = message as { tool_calls?: unknown; tool_call_id?: unknown };
+    if (typeof record.tool_call_id === 'string' && record.tool_call_id) ids.push(record.tool_call_id);
+    if (!Array.isArray(record.tool_calls)) continue;
+    for (const call of record.tool_calls) {
+      if (!call || typeof call !== 'object') continue;
+      const id = (call as { id?: unknown }).id;
+      if (typeof id === 'string' && id) ids.push(id);
+    }
+  }
+  return ids;
+}
+
+function nextContentToolCallId(usedIds: Iterable<string> | undefined): string | null {
+  const taken = new Set(usedIds ?? []);
+  for (let n = 1; n <= 1000; n += 1) {
+    const id = `call-content-${n}`;
+    if (!taken.has(id)) return id;
+  }
+  return null;
+}
+
+/**
+ * Llama 3.2 puts a tool call in the assistant text when Foundry does not emit
+ * `tool_calls`. The whole message must be one `web_search` or `web_fetch`
+ * object (`parameters` or `arguments`). A sentence that contains that JSON
+ * is not a call. The id skips any id already in the transcript. Foundry
+ * rejects a repeated tool call id.
+ */
+export function contentWebToolCalls(
+  content: unknown,
+  usedIds?: Iterable<string>,
+): ChatToolCall[] | null {
+  if (typeof content !== 'string') return null;
+  let text = content.trim();
+  if (text.startsWith(CONTENT_TOOL_PREFIX)) text = text.slice(CONTENT_TOOL_PREFIX.length).trim();
+  if (!text.startsWith('{') || !text.endsWith('}')) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  const keys = Object.keys(body);
+  const argKey = keys.includes('parameters') ? 'parameters' : keys.includes('arguments') ? 'arguments' : '';
+  if (keys.length !== 2 || typeof body.name !== 'string' || !argKey) return null;
+  if (body.name !== 'web_search' && body.name !== 'web_fetch') return null;
+  const args = body[argKey];
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
+  const id = nextContentToolCallId(usedIds);
+  if (!id) return null;
+  return [{
+    id,
+    type: 'function',
+    function: { name: body.name, arguments: JSON.stringify(args) },
+  }];
+}
+
 /**
  * More than two calls, or a missing or duplicate id, rejects the whole batch.
  * A bad argument becomes that call's error so one malformed call does not fail the send.

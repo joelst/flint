@@ -95,6 +95,22 @@ describe('modelRejection', () => {
       .toEqual({ kind: 'not-found', model: 'qwen3-0.6b' });
   });
 
+  it('classifies the SDK 2.4.0 not-found 404 with its unquoted model name', () => {
+    const sdk24NotFound = 'Model not found: qwen3-embedding-0.6b';
+    const wire = JSON.stringify({
+      error: {
+        code: null,
+        message: sdk24NotFound,
+        param: null,
+        type: 'invalid_request_error',
+      },
+    });
+    expect(modelRejection(404, sdk24NotFound))
+      .toEqual({ kind: 'not-found', model: 'qwen3-embedding-0.6b' });
+    expect(modelRejection(404, wire))
+      .toEqual({ kind: 'not-found', model: 'qwen3-embedding-0.6b' });
+  });
+
   it('still classifies the SDK 1.x wording', () => {
     expect(modelRejection(400, legacy)).toEqual({ kind: 'not-loaded', model: 'qwen3-0.6b' });
     expect(modelRejection(400, JSON.stringify({ error: { message: legacy } })))
@@ -135,9 +151,11 @@ describe('modelRejection', () => {
     expect(modelRejection(400, 'Model validation failed because it is not loaded')).toBeNull();
     expect(modelRejection(400, 'The model is not loaded')).toBeNull();
     expect(modelRejection(400, '')).toBeNull();
-    // Only the router's own phrase means it does not know the model; a bare fragment does not.
+    // Only the router's own phrases mean it does not know the model; a bare fragment or
+    // a message with extra explanation does not.
     expect(modelRejection(404, "No model matching 'qwen3-0.6b'")).toBeNull();
     expect(modelRejection(404, "Adapter not found: No model matching 'qwen3-0.6b'")).toBeNull();
+    expect(modelRejection(404, 'Model not found: qwen3-0.6b due to a route error')).toBeNull();
     expect(modelRejection(404, 'Not Found')).toBeNull();
     expect(modelRejection(404, JSON.stringify({ error: { message: "Route '/v1/nope' not found" } }))).toBeNull();
   });

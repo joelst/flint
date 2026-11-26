@@ -83,6 +83,7 @@ export const COMMAND_EFFECTS: Record<SidecarCommandName, OperationEffect> = {
   embedTexts: 'effectful',
 
   // Records an intent to stop. It does not itself confirm that anything stopped.
+  cancelDownload: 'effectful',
   cancelChatRequest: 'effectful',
 };
 

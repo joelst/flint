@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { errorText, failureLogLine, failureNotice, summarizeFailure } from "./status-message";
+import { byomAddMessage, errorText, failureLogLine, failureNotice, summarizeFailure } from "./status-message";
 
 const NATIVE_LOAD_ERROR = new Error(
   [
@@ -9,6 +9,18 @@ const NATIVE_LOAD_ERROR = new Error(
     "   at Microsoft.AI.Foundry.Local.Core.Pool.Ensure(String alias)",
   ].join("\n"),
 );
+
+describe("byomAddMessage", () => {
+  it.each(["copy", "link"] as const)("surfaces task registration failure after a durable %s", (mode) => {
+    expect(byomAddMessage("demo", mode, { registrationError: "catalog identity conflict" }))
+      .toContain("Task registration failed: catalog identity conflict");
+  });
+
+  it.each(["copy", "link"] as const)("reports the registered task after a successful %s", (mode) => {
+    expect(byomAddMessage("demo", mode, { registered: true, registrationTask: "chat-completion" }))
+      .toContain("Task set to chat-completion");
+  });
+});
 
 describe("summarizeFailure", () => {
   it("keeps the CUDA status line short and moves the advice into a notice", () => {

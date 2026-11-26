@@ -19,6 +19,7 @@ import {
   TEMPLATE_ROLES,
   TEMPLATE_PRESETS,
 } from './prompt-template.js';
+import { looksLikeSpeech } from './model-classification.js';
 
 export { selectPromptTemplate, validatePromptTemplate, TEMPLATE_ROLES, TEMPLATE_PRESETS };
 
@@ -65,6 +66,48 @@ export function sanitizeModelName (raw) {
 export function isEmbeddingModel (options) {
   const blob = [options?.architecture, options?.dirName, options?.task].filter(Boolean).join(' ').toLowerCase();
   return blob.includes('embed');
+}
+
+/** Session tasks Foundry Local accepts on a local registration. `coding` is the text-only chat task, and SDK 2.4.0 still accepts it. */
+export const LOCAL_MODEL_TASK = /** @type {const} */ ({
+  chat: 'chat-completion',
+  vision: 'vision-language-chat',
+  embeddings: 'embeddings',
+  speech: 'automatic-speech-recognition',
+  coding: 'coding',
+});
+
+/**
+ * @param {{ architecture?: string|null, task?: string|null }} [options]
+ */
+function isCodingRegistration (options) {
+  const task = typeof options?.task === 'string' ? options.task.trim() : '';
+  if (/^coding$/i.test(task)) return true;
+  const architecture = typeof options?.architecture === 'string' ? options.architecture : '';
+  return /\bcoding\b/i.test(architecture);
+}
+
+/**
+ * Task to register for a folder the public catalog has never labeled.
+ * Embeddings, speech, and vision win over coding. Coding comes only from the
+ * folder's own task or architecture, not from the directory name.
+ *
+ * @param {{ architecture?: string|null, dirName?: string|null, task?: string|null }} [options]
+ * @returns {'chat-completion'|'vision-language-chat'|'embeddings'|'automatic-speech-recognition'|'coding'}
+ */
+export function localModelTask (options) {
+  if (isEmbeddingModel(options)) return LOCAL_MODEL_TASK.embeddings;
+  const blob = [options?.architecture, options?.dirName, options?.task]
+    .filter((value) => typeof value === 'string' && value)
+    .join(' ');
+  if (looksLikeSpeech(blob) || /automatic-speech-recognition/i.test(blob)) {
+    return LOCAL_MODEL_TASK.speech;
+  }
+  if (/\b(?:vl|vision)\b|vision-language|multimodal/i.test(blob)) {
+    return LOCAL_MODEL_TASK.vision;
+  }
+  if (isCodingRegistration(options)) return LOCAL_MODEL_TASK.coding;
+  return LOCAL_MODEL_TASK.chat;
 }
 
 /**

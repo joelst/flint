@@ -6,6 +6,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const { validateKoffiNative } = require('./stage-koffi-native.cjs');
+const { isStrictSemver } = require('./release-metadata.cjs');
 const {
   describeInvalidNativeFile,
   platformKeyForTriple,
@@ -20,6 +22,7 @@ const root = path.resolve(__dirname, '..');
 function parseArgs(argv) {
   let target = process.env.FLINT_VERIFY_TARGET || null;
   let requireBuild = false;
+  let version = null;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--target') {
@@ -29,12 +32,15 @@ function parseArgs(argv) {
       target = arg.slice('--target='.length);
     } else if (arg === '--require-build') {
       requireBuild = true;
+    } else if (arg === '--version') {
+      version = argv[++i];
+      if (!isStrictSemver(version)) throw new Error('--version requires a valid semver version.');
     }
   }
-  return { target: target || null, requireBuild };
+  return { target: target || null, requireBuild, version };
 }
 
-const { target: buildTarget, requireBuild } = parseArgs(process.argv.slice(2));
+const { target: buildTarget, requireBuild, version: buildVersion } = parseArgs(process.argv.slice(2));
 const targetPlatformKey = buildTarget ? platformKeyForTriple(buildTarget) : null;
 if (buildTarget && !targetPlatformKey) {
   console.error(`Unknown --target triple: ${buildTarget}`);
@@ -82,15 +88,30 @@ function checkPayloadAt(label, dir) {
   return validation.files;
 }
 
+function checkKoffiAt(label, koffiRoot, nativeRoot) {
+  if (platformKey !== 'win32-x64') return;
+  try {
+    validateKoffiNative(koffiRoot, nativeRoot, platformKey);
+    ok(`${label}: Windows x64 koffi CUDA binding`);
+  } catch (error) {
+    bad(`${label}: ${error.message}`);
+  }
+}
+
 console.log('Verifying Foundry Local SDK packaging prerequisites...');
 console.log(`Platform: ${platformKey}`);
+checkKoffiAt(
+  'koffi staging',
+  path.join(root, 'node_modules', 'koffi'),
+  path.join(root, 'runtime', 'koffi-stage', '@koromix'),
+);
 
-const webToolSources = ['web-tool.js', 'web-address-policy.js'];
-for (const file of webToolSources) {
+const requiredSidecarSources = ['web-tool.js', 'web-address-policy.js', 'chat-parameter-policy.js', 'embedding-encoding.js'];
+for (const file of requiredSidecarSources) {
   if (!fs.existsSync(path.join(root, 'sidecar', file))) {
     bad(`missing sidecar/${file}`);
   } else {
-    ok(`isolated web helper source: sidecar/${file}`);
+    ok(`sidecar runtime source: sidecar/${file}`);
   }
 }
 
@@ -142,64 +163,80 @@ if (!fs.existsSync(sdkRoot)) {
   expectedFiles = checkPayloadAt('node_modules', sdkRoot);
 }
 
-// Staged Tauri resource tree (present after a local release build)
-// Flattened map-form: <release>/foundry-local-sdk
-const stagedSdk = path.join(releaseDir, 'foundry-local-sdk');
+// macOS resources are inside the .app; Windows stages them beside the executable.
+const resourceDir = platformKey.startsWith('darwin-')
+  ? path.join(releaseDir, 'bundle', 'macos', 'Flint.app', 'Contents', 'Resources')
+  : releaseDir;
+const stagedSdk = path.join(resourceDir, 'foundry-local-sdk');
+const nsiPath = path.join(releaseDir, 'nsis', 'x64', 'installer.nsi');
+const wixPath = path.join(releaseDir, 'wix', 'x64', 'main.wxs');
 if (fs.existsSync(releaseDir)) {
-  console.log(`Checking release resource staging (${path.relative(root, releaseDir)})...`);
-  for (const file of webToolSources) {
-    if (!fs.existsSync(path.join(releaseDir, 'sidecar', file))) {
-      bad(`staged resources missing sidecar/${file}`);
-    } else {
-      ok(`staged resources include sidecar/${file}`);
-    }
-  }
-  if (!fs.existsSync(stagedSdk)) {
-    bad(
-      'no staged foundry-local-sdk under target/release (expected foundry-local-sdk/) — run tauri build'
-    );
+  const looseResources = fs.existsSync(stagedSdk) ||
+    fs.existsSync(path.join(resourceDir, 'sidecar')) ||
+    fs.existsSync(path.join(resourceDir, 'koffi'));
+  if (platformKey === 'win32-x64' && !looseResources) {
+    // Tauri can package directly from source paths without copying resources beside the exe.
+    console.log('Checking Windows installer resource manifests (no loose release resources)...');
   } else {
-    checkPayloadAt(
-      `staged resources (${path.relative(root, stagedSdk)})`,
-      stagedSdk,
-    );
+    console.log(`Checking bundled resources (${path.relative(root, resourceDir)})...`);
+    checkKoffiAt('bundled resources', path.join(resourceDir, 'koffi'), path.join(resourceDir, '@koromix'));
+    for (const file of requiredSidecarSources) {
+      if (!fs.existsSync(path.join(resourceDir, 'sidecar', file))) {
+        bad(`bundled resources missing sidecar/${file}`);
+      } else {
+        ok(`bundled resources include sidecar/${file}`);
+      }
+    }
+    if (!fs.existsSync(stagedSdk)) {
+      bad(
+        `no bundled foundry-local-sdk under ${path.relative(root, resourceDir)} — run tauri build`
+      );
+    } else {
+      checkPayloadAt(
+        `bundled resources (${path.relative(root, stagedSdk)})`,
+        stagedSdk,
+      );
+    }
   }
 
   // Prefer definitive checks; size is only a coarse safety net.
   // NSIS compresses much better than MSI (good builds: MSI ~24MB, NSIS ~17MB;
   // broken without core: MSI ~6MB, NSIS ~4MB).
-  let appVersion = null;
-  try {
-    appVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
-  } catch {
-    /* ignore */
+  let appVersion = buildVersion;
+  if (!appVersion) {
+    try {
+      appVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+    } catch {
+      /* ignore */
+    }
   }
   const versionNeedle = appVersion ? `_${appVersion}_` : null;
 
-  // Tauri-generated NSIS script lists every bundled file — definitive for NSIS.
-  const nsiPath = path.join(releaseDir, 'nsis', 'x64', 'installer.nsi');
-  if (fs.existsSync(nsiPath)) {
-    const nsi = fs.readFileSync(nsiPath, 'utf8');
-    for (const file of webToolSources) {
-      if (nsi.includes(file)) {
-        ok(`NSIS script includes ${file}`);
+  // Tauri-generated WiX/NSIS manifests list the files each Windows installer consumes.
+  const manifests = [
+    ['MSI', wixPath],
+    ['NSIS', nsiPath],
+  ].filter(([, file]) => fs.existsSync(file));
+  if (platformKey === 'win32-x64' && !looseResources && manifests.length === 0) {
+    bad('no Windows installer resource manifest found; cannot verify bundled resources');
+  }
+  for (const [label, manifestPath] of manifests) {
+    const manifest = fs.readFileSync(manifestPath, 'utf8');
+    const requiredPaths = [
+      ...requiredSidecarSources.map((file) => `sidecar/${file}`),
+      ...expectedFiles.map((file) => `prebuilds/${platformKey}/${file.name}`),
+      '@koromix/koffi-win32-x64/package.json',
+    ];
+    for (const file of requiredPaths) {
+      const fileRe = new RegExp(file.split('/').map(escapeRegExp).join('[\\\\/]'), 'i');
+      if (fileRe.test(manifest)) {
+        ok(`${label} script includes ${file}`);
       } else {
-        bad(`NSIS script missing ${file}: ${path.relative(root, nsiPath)}`);
+        bad(`${label} script missing ${file}: ${path.relative(root, manifestPath)}`);
       }
     }
-    // NSI lists each resource with File /oname=...prebuilds\win32-x64\...
-    for (const file of expectedFiles || []) {
-      const fileRe = new RegExp(
-        `prebuilds[\\\\/]${escapeRegExp(platformKey)}[\\\\/]${escapeRegExp(file.name)}`,
-        'i',
-      );
-      if (fileRe.test(nsi) || nsi.includes(file.name)) {
-        ok(`NSIS script includes ${file.name}`);
-      } else {
-        bad(`NSIS script missing ${file.name}: ${path.relative(root, nsiPath)}`);
-      }
-    }
-  } else {
+  }
+  if (!fs.existsSync(nsiPath)) {
     console.log('  (no installer.nsi yet — skipped NSIS file-list check)');
   }
 
@@ -254,6 +291,7 @@ if (failed) {
   console.error('\nVerification FAILED. Fix with:');
   console.error('  npm run ensure:node');
   console.error('  node scripts/ensure-foundry-native.cjs');
+  console.error('  npm run stage:koffi');
   console.error('  npm run tauri:build:local');
   console.error('  npm run verify:bundle');
   process.exit(1);

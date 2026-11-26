@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { assertSpeechModelSupported, transcribeSpeech } from './speech-engine.js';
+import { PINNED_FOUNDRY_SDK_VERSION } from './foundry-runtime-pin.js';
 
 function buildWav ({ sampleRate = 16000, channels = 1, bitsPerSample = 16, extraChunk = false } = {}) {
   const data = new Uint8Array(6400);
@@ -204,7 +205,7 @@ describe('transcribeSpeech', () => {
     })).rejects.toMatchObject({
       name: 'SpeechEngineError',
       code: 'unsupported-by-runtime',
-      message: expect.stringContaining('Foundry Local SDK 2.0.1'),
+      message: expect.stringContaining(`Foundry Local SDK ${PINNED_FOUNDRY_SDK_VERSION}`),
     });
     expect(createAudioClient).not.toHaveBeenCalled();
     expect(state.sessionDisposed).toBe(true);

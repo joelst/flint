@@ -196,4 +196,5 @@ complete build and publication procedures.
 Describe the user problem, the Flint seam used, the new command or data shape,
 failure and cancellation semantics, tests, and any new resource or permission.
 Keep the change behind existing runtime ownership and document whether it is
-part of the published stable surface or remains a later backlog feature. The published stable release is 0.9.2. The next release from this tree is 0.10.0.
+part of the published stable surface or remains a later backlog feature. The
+published stable release is 0.10.0; 0.11.0 is the next release in qualification.

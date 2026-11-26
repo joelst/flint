@@ -80,6 +80,9 @@ jobs:
       - name: Stage bundled Node (externalBin)
         run: npm run ensure:node
 
+      - name: Stage koffi native resources
+        run: npm run stage:koffi
+
       - name: Validate updater configuration
         shell: bash
         run: |
@@ -225,6 +228,9 @@ jobs:
       - name: Stage bundled Node (externalBin)
         run: npm run ensure:node
 
+      - name: Stage koffi native resources
+        run: npm run stage:koffi
+
       # Packaging prerequisites and a real sidecar-runtime smoke. These catch the
       # class of bug that only shows up in an installed build, which is invisible
       # to the unit tests and shipped broken through several green releases.
@@ -246,6 +252,11 @@ jobs:
       - name: Runtime smoke (Windows debug exe)
         if: matrix.os == 'windows-latest'
         run: npm run smoke:runtime
+
+      - name: Settings GUI smoke (Windows debug exe)
+        if: matrix.os == 'windows-latest'
+        timeout-minutes: 5
+        run: npm run smoke:gui:windows
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
